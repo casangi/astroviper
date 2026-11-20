@@ -29,6 +29,7 @@
  */
 
 #include "../include/hclean.hpp"
+#include "scalar_buffer.hpp"
 #include <cmath>
 #include <algorithm>
 #include <atomic>
@@ -59,7 +60,7 @@ Box mask_bounding_box(const bool* mask, int nx,
     Box box{xend, yend, -1, -1};
     for (int j = ybeg; j < yend; ++j)
         for (int i = xbeg; i < xend; ++i)
-            if (mask[static_cast<std::size_t>(j) * nx + i]) {
+            if (astroviper::scalar_load(mask, static_cast<std::size_t>(j) * nx + i)) {
                 box.i0 = std::min(box.i0, i); box.j0 = std::min(box.j0, j);
                 box.i1 = std::max(box.i1, i); box.j1 = std::max(box.j1, j);
             }
@@ -89,8 +90,8 @@ void maximg(const T* limagestep, int domask, const bool* lmask,
 
     for (int iy = 0; iy < ny; ++iy) {
         for (int ix = 0; ix < nx; ++ix) {
-            if ((domask == 0) || lmask[iy * nx + ix]) {
-                T wpeak = limagestep[iy * nx + ix];
+            if ((domask == 0) || astroviper::scalar_load(lmask, iy * nx + ix)) {
+                T wpeak = astroviper::scalar_load(limagestep, iy * nx + ix);
 
                 if (wpeak > fmax) {
                     fmax = wpeak;
@@ -193,7 +194,7 @@ void clean(T* limage, T* limagestep, const T* lpsf,
         }
 
         // Get actual value (with sign) at peak location
-        maxval = limagestep[py * nx + px];
+        maxval = astroviper::scalar_load(limagestep, py * nx + px);
 
         // Calculate adaptive threshold if requested
         T cthres;
@@ -237,7 +238,7 @@ void clean(T* limage, T* limagestep, const T* lpsf,
 
         // Add component to model and subtract from residual
         T pv = gain * maxval;
-        limage[py * nx + px] += pv;
+        astroviper::scalar_add(limage, py * nx + px, pv);
         if (history != nullptr) {
             history->add_component(maxval, py, px, pv);
         }
@@ -255,8 +256,7 @@ void clean(T* limage, T* limagestep, const T* lpsf,
                     continue; // Skip out-of-bounds
                 }
 
-                limagestep[iy * nx + ix] -=
-                    pv * lpsf[static_cast<std::size_t>(psf_y) * psf_nx + psf_x];
+                astroviper::scalar_sub(limagestep, iy * nx + ix, pv * astroviper::scalar_load(lpsf, static_cast<std::size_t>(psf_y) * psf_nx + psf_x));
             }
         }
     }
@@ -349,11 +349,11 @@ void clean_cube(T* residual_cube, T* model_cube, const T* psf_cube,
             clean<T>(model, residual, psf,
                      domask, mask,
                      nx, ny, psf_nx, psf_ny, xbeg, xend, ybeg, yend,
-                     max_iter_per_cycle_updated[plane], 0, iter_val, gain, thres[plane], cspeedup,
+                     astroviper::scalar_load(max_iter_per_cycle_updated, plane), 0, iter_val, gain, astroviper::scalar_load(thres, plane), cspeedup,
                      noop_msgput, noop_stopnow, divergence, reason,
                      (history == nullptr) ? nullptr : history + plane);
-            iter_out[plane] = iter_val;
-            stop_out[plane] = reason;
+            astroviper::scalar_store(iter_out, plane, iter_val);
+            astroviper::scalar_store(stop_out, plane, reason);
         }
     };
 
@@ -502,7 +502,7 @@ void clean_cube_many_threads(T* residual_cube, T* model_cube, const T* psf_cube,
     std::vector<char> active(nplanes, 1);
     std::vector<PlaneStopTest<T>> stop_test(nplanes);
     for (int pl = 0; pl < nplanes; ++pl) {
-        stop_out[pl] = STOP_NONE;
+        astroviper::scalar_store(stop_out, pl, STOP_NONE);
     }
     // Pixels the peak search of every plane covers: the denominators of the
     // recorded RMS (only with an iteration history).
@@ -533,7 +533,7 @@ void clean_cube_many_threads(T* residual_cube, T* model_cube, const T* psf_cube,
     // Outer loop bound: the largest remaining budget over all planes.
     int max_iter_over_planes = 0;
     for (int pl = 0; pl < nplanes; ++pl) {
-        if (max_iter_per_cycle_updated[pl] > max_iter_over_planes) max_iter_over_planes = max_iter_per_cycle_updated[pl];
+        if (astroviper::scalar_load(max_iter_per_cycle_updated, pl) > max_iter_over_planes) max_iter_over_planes = astroviper::scalar_load(max_iter_per_cycle_updated, pl);
     }
 
     int nthreads = processing_function_threads;
@@ -569,7 +569,7 @@ void clean_cube_many_threads(T* residual_cube, T* model_cube, const T* psf_cube,
                 const int pl = static_cast<int>(r / ny);
                 const int iy = static_cast<int>(r % ny);
                 const Box& box = mask_boxes[pl];
-                if (!active[pl] || it >= max_iter_per_cycle_updated[pl] || iy < box.j0 || iy > box.j1) {
+                if (!active[pl] || it >= astroviper::scalar_load(max_iter_per_cycle_updated, pl) || iy < box.j0 || iy > box.j1) {
                     row_max[r] = static_cast<T>(-1);
                     continue;
                 }
@@ -589,7 +589,7 @@ void clean_cube_many_threads(T* residual_cube, T* model_cube, const T* psf_cube,
         // ---- serial per-plane combine + convergence + model update ----
         bool any_active = false;
         for (int pl = 0; pl < nplanes; ++pl) {
-            if (!active[pl] || it >= max_iter_per_cycle_updated[pl]) continue;
+            if (!active[pl] || it >= astroviper::scalar_load(max_iter_per_cycle_updated, pl)) continue;
             const Box& box = mask_boxes[pl];
             T best = static_cast<T>(-1);
             int py = box.j0, px = box.i0;
@@ -607,32 +607,32 @@ void clean_cube_many_threads(T* residual_cube, T* model_cube, const T* psf_cube,
             if (best == static_cast<T>(0)) { py = ybeg; px = xbeg; }
             // The search summed the squares of the residual the plane's
             // previous iteration left: its RMS, as in clean<T>.
-            if (history != nullptr && iter_out[pl] > 0) {
+            if (history != nullptr && astroviper::scalar_load(iter_out, pl) > 0) {
                 history[pl].rms.push_back(std::sqrt(sum_squares / n_searched[pl]));
             }
-            T cthres = thres[pl];
+            T cthres = astroviper::scalar_load(thres, pl);
             if (cspeedup > zero_val) {
-                cthres = thres[pl] * std::pow(two_val, static_cast<T>(it) / cspeedup);
+                cthres = astroviper::scalar_load(thres, pl) * std::pow(two_val, static_cast<T>(it) / cspeedup);
             }
             // Threshold and divergence tests, identical to clean<T>.
             const int reason = stop_test[pl].check(best, sum_squares, cthres, divergence);
             if (reason != STOP_NONE) {
                 active[pl] = 0;
-                stop_out[pl] = reason;
+                astroviper::scalar_store(stop_out, pl, reason);
                 continue;
             }
             T* res = residual_cube + static_cast<std::size_t>(pl) * plane_size;
             T* mod = model_cube + static_cast<std::size_t>(pl) * plane_size;
-            T maxval = res[static_cast<std::size_t>(py) * nx + px];
+            T maxval = astroviper::scalar_load(res, static_cast<std::size_t>(py) * nx + px);
             T pv = gain * maxval;
-            mod[static_cast<std::size_t>(py) * nx + px] += pv;
+            astroviper::scalar_add(mod, static_cast<std::size_t>(py) * nx + px, pv);
             if (history != nullptr) {
                 history[pl].add_component(maxval, py, px, pv);
             }
             peak_y[pl] = py;
             peak_x[pl] = px;
             peak_pv[pl] = pv;
-            iter_out[pl] += 1;
+            astroviper::scalar_add(iter_out, pl, 1);
             any_active = true;
         }
         if (!any_active) break;
@@ -642,7 +642,7 @@ void clean_cube_many_threads(T* residual_cube, T* model_cube, const T* psf_cube,
             for (long r = r0; r < r1; ++r) {
                 const int pl = static_cast<int>(r / ny);
                 const int iy = static_cast<int>(r % ny);
-                if (!active[pl] || it >= max_iter_per_cycle_updated[pl]) continue;
+                if (!active[pl] || it >= astroviper::scalar_load(max_iter_per_cycle_updated, pl)) continue;
                 const int py = peak_y[pl];
                 const int px = peak_x[pl];
                 const T pv = peak_pv[pl];
@@ -665,7 +665,7 @@ void clean_cube_many_threads(T* residual_cube, T* model_cube, const T* psf_cube,
                 for (int ix = x1; ix <= x2; ++ix) {
                     const int psf_x = psf_nx / 2 + ix - px;
                     if (psf_x < 0 || psf_x >= psf_nx) continue;
-                    res[ix] -= pv * psf_row[psf_x];
+                    astroviper::scalar_sub(res, ix, pv * astroviper::scalar_load(psf_row, psf_x));
                 }
             }
         });
@@ -673,9 +673,9 @@ void clean_cube_many_threads(T* residual_cube, T* model_cube, const T* psf_cube,
 
     // Planes that no stop test ended ran their whole budget.
     for (int pl = 0; pl < nplanes; ++pl) {
-        if (stop_out[pl] == STOP_NONE && max_iter_per_cycle_updated[pl] > 0
-            && iter_out[pl] >= max_iter_per_cycle_updated[pl]) {
-            stop_out[pl] = STOP_MAX_ITER;
+        if (astroviper::scalar_load(stop_out, pl) == STOP_NONE && astroviper::scalar_load(max_iter_per_cycle_updated, pl) > 0
+            && astroviper::scalar_load(iter_out, pl) >= astroviper::scalar_load(max_iter_per_cycle_updated, pl)) {
+            astroviper::scalar_store(stop_out, pl, STOP_MAX_ITER);
         }
     }
 

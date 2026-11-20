@@ -558,9 +558,8 @@ class TestDegridOtherSupports(unittest.TestCase):
 
 
 def test_anti_degrid_native_alignment_contract(unaligned_array):
-    """Reject unsafe buffers before writes; equivalent dtypes remain valid."""
+    """Use external unaligned buffers in place and retain equivalent dtype support."""
     import numpy as np
-    import pytest
 
     from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
         anti_alias_degrid,
@@ -588,21 +587,25 @@ def test_anti_degrid_native_alignment_contract(unaligned_array):
         processing_function_threads=1,
     )
     kwargs = base
-    anti_alias_degrid(
-        **{k: v.copy() if isinstance(v, np.ndarray) else v for k, v in kwargs.items()}
-    )
+    reference = {
+        k: v.copy() if isinstance(v, np.ndarray) else v for k, v in kwargs.items()
+    }
+    anti_alias_degrid(**reference)
     for key, value in kwargs.items():
         if not isinstance(value, np.ndarray) or value.dtype.alignment == 1:
             continue
-        trial = {
-            k: v.copy() if isinstance(v, np.ndarray) else v for k, v in kwargs.items()
-        }
-        trial[key] = unaligned_array(value)
-        before = {k: v.copy() for k, v in trial.items() if isinstance(v, np.ndarray)}
-        with pytest.raises(ValueError, match="naturally aligned"):
+        for offset in range(1, value.dtype.alignment):
+            trial = {
+                k: v.copy() if isinstance(v, np.ndarray) else v
+                for k, v in kwargs.items()
+            }
+            trial[key] = unaligned_array(value, offset)
             anti_alias_degrid(**trial)
-        for name, expected in before.items():
-            np.testing.assert_array_equal(trial[name], expected)
+            for name, expected in reference.items():
+                if isinstance(expected, np.ndarray):
+                    np.testing.assert_array_equal(trial[name], expected)
+            assert trial[key].base[0] == 0xA5
+            assert trial[key].base[-1] == 0xA5
 
     import pickle
 

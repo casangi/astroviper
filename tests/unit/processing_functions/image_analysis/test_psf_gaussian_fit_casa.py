@@ -123,9 +123,8 @@ def test_pipeline_fitting_method(tmp_path):
 
 
 def test_psf_fit_native_alignment_contract(unaligned_array):
-    """Reject unsafe buffers before writes; equivalent dtypes remain valid."""
+    """Use external unaligned buffers in place and retain equivalent dtype support."""
     import numpy as np
-    import pytest
     from astroviper.processing_functions.image_analysis.psf_gaussian_fit_cpp._psf_gaussian_fit_ext import (
         fit_psf_beam,
     )
@@ -139,18 +138,22 @@ def test_psf_fit_native_alignment_contract(unaligned_array):
         psfcutoff=0.35,
         beams=np.zeros((1, 3)),
     )
-    fit_psf_beam(
-        **{k: v.copy() if isinstance(v, np.ndarray) else v for k, v in kwargs.items()}
-    )
+    reference = {
+        k: v.copy() if isinstance(v, np.ndarray) else v for k, v in kwargs.items()
+    }
+    fit_psf_beam(**reference)
     for key, value in kwargs.items():
         if not isinstance(value, np.ndarray) or value.dtype.alignment == 1:
             continue
-        trial = {
-            k: v.copy() if isinstance(v, np.ndarray) else v for k, v in kwargs.items()
-        }
-        trial[key] = unaligned_array(value)
-        before = {k: v.copy() for k, v in trial.items() if isinstance(v, np.ndarray)}
-        with pytest.raises(ValueError, match="naturally aligned"):
+        for offset in range(1, value.dtype.alignment):
+            trial = {
+                k: v.copy() if isinstance(v, np.ndarray) else v
+                for k, v in kwargs.items()
+            }
+            trial[key] = unaligned_array(value, offset)
             fit_psf_beam(**trial)
-        for name, expected in before.items():
-            np.testing.assert_array_equal(trial[name], expected)
+            for name, expected in reference.items():
+                if isinstance(expected, np.ndarray):
+                    np.testing.assert_array_equal(trial[name], expected)
+            assert trial[key].base[0] == 0xA5
+            assert trial[key].base[-1] == 0xA5

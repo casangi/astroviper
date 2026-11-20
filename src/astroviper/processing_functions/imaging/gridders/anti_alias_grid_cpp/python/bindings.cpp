@@ -1,5 +1,5 @@
-#include "array_alignment.hpp"
 #include <pybind11/pybind11.h>
+#include "scalar_buffer.hpp"
 #include <pybind11/numpy.h>
 #include <complex>
 #include <cstdint>
@@ -44,7 +44,7 @@ static void require_c_contiguous(const py::buffer_info& info, const char* name) 
 // ---------------------------------------------------------------------------
 void anti_alias_grid_bind(
     py::array                                                        grid,          // (m_time, m_chan, m_pol, m_u, m_v)  complex64 or complex128, writable
-    py::array_t<double,  py::array::c_style>                         normalization, // (m_time, m_chan, m_pol)             float64     writable
+    py::array normalization, // (m_time, m_chan, m_pol)             float64     writable
     py::array_t<cdbl,    py::array::c_style>                         vis_data,      // (n_time, n_baseline, n_chan, n_pol) complex128
     py::array_t<double,  py::array::c_style>                         uvw,           // (n_time, n_baseline, 3)            float64
     py::array_t<double,  py::array::c_style>                         frequency_coord, // (n_vis_chan,)                    float64
@@ -60,20 +60,12 @@ void anti_alias_grid_bind(
     int interpolation,
     int processing_function_threads
 ) {
-    astroviper::require_aligned(grid, "grid");
-    astroviper::require_aligned(normalization, "normalization");
-    astroviper::require_aligned(vis_data, "vis_data");
-    astroviper::require_aligned(uvw, "uvw");
-    astroviper::require_aligned(frequency_coord, "frequency_coord");
-    astroviper::require_aligned(frequency_map, "frequency_map");
-    astroviper::require_aligned(time_map, "time_map");
-    astroviper::require_aligned(pol_map, "pol_map");
-    astroviper::require_aligned(weight, "weight");
-    astroviper::require_aligned(cgk_1D, "cgk_1D");
-    astroviper::require_aligned(n_uv, "n_uv");
-    astroviper::require_aligned(delta_lm, "delta_lm");
     auto grid_info  = grid.request();
-    auto norm_info  = normalization.request();
+    if (!normalization.dtype().equal(py::dtype::of<double>()))
+        throw std::runtime_error("normalization must be native float64 (modified in place; no conversion)");
+    if (!normalization.writeable())
+        throw std::runtime_error("normalization must be writeable (modified in place)");
+    auto norm_info  = normalization.request(true);
     auto vis_info   = vis_data.request();
     auto uvw_info   = uvw.request();
     auto wt_info    = weight.request();
@@ -117,12 +109,12 @@ void anti_alias_grid_bind(
     const int n_vis_chan = static_cast<int>(frequency_map.shape(0));
     const int n_pol      = static_cast<int>(pol_map.shape(0));
 
-    auto dlm = delta_lm.unchecked<1>();
+    astroviper::ScalarBuffer<const double, false> dlm(delta_lm.data());
 
     // Capture raw pointers before releasing the GIL; py::array_t accessors
     // require it, but the underlying numpy buffers remain valid for the
     // duration of the call because Python owns the arrays.
-    double*       norm_ptr          = normalization.mutable_data();
+    double*       norm_ptr          = static_cast<double*>(normalization.mutable_data());
     const cdbl*   vis_ptr           = static_cast<const cdbl*>(vis_info.ptr);
     const double* uvw_ptr           = static_cast<const double*>(uvw_info.ptr);
     const double* freq_ptr          = frequency_coord.data();
@@ -131,8 +123,8 @@ void anti_alias_grid_bind(
     const int64_t* pol_map_ptr      = pol_map.data();
     const double* wt_ptr            = static_cast<const double*>(wt_info.ptr);
     const double* cgk_ptr           = cgk_1D.data();
-    const double  dl                = dlm(0);
-    const double  dm                = dlm(1);
+    const double  dl                = dlm[0];
+    const double  dm                = dlm[1];
 
     if (grid_is_c128) {
         cdbl* grid_ptr = static_cast<cdbl*>(grid_info.ptr);
@@ -162,7 +154,7 @@ void anti_alias_grid_bind(
 // ---------------------------------------------------------------------------
 void anti_alias_grid_uv_sampling_bind(
     py::array                                                        grid,
-    py::array_t<double,  py::array::c_style>                         normalization,
+    py::array normalization,
     py::array_t<double,  py::array::c_style>                         uvw,
     py::array_t<double,  py::array::c_style>                         frequency_coord,
     py::array_t<int64_t, py::array::c_style>                         frequency_map,
@@ -177,17 +169,6 @@ void anti_alias_grid_uv_sampling_bind(
     int interpolation,
     int processing_function_threads
 ) {
-    astroviper::require_aligned(grid, "grid");
-    astroviper::require_aligned(normalization, "normalization");
-    astroviper::require_aligned(uvw, "uvw");
-    astroviper::require_aligned(frequency_coord, "frequency_coord");
-    astroviper::require_aligned(frequency_map, "frequency_map");
-    astroviper::require_aligned(time_map, "time_map");
-    astroviper::require_aligned(pol_map, "pol_map");
-    astroviper::require_aligned(weight, "weight");
-    astroviper::require_aligned(cgk_1D, "cgk_1D");
-    astroviper::require_aligned(n_uv, "n_uv");
-    astroviper::require_aligned(delta_lm, "delta_lm");
     auto grid_info = grid.request();
     auto norm_info = normalization.request();
     auto uvw_info  = uvw.request();
@@ -229,9 +210,9 @@ void anti_alias_grid_uv_sampling_bind(
     const int n_vis_chan = static_cast<int>(frequency_map.shape(0));
     const int n_pol      = static_cast<int>(pol_map.shape(0));
 
-    auto dlm = delta_lm.unchecked<1>();
+    astroviper::ScalarBuffer<const double, false> dlm(delta_lm.data());
 
-    double*       norm_ptr          = normalization.mutable_data();
+    double*       norm_ptr          = static_cast<double*>(normalization.mutable_data());
     const double* uvw_ptr           = static_cast<const double*>(uvw_info.ptr);
     const double* freq_ptr          = frequency_coord.data();
     const int64_t* freq_map_ptr     = frequency_map.data();
@@ -239,8 +220,8 @@ void anti_alias_grid_uv_sampling_bind(
     const int64_t* pol_map_ptr      = pol_map.data();
     const double* wt_ptr            = static_cast<const double*>(wt_info.ptr);
     const double* cgk_ptr           = cgk_1D.data();
-    const double  dl                = dlm(0);
-    const double  dm                = dlm(1);
+    const double  dl                = dlm[0];
+    const double  dm                = dlm[1];
 
     if (grid_is_c128) {
         cdbl* grid_ptr = static_cast<cdbl*>(grid_info.ptr);
@@ -294,16 +275,6 @@ void anti_alias_degrid_bind(
     int interpolation,
     int processing_function_threads
 ) {
-    astroviper::require_aligned(grid, "grid");
-    astroviper::require_aligned(vis_data, "vis_data");
-    astroviper::require_aligned(uvw, "uvw");
-    astroviper::require_aligned(frequency_coord, "frequency_coord");
-    astroviper::require_aligned(frequency_map, "frequency_map");
-    astroviper::require_aligned(time_map, "time_map");
-    astroviper::require_aligned(pol_map, "pol_map");
-    astroviper::require_aligned(cgk_1D, "cgk_1D");
-    astroviper::require_aligned(n_uv, "n_uv");
-    astroviper::require_aligned(delta_lm, "delta_lm");
     auto grid_info = grid.request();
     auto vis_info  = vis_data.request();
     auto uvw_info  = uvw.request();
@@ -352,7 +323,7 @@ void anti_alias_degrid_bind(
     const int n_vis_chan = static_cast<int>(frequency_map.shape(0));
     const int n_pol      = static_cast<int>(pol_map.shape(0));
 
-    auto dlm = delta_lm.unchecked<1>();
+    astroviper::ScalarBuffer<const double, false> dlm(delta_lm.data());
 
     const void*    grid_ptr_raw  = grid_info.ptr;
     void*          vis_ptr_raw   = vis_info.ptr;
@@ -362,8 +333,8 @@ void anti_alias_degrid_bind(
     const int64_t* time_map_ptr  = time_map.data();
     const int64_t* pol_map_ptr   = pol_map.data();
     const double*  cgk_ptr       = cgk_1D.data();
-    const double   dl            = dlm(0);
-    const double   dm            = dlm(1);
+    const double   dl            = dlm[0];
+    const double   dm            = dlm[1];
 
     // Dispatch on (grid dtype) x (vis dtype). The grid/vis_info.ptr alias the
     // Python-owned buffers directly; no copy occurs.

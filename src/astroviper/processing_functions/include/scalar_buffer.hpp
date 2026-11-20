@@ -45,4 +45,27 @@ public:
         else return Reference(*this, index);
     }
 };
+// Scalar access at external NumPy storage boundaries. Fixed-size memcpy is
+// optimized to scalar loads/stores without assuming the address is aligned.
+// No array allocation, conversion, or realignment is performed.
+template <class T> inline std::remove_const_t<T> scalar_load(const T* data, std::ptrdiff_t index) {
+    std::remove_const_t<T> value;
+    std::memcpy(&value, reinterpret_cast<const unsigned char*>(data) + index * sizeof(T), sizeof(T));
+    return value;
+}
+template <class C> requires (!std::is_pointer_v<std::remove_reference_t<C>>)
+inline auto scalar_load(const C& data, std::ptrdiff_t index) { return data[index]; }
+template <class T, class V> inline T scalar_store(T* data, std::ptrdiff_t index, V value) {
+    const T converted = static_cast<T>(value);
+    std::memcpy(reinterpret_cast<unsigned char*>(data) + index * sizeof(T), &converted, sizeof(T));
+    return converted;
+}
+template <class C, class V> requires (!std::is_pointer_v<std::remove_reference_t<C>>)
+inline auto scalar_store(C& data, std::ptrdiff_t index, V value) { return data[index] = value; }
+template <class C, class V> inline auto scalar_add(C&& data, std::ptrdiff_t index, V value) {
+    return scalar_store(data, index, scalar_load(data, index) + value);
+}
+template <class C, class V> inline auto scalar_sub(C&& data, std::ptrdiff_t index, V value) {
+    return scalar_store(data, index, scalar_load(data, index) - value);
+}
 }  // namespace astroviper

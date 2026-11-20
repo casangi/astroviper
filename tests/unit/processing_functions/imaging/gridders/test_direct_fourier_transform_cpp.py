@@ -507,9 +507,8 @@ def test_pickled_uv_sampling_arrays_are_accepted_in_place(dtype):
 
 
 def test_dft_image_native_alignment_contract(unaligned_array):
-    """Reject unsafe buffers before writes; equivalent dtypes remain valid."""
+    """Use external unaligned buffers in place and retain equivalent dtype support."""
     import numpy as np
-    import pytest
 
     from astroviper.processing_functions.imaging.gridders.direct_fourier_transform_cpp import (
         dft_image,
@@ -536,27 +535,30 @@ def test_dft_image_native_alignment_contract(unaligned_array):
         vis_data=np.ones((1, 1, 1, 1), dtype=np.complex128),
         weight=wt,
     )
-    dft_image(
-        **{k: v.copy() if isinstance(v, np.ndarray) else v for k, v in kwargs.items()}
-    )
+    reference = {
+        k: v.copy() if isinstance(v, np.ndarray) else v for k, v in kwargs.items()
+    }
+    dft_image(**reference)
     for key, value in kwargs.items():
         if not isinstance(value, np.ndarray) or value.dtype.alignment == 1:
             continue
-        trial = {
-            k: v.copy() if isinstance(v, np.ndarray) else v for k, v in kwargs.items()
-        }
-        trial[key] = unaligned_array(value)
-        before = {k: v.copy() for k, v in trial.items() if isinstance(v, np.ndarray)}
-        with pytest.raises(ValueError, match="naturally aligned"):
+        for offset in range(1, value.dtype.alignment):
+            trial = {
+                k: v.copy() if isinstance(v, np.ndarray) else v
+                for k, v in kwargs.items()
+            }
+            trial[key] = unaligned_array(value, offset)
             dft_image(**trial)
-        for name, expected in before.items():
-            np.testing.assert_array_equal(trial[name], expected)
+            for name, expected in reference.items():
+                if isinstance(expected, np.ndarray):
+                    np.testing.assert_array_equal(trial[name], expected)
+            assert trial[key].base[0] == 0xA5
+            assert trial[key].base[-1] == 0xA5
 
 
 def test_dft_predict_native_alignment_contract(unaligned_array):
-    """Reject unsafe buffers before writes; equivalent dtypes remain valid."""
+    """Use external unaligned buffers in place and retain equivalent dtype support."""
     import numpy as np
-    import pytest
 
     from astroviper.processing_functions.imaging.gridders.direct_fourier_transform_cpp import (
         dft_predict,
@@ -580,18 +582,22 @@ def test_dft_predict_native_alignment_contract(unaligned_array):
         model=np.ones((1, 1, 1, 4, 4)),
         vis_data=np.zeros((1, 1, 1, 1), dtype=np.complex128),
     )
-    dft_predict(
-        **{k: v.copy() if isinstance(v, np.ndarray) else v for k, v in kwargs.items()}
-    )
+    reference = {
+        k: v.copy() if isinstance(v, np.ndarray) else v for k, v in kwargs.items()
+    }
+    dft_predict(**reference)
     for key, value in kwargs.items():
         if not isinstance(value, np.ndarray) or value.dtype.alignment == 1:
             continue
-        trial = {
-            k: v.copy() if isinstance(v, np.ndarray) else v for k, v in kwargs.items()
-        }
-        trial[key] = unaligned_array(value)
-        before = {k: v.copy() for k, v in trial.items() if isinstance(v, np.ndarray)}
-        with pytest.raises(ValueError, match="naturally aligned"):
+        for offset in range(1, value.dtype.alignment):
+            trial = {
+                k: v.copy() if isinstance(v, np.ndarray) else v
+                for k, v in kwargs.items()
+            }
+            trial[key] = unaligned_array(value, offset)
             dft_predict(**trial)
-        for name, expected in before.items():
-            np.testing.assert_array_equal(trial[name], expected)
+            for name, expected in reference.items():
+                if isinstance(expected, np.ndarray):
+                    np.testing.assert_array_equal(trial[name], expected)
+            assert trial[key].base[0] == 0xA5
+            assert trial[key].base[-1] == 0xA5

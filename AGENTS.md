@@ -502,13 +502,14 @@ match them in any new kernel:
    planes must be contiguous, but its outer Taylor-term stride may exceed one
    plane so a polarization slice can still be updated in place.
    Alignment is independent of contiguity. Compare dtype values with `.equal()`,
-   never descriptor identity or buffer-format strings. Before typed pointer
-   access, use `astroviper::require_aligned` from
-   `processing_functions/include/array_alignment.hpp` (base address and used
-   strides). Reject unsupported alignment without allocating
-   a replacement. Imaging-weight kernels instead support unaligned contiguous
-   buffers through `ScalarBuffer` scalar byte loads/stores, with a separately
-   dispatched aligned fast path; neither path allocates an array copy.
+   never descriptor identity or buffer-format strings. External buffers may be
+   unaligned after Dask spilling or process transfer: use the scalar byte-safe
+   loads/stores in `processing_functions/include/scalar_buffer.hpp` rather than
+   dereferencing typed pointers. These fixed-size accesses never allocate an
+   array copy. Imaging-weight kernels retain their separately dispatched aligned
+   fast path. Concurrent gridding retains aligned atomics and uses striped locks
+   for unaligned destinations. FFT inputs that require aligned storage use at
+   most one row of scratch, never an image-sized realignment buffer.
 3. **In-place output.** Accumulators (`grid`, `normalization`) and CLEAN buffers
    (residual/model cubes) are written through `mutable_data()` pointers; they
    are *not* returned. Repeated calls accumulate (e.g. summing over MSes).

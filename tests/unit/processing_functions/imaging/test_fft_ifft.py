@@ -359,3 +359,39 @@ def test_rectangular_point_spread_function_and_dirty_image_are_positive(backend)
         assert image.shape == (2, 74, 100)
         np.testing.assert_allclose(image[:, 37, 50], 1.0 / centre, rtol=1e-12)
         assert (image[:, 37, 50] == image.max(axis=(-2, -1))).all()
+
+
+@pytest.mark.parametrize("dtype", [np.complex64, np.complex128])
+@pytest.mark.parametrize("inverse", [False, True])
+@pytest.mark.parametrize("shape,axes", [((18, 24), (-2, -1)), ((6, 3, 10), (0, 2))])
+def test_fftw_unaligned_transform_uses_line_scratch(
+    dtype, inverse, shape, axes, monkeypatch
+):
+    import pyfftw
+
+    original_allocator = pyfftw.empty_aligned
+    allocations = []
+
+    def allocate_line(size, **kwargs):
+        allocations.append(size)
+        assert isinstance(size, int) and size <= max(shape)
+        return original_allocator(size, **kwargs)
+
+    rng = np.random.default_rng(42)
+    values = (rng.normal(size=shape) + 1j * rng.normal(size=shape)).astype(dtype)
+    transform = ifft_uv_to_lm if inverse else fft_lm_to_uv
+    kwargs = dict(fft_plane_dims=axes, fft_backend="pyfftw", overwrite_input=True)
+    if not inverse:
+        kwargs["complex_dtype"] = dtype
+    reference = transform(values.copy(), **kwargs)
+    monkeypatch.setattr(pyfftw, "empty_aligned", allocate_line)
+    for offset in range(1, np.dtype(dtype).alignment):
+        backing = bytearray([0xA5]) * (values.nbytes + offset + 1)
+        unaligned = np.ndarray(shape, dtype=dtype, buffer=backing, offset=offset)
+        unaligned[...] = values
+        result = transform(unaligned, **kwargs)
+        assert np.shares_memory(result, unaligned)
+        np.testing.assert_allclose(result, reference, rtol=2e-5, atol=2e-5)
+        assert backing[:offset] == bytes([0xA5]) * offset
+        assert backing[-1] == 0xA5
+    assert allocations

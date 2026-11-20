@@ -1,4 +1,4 @@
-#include "array_alignment.hpp"
+#include "scalar_buffer.hpp"
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -23,7 +23,6 @@ namespace {
  */
 template <typename T>
 py::buffer_info checked_buffer(const py::array& arr, const char* name, int ndim, bool writable) {
-    astroviper::require_aligned(arr, name);
     if (!arr.dtype().equal(py::dtype::of<T>())) {
         throw std::runtime_error(std::string(name) + " has wrong dtype; expected " +
                                  py::cast<std::string>(py::dtype::of<T>().attr("name")) + " but got " +
@@ -120,20 +119,6 @@ void calculate_visibilities_py(py::array visibility, py::array uvw, py::array an
                                py::array k_vector, py::array inverse_n, py::array source_ra_dec,
                                py::array pointing_ra_dec, py::array beam_model_map, py::list beam_models,
                                py::array parallactic_angle, py::array mueller_selection, int n_threads) {
-    astroviper::require_aligned(visibility, "visibility");
-    astroviper::require_aligned(uvw, "uvw");
-    astroviper::require_aligned(antenna1, "antenna1");
-    astroviper::require_aligned(antenna2, "antenna2");
-    astroviper::require_aligned(frequency, "frequency");
-    astroviper::require_aligned(polarization_index, "polarization_index");
-    astroviper::require_aligned(flux, "flux");
-    astroviper::require_aligned(k_vector, "k_vector");
-    astroviper::require_aligned(inverse_n, "inverse_n");
-    astroviper::require_aligned(source_ra_dec, "source_ra_dec");
-    astroviper::require_aligned(pointing_ra_dec, "pointing_ra_dec");
-    astroviper::require_aligned(beam_model_map, "beam_model_map");
-    astroviper::require_aligned(parallactic_angle, "parallactic_angle");
-    astroviper::require_aligned(mueller_selection, "mueller_selection");
     auto vis_info = checked_buffer<std::complex<double>>(visibility, "visibility", 4, true);
     auto uvw_info = checked_buffer<double>(uvw, "uvw", 3, false);
     auto a1_info = checked_buffer<std::int64_t>(antenna1, "antenna1", 1, false);
@@ -179,16 +164,16 @@ void calculate_visibilities_py(py::array visibility, py::array uvw, py::array an
             "pointing_ra_dec must have shape [n_time|1, n_antenna|1, 2]");
     require(pa_info.shape[0] == n_time, "parallactic_angle must have shape [n_time]");
     for (std::int64_t p = 0; p < n_polarization; ++p) {
-        const std::int64_t v = ptr_of<std::int64_t>(pol_info)[p];
+        const std::int64_t v = astroviper::scalar_load(ptr_of<std::int64_t>(pol_info), p);
         require(v >= 0 && v < 4, "polarization_index values must be in 0..3");
     }
     for (std::int64_t i = 0; i < mu_info.shape[0]; ++i) {
-        const std::int64_t v = ptr_of<std::int64_t>(mu_info)[i];
+        const std::int64_t v = astroviper::scalar_load(ptr_of<std::int64_t>(mu_info), i);
         require(v >= 0 && v < 16, "mueller_selection values must be in 0..15");
     }
     for (std::int64_t b = 0; b < n_baseline; ++b) {
-        require(ptr_of<std::int64_t>(a1_info)[b] >= 0 && ptr_of<std::int64_t>(a1_info)[b] < n_antenna &&
-                    ptr_of<std::int64_t>(a2_info)[b] >= 0 && ptr_of<std::int64_t>(a2_info)[b] < n_antenna,
+        require(astroviper::scalar_load(ptr_of<std::int64_t>(a1_info), b) >= 0 && astroviper::scalar_load(ptr_of<std::int64_t>(a1_info), b) < n_antenna &&
+                    astroviper::scalar_load(ptr_of<std::int64_t>(a2_info), b) >= 0 && astroviper::scalar_load(ptr_of<std::int64_t>(a2_info), b) < n_antenna,
                 "antenna indices must be in 0..n_antenna-1");
     }
 
@@ -196,7 +181,7 @@ void calculate_visibilities_py(py::array visibility, py::array uvw, py::array an
     std::vector<BeamModel> models;
     for (auto item : beam_models) models.push_back(beam_model_from_dict(py::cast<py::dict>(item), keep));
     for (std::int64_t a = 0; a < n_antenna; ++a) {
-        const std::int64_t v = ptr_of<std::int64_t>(map_info)[a];
+        const std::int64_t v = astroviper::scalar_load(ptr_of<std::int64_t>(map_info), a);
         require(v >= 0 && v < static_cast<std::int64_t>(models.size()), "beam_model_map must index beam_models");
     }
 
