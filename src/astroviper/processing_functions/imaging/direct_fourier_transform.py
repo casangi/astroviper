@@ -1,6 +1,6 @@
 """Exact direct Fourier transform imaging and prediction for single-field imaging.
 
-The gridding kernel type ``"dft"`` (``gridding_kernel_params={"type": "dft"}``)
+The gridder ``"direct_fourier_transform"``
 replaces the gridding, the FFT and the image plane correction of the residual
 update and of the point spread function by exact sums over the visibilities
 and the image pixels, made by
@@ -186,7 +186,7 @@ def check_dft_continuum_parameters(
 ):
     """Refuse the continuum options the direct Fourier transform does not take.
 
-    Continuum imaging takes ``gridding_kernel_params={"type": "dft"}`` in MFS
+    Continuum imaging takes ``gridder="direct_fourier_transform"`` in MFS
     with ``visibility_memory_mode="recompute"``: MVC and the cached observed
     uv grids of ``"in_memory"`` and ``"in_place"`` are made of uv grids, which
     the direct Fourier transform does not make, and so are the ``visibility``
@@ -220,7 +220,7 @@ def check_dft_continuum_parameters(
 
     check_driver_workflow(
         {
-            "gridding_kernel_params": {"type": "dft"},
+            "gridder": "direct_fourier_transform",
             "continuum_mode": continuum_mode,
             "visibility_memory_mode": visibility_memory_mode,
             "image_data_variables_keep": image_data_variables_keep,

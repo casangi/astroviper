@@ -100,6 +100,7 @@ def imaging_preparation_continuum_single_field(
     gridding_kernel_params=None,
     *,
     input_checked: bool = False,
+    gridder="anti_alias",
 ):
     """Prepare static products once per continuum map task.
 
@@ -234,26 +235,34 @@ def imaging_preparation_continuum_single_field(
         the image kept (a support too large for the ``fft_padding``, e.g. 17
         at 1.05) is refused. The kernel of the
         former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
-        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
-        the gridding and the FFTs by the exact direct Fourier transform over the
-        unpadded image, w term included: with the phase
-        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
-        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
-        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
-        the measurement equation of ``simulate_processing_set``. Its cost is
-        proportional to the samples times the image pixels (30 to 40 s per
-        residual update of 451,500 samples, four correlations and 160 x 160
-        pixels on one core), so give it several
-        ``processing_function_threads``; its results do not depend on their
-        number. Its ``VISIBILITY_NORMALIZATION`` and
-        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
-        gridders' that sum times the kernel's stencil sums.
+        not ``"prolate_spheroidal"``. The gridder ``"direct_fourier_transform"``
+        uses no kernel: ``gridding_kernel_params`` must then be ``None``.
 
     input_checked : bool, optional
         Skip configuration checks already performed by the calling layer.
         Runtime checks on newly created data always remain active. For graph nodes
         using an input_params dictionary, its input_checked entry also carries this
         flag. Set it only for an unchanged configuration in the same imaging mode.
+    gridder : str, optional
+        Registry name of the gridder (a key of
+        :data:`~astroviper.processing_functions.imaging.gridders.gridder_registry.GRIDDERS`):
+        ``"anti_alias"`` (the default), convolutional gridding with the
+        anti-aliasing kernel of ``gridding_kernel_params`` (by default the
+        ``least_misfit`` kernel of support 9, oversampling 300 and linear
+        lookup), or ``"direct_fourier_transform"``, which replaces the gridding
+        and the FFTs by the exact direct Fourier transform over the unpadded
+        image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. It uses no
+        kernel and no ``fft_padding``. Its cost is proportional to the samples
+        times the image pixels (30 to 40 s per residual update of 451,500
+        samples, four correlations and 160 x 160 pixels on one core), so give
+        it several ``processing_function_threads``; its results do not depend
+        on their number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        anti-alias gridder's that sum times the kernel's stencil sums.
 
     Returns
     -------
@@ -304,6 +313,7 @@ def imaging_preparation_continuum_single_field(
         make_primary_beam_taylor=make_primary_beam_taylor,
         gridding_kernel_params=gridding_kernel_params,
         input_checked=True,
+        gridder=gridder,
     )
 
     T_setup = time.time() - start
@@ -579,6 +589,7 @@ def prepare_model_uv_continuum_single_field(
     gridding_kernel_params=None,
     *,
     input_checked: bool = False,
+    gridder="anti_alias",
 ):
     """Prepare the Fourier-domain continuum model for the next imaging cycle.
 
@@ -692,33 +703,41 @@ def prepare_model_uv_continuum_single_field(
         the image kept (a support too large for the ``fft_padding``, e.g. 17
         at 1.05) is refused. The kernel of the
         former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
-        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
-        the gridding and the FFTs by the exact direct Fourier transform over the
-        unpadded image, w term included: with the phase
-        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
-        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
-        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
-        the measurement equation of ``simulate_processing_set``. Its cost is
-        proportional to the samples times the image pixels (30 to 40 s per
-        residual update of 451,500 samples, four correlations and 160 x 160
-        pixels on one core), so give it several
-        ``processing_function_threads``; its results do not depend on their
-        number. Its ``VISIBILITY_NORMALIZATION`` and
-        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
-        gridders' that sum times the kernel's stencil sums.
+        not ``"prolate_spheroidal"``. The gridder ``"direct_fourier_transform"``
+        uses no kernel: ``gridding_kernel_params`` must then be ``None``.
 
     input_checked : bool, optional
         Skip configuration checks already performed by the calling layer.
         Runtime checks on newly created data always remain active. For graph nodes
         using an input_params dictionary, its input_checked entry also carries this
         flag. Set it only for an unchanged configuration in the same imaging mode.
+    gridder : str, optional
+        Registry name of the gridder (a key of
+        :data:`~astroviper.processing_functions.imaging.gridders.gridder_registry.GRIDDERS`):
+        ``"anti_alias"`` (the default), convolutional gridding with the
+        anti-aliasing kernel of ``gridding_kernel_params`` (by default the
+        ``least_misfit`` kernel of support 9, oversampling 300 and linear
+        lookup), or ``"direct_fourier_transform"``, which replaces the gridding
+        and the FFTs by the exact direct Fourier transform over the unpadded
+        image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. It uses no
+        kernel and no ``fft_padding``. Its cost is proportional to the samples
+        times the image pixels (30 to 40 s per residual update of 451,500
+        samples, four correlations and 160 x 160 pixels on one core), so give
+        it several ``processing_function_threads``; its results do not depend
+        on their number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        anti-alias gridder's that sum times the kernel's stencil sums.
 
     Returns
     -------
     model_uv_xds : xarray.Dataset
         Continuum model dataset in the instrumental correlation basis containing
         the Fourier-domain Taylor coefficients (``VISIBILITY_MODEL``), indexed by
-        ``taylor_term``. With ``gridding_kernel_params={"type": "dft"}`` it
+        ``taylor_term``. With ``gridder="direct_fourier_transform"`` it
         holds the Taylor model images themselves (the ``sky`` variable, no
         FFT), which the direct Fourier transform predicts from.
 
@@ -750,7 +769,6 @@ def prepare_model_uv_continuum_single_field(
         GRIDDERS,
     )
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-        is_direct_fourier_transform,
         make_gridding_kernel,
     )
 
@@ -813,11 +831,6 @@ def prepare_model_uv_continuum_single_field(
 
     # The direct Fourier transform predicts from the Taylor model images
     # themselves: no FFT, padding or kernel correction.
-    gridder = (
-        "direct_fourier_transform"
-        if is_direct_fourier_transform(gridding_kernel_params)
-        else "anti_alias"
-    )
     model_uv_xds = GRIDDERS[gridder].image_to_uv(
         model_uv_xds,
         image_params=image_params,
@@ -1115,20 +1128,8 @@ def prepare_model_uv_mvc_single_field(
         the image kept (a support too large for the ``fft_padding``, e.g. 17
         at 1.05) is refused. The kernel of the
         former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
-        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
-        the gridding and the FFTs by the exact direct Fourier transform over the
-        unpadded image, w term included: with the phase
-        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
-        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
-        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
-        the measurement equation of ``simulate_processing_set``. Its cost is
-        proportional to the samples times the image pixels (30 to 40 s per
-        residual update of 451,500 samples, four correlations and 160 x 160
-        pixels on one core), so give it several
-        ``processing_function_threads``; its results do not depend on their
-        number. Its ``VISIBILITY_NORMALIZATION`` and
-        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
-        gridders' that sum times the kernel's stencil sums.
+        not ``"prolate_spheroidal"``. The gridder ``"direct_fourier_transform"``
+        uses no kernel: ``gridding_kernel_params`` must then be ``None``.
 
     input_checked : bool, optional
         Skip configuration checks already performed by the calling layer.
@@ -2403,6 +2404,7 @@ def residual_update_continuum_single_field(
     gridding_kernel_params=None,
     *,
     input_checked: bool = False,
+    gridder="anti_alias",
 ):
     """Perform one continuum imaging-cycle update for a single frequency chunk.
 
@@ -2621,26 +2623,34 @@ def residual_update_continuum_single_field(
         the image kept (a support too large for the ``fft_padding``, e.g. 17
         at 1.05) is refused. The kernel of the
         former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
-        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
-        the gridding and the FFTs by the exact direct Fourier transform over the
-        unpadded image, w term included: with the phase
-        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
-        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
-        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
-        the measurement equation of ``simulate_processing_set``. Its cost is
-        proportional to the samples times the image pixels (30 to 40 s per
-        residual update of 451,500 samples, four correlations and 160 x 160
-        pixels on one core), so give it several
-        ``processing_function_threads``; its results do not depend on their
-        number. Its ``VISIBILITY_NORMALIZATION`` and
-        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
-        gridders' that sum times the kernel's stencil sums.
+        not ``"prolate_spheroidal"``. The gridder ``"direct_fourier_transform"``
+        uses no kernel: ``gridding_kernel_params`` must then be ``None``.
 
     input_checked : bool, optional
         Skip configuration checks already performed by the calling layer.
         Runtime checks on newly created data always remain active. For graph nodes
         using an input_params dictionary, its input_checked entry also carries this
         flag. Set it only for an unchanged configuration in the same imaging mode.
+    gridder : str, optional
+        Registry name of the gridder (a key of
+        :data:`~astroviper.processing_functions.imaging.gridders.gridder_registry.GRIDDERS`):
+        ``"anti_alias"`` (the default), convolutional gridding with the
+        anti-aliasing kernel of ``gridding_kernel_params`` (by default the
+        ``least_misfit`` kernel of support 9, oversampling 300 and linear
+        lookup), or ``"direct_fourier_transform"``, which replaces the gridding
+        and the FFTs by the exact direct Fourier transform over the unpadded
+        image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. It uses no
+        kernel and no ``fft_padding``. Its cost is proportional to the samples
+        times the image pixels (30 to 40 s per residual update of 451,500
+        samples, four correlations and 160 x 160 pixels on one core), so give
+        it several ``processing_function_threads``; its results do not depend
+        on their number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        anti-alias gridder's that sum times the kernel's stencil sums.
 
     Returns
     -------
@@ -2703,6 +2713,7 @@ def residual_update_continuum_single_field(
             make_primary_beam_taylor=make_primary_beam_taylor,
             gridding_kernel_params=gridding_kernel_params,
             input_checked=True,
+            gridder=gridder,
         )
 
         timing["T_prep"] = T_setup
@@ -2763,6 +2774,7 @@ def residual_update_continuum_single_field(
         observed_visibility_grid_xds=observed_visibility_grid_xds,
         gridding_kernel_params=gridding_kernel_params,
         input_checked=True,
+        gridder=gridder,
     )
 
     timing["T_residual_update"] = time.time() - start

@@ -127,8 +127,8 @@ def test_measurement_set_v2_is_refused(tmp_path):
 
 
 def test_the_direct_fourier_transform_point_spread_function(ps_store):
-    """The DFT option reaches the node tasks and the record names the parameters
-    as resolved. The beam fit stays within 1 percent of the gridder's: the DFT
+    """The DFT gridder reaches the node tasks and the record holds no kernel
+    parameters for it. The beam fit stays within 1 percent of the gridder's: the DFT
     includes the w term, which the gridder leaves out, and the fits of this
     PSF, wider than the image, differ by 1.1e-3."""
     from xradio.measurement_set import open_processing_set
@@ -144,19 +144,50 @@ def test_the_direct_fourier_transform_point_spread_function(ps_store):
         ps_store,
         _image_params(frequency_coords),
         {"weighting": "natural"},
-        gridding_kernel_params={"type": "dft"},
+        gridder="direct_fourier_transform",
         **common,
     )
     gridder = psf_module.point_spread_function_cube_single_field(
         ps_store, _image_params(frequency_coords), {"weighting": "natural"}, **common
     )
-    assert dft.attrs["gridding_kernel_params"] == {"type": "dft"}
+    assert dft.attrs["gridding_kernel_params"] is None
     np.testing.assert_allclose(
         dft.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.values,
         gridder.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.values,
         rtol=1e-2,
     )
     xr.testing.assert_identical(dft.SENSITIVITY, gridder.SENSITIVITY)
+
+
+def test_the_gridder_reaches_the_node_tasks(ps_store, monkeypatch):
+    """The driver hands the gridder to its node tasks, which declare it:
+    GraphVIPER gives a node task only the keys of input_params it declares, and
+    one without the gridder would grid with the anti-alias gridder."""
+    import inspect
+
+    import graphviper.graph_tools
+    from xradio.measurement_set import open_processing_set
+
+    class MapReached(Exception):
+        pass
+
+    def first_map(**kwargs):
+        raise MapReached(kwargs["node_task"], kwargs["input_params"])
+
+    monkeypatch.setattr(graphviper.graph_tools, "map", first_map)
+    frequency_coords = open_processing_set(ps_store).xr_ps.get_freq_axis().values
+    with pytest.raises(MapReached) as reached:
+        psf_module.point_spread_function_cube_single_field(
+            ps_store,
+            _image_params(frequency_coords),
+            {"weighting": "natural"},
+            instrument_polarization_basis="circular",
+            processing_set_data_group_name="base",
+            gridder="direct_fourier_transform",
+        )
+    node_task, input_params = reached.value.args
+    assert input_params["gridder"] == "direct_fourier_transform"
+    assert "gridder" in inspect.signature(node_task).parameters
 
 
 def test_psf_driver_checks_nested_configuration_before_io(tmp_path):

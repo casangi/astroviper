@@ -395,6 +395,7 @@ def make_point_spread_function_single_field(
     processing_function_threads=1,
     fft_backend="pyfftw",
     complex_dtype=None,
+    gridder="anti_alias",
 ):
     """Build the point spread function for a single-field image chunk.
 
@@ -415,7 +416,7 @@ def make_point_spread_function_single_field(
     The Gaussian beam fit of the PSF is performed afterwards by
     :func:`~astroviper.processing_functions.image_analysis.point_spread_function_gaussian_fit.point_spread_function_gaussian_fit`.
 
-    With ``gridding_kernel_params={"type": "dft"}`` the PSF is the exact direct
+    With ``gridder="direct_fourier_transform"`` the PSF is the exact direct
     Fourier transform of the imaging weights, w term included, over the
     unpadded image
     (:class:`~astroviper.processing_functions.imaging.gridders.direct_fourier_transform.gridder_direct_fourier_transform.GridderDirectFourierTransform`);
@@ -495,20 +496,8 @@ def make_point_spread_function_single_field(
         the image kept (a support too large for the ``fft_padding``, e.g. 17
         at 1.05) is refused. The kernel of the
         former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
-        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
-        the gridding and the FFTs by the exact direct Fourier transform over the
-        unpadded image, w term included: with the phase
-        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
-        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
-        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
-        the measurement equation of ``simulate_processing_set``. Its cost is
-        proportional to the samples times the image pixels (30 to 40 s per
-        residual update of 451,500 samples, four correlations and 160 x 160
-        pixels on one core), so give it several
-        ``processing_function_threads``; its results do not depend on their
-        number. Its ``VISIBILITY_NORMALIZATION`` and
-        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
-        gridders' that sum times the kernel's stencil sums.
+        not ``"prolate_spheroidal"``. The gridder ``"direct_fourier_transform"``
+        uses no kernel: ``gridding_kernel_params`` must then be ``None``.
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
         kernels.
@@ -518,6 +507,26 @@ def make_point_spread_function_single_field(
     complex_dtype : numpy.dtype, optional
         Complex precision of the gridded data.  Defaults to
         ``numpy.complex128``.
+    gridder : str, optional
+        Registry name of the gridder (a key of
+        :data:`~astroviper.processing_functions.imaging.gridders.gridder_registry.GRIDDERS`):
+        ``"anti_alias"`` (the default), convolutional gridding with the
+        anti-aliasing kernel of ``gridding_kernel_params`` (by default the
+        ``least_misfit`` kernel of support 9, oversampling 300 and linear
+        lookup), or ``"direct_fourier_transform"``, which replaces the gridding
+        and the FFTs by the exact direct Fourier transform over the unpadded
+        image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. It uses no
+        kernel and no ``fft_padding``. Its cost is proportional to the samples
+        times the image pixels (30 to 40 s per residual update of 451,500
+        samples, four correlations and 160 x 160 pixels on one core), so give
+        it several ``processing_function_threads``; its results do not depend
+        on their number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        anti-alias gridder's that sum times the kernel's stencil sums.
 
     Returns
     -------
@@ -536,11 +545,13 @@ def make_point_spread_function_single_field(
 
     import pandas as pd
 
+    from astroviper.processing_functions.imaging.config_check._gridding import (
+        check_gridder_kernel,
+    )
     from astroviper.processing_functions.imaging.gridders.gridder_registry import (
         GRIDDERS,
     )
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-        is_direct_fourier_transform,
         make_gridding_kernel,
     )
     from astroviper.processing_functions.imaging.utils import drop_auto_correlations
@@ -550,11 +561,8 @@ def make_point_spread_function_single_field(
     if image_data_variables_keep is None:
         image_data_variables_keep = []
 
-    gridder = (
-        "direct_fourier_transform"
-        if is_direct_fourier_transform(gridding_kernel_params)
-        else "anti_alias"
-    )
+    # No configuration check runs here.
+    check_gridder_kernel(gridder, gridding_kernel_params)
     if "point_spread_function" in GRIDDERS[gridder].grid_uv_sampling_roles:
         # The gridder accumulates into the point spread function itself.
         data_group = img_xds.attrs["data_groups"].get(image_data_group_out_name, {})
@@ -642,6 +650,7 @@ def make_subtraction_point_spread_function_single_field(
     processing_function_threads=1,
     fft_backend="pyfftw",
     complex_dtype=None,
+    gridder="anti_alias",
 ):
     """Build the PSF of twice the image size that exact PSF subtraction uses.
 
@@ -657,7 +666,7 @@ def make_subtraction_point_spread_function_single_field(
     of the kernel table, on uv cells that differ by a factor of two, and the
     aliasing at the edge of the padded grid, which lies at the edge of the image
     for the image-sized PSF and twice as far out for this one. With the direct
-    Fourier transform (``gridding_kernel_params={"type": "dft"}``) those
+    Fourier transform (``gridder="direct_fourier_transform"``) those
     pixels are the image-sized PSF to rounding.
 
     Imaging weights equal in every correlation (``NaN`` at the same samples),
@@ -733,20 +742,8 @@ def make_subtraction_point_spread_function_single_field(
         the image kept (a support too large for the ``fft_padding``, e.g. 17
         at 1.05) is refused. The kernel of the
         former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
-        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
-        the gridding and the FFTs by the exact direct Fourier transform over the
-        unpadded image, w term included: with the phase
-        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
-        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
-        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
-        the measurement equation of ``simulate_processing_set``. Its cost is
-        proportional to the samples times the image pixels (30 to 40 s per
-        residual update of 451,500 samples, four correlations and 160 x 160
-        pixels on one core), so give it several
-        ``processing_function_threads``; its results do not depend on their
-        number. Its ``VISIBILITY_NORMALIZATION`` and
-        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
-        gridders' that sum times the kernel's stencil sums.
+        not ``"prolate_spheroidal"``. The gridder ``"direct_fourier_transform"``
+        uses no kernel: ``gridding_kernel_params`` must then be ``None``.
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
         kernels.
@@ -756,6 +753,26 @@ def make_subtraction_point_spread_function_single_field(
     complex_dtype : numpy.dtype, optional
         Complex precision of the gridded data: ``complex64`` gives a float32
         PSF, ``complex128`` (the default) a float64 one.
+    gridder : str, optional
+        Registry name of the gridder (a key of
+        :data:`~astroviper.processing_functions.imaging.gridders.gridder_registry.GRIDDERS`):
+        ``"anti_alias"`` (the default), convolutional gridding with the
+        anti-aliasing kernel of ``gridding_kernel_params`` (by default the
+        ``least_misfit`` kernel of support 9, oversampling 300 and linear
+        lookup), or ``"direct_fourier_transform"``, which replaces the gridding
+        and the FFTs by the exact direct Fourier transform over the unpadded
+        image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. It uses no
+        kernel and no ``fft_padding``. Its cost is proportional to the samples
+        times the image pixels (30 to 40 s per residual update of 451,500
+        samples, four correlations and 160 x 160 pixels on one core), so give
+        it several ``processing_function_threads``; its results do not depend
+        on their number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        anti-alias gridder's that sum times the kernel's stencil sums.
 
     Returns
     -------
@@ -806,6 +823,7 @@ def make_subtraction_point_spread_function_single_field(
         processing_function_threads=processing_function_threads,
         fft_backend=fft_backend,
         complex_dtype=complex_dtype,
+        gridder=gridder,
     )
     point_spread_function = psf_xds["POINT_SPREAD_FUNCTION"].values
     if made_once:

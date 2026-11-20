@@ -1383,9 +1383,10 @@ def combine_continuum_chunks(input_data, input_params):
     ``UV_SAMPLING_NORMALIZATION``
         ``(time, psf_taylor_order, polarization)``.
 
-    MFS with the direct Fourier transform (``gridding_kernel_params={"type":
-    "dft"}``) supplies the unnormalised Taylor images ``SKY_RESIDUAL`` and
-    ``POINT_SPREAD_FUNCTION`` in place of the two grids.
+    MFS with the direct Fourier transform
+    (``gridder="direct_fourier_transform"``) supplies the unnormalised Taylor
+    images ``SKY_RESIDUAL`` and ``POINT_SPREAD_FUNCTION`` in place of the two
+    grids.
 
     MVC supplies a mode-specific additive list. Every imaging cycle reduces
     ``MVC_RESIDUAL_TAYLOR_NUMERATOR`` and ``MVC_RESIDUAL_WEIGHT_SUM``; the first
@@ -2607,7 +2608,7 @@ def image_continuum_single_field(
     or at once when its peak exceeds ``(1 + gain)`` times its peak at the
     start of the model update.
 
-    With ``gridding_kernel_params={"type": "dft"}`` MFS makes its Taylor
+    With ``gridder="direct_fourier_transform"`` MFS makes its Taylor
     residuals, its Taylor PSFs and its model visibilities by the exact
     direct Fourier transform, w term included, over the unpadded image
     (:mod:`~astroviper.processing_functions.imaging.direct_fourier_transform`):
@@ -3071,14 +3072,25 @@ def image_continuum_single_field(
         for a plane the entropy or divergence stop has ended), where
         ``max_iter_remaining`` is what is left of ``max_iter``.
     gridder : str, optional
-        Currently ``"anti_alias"``: convolutional gridding with the
+        Registry name of the gridder (a key of
+        :data:`~astroviper.processing_functions.imaging.gridders.gridder_registry.GRIDDERS`):
+        ``"anti_alias"`` (the default), convolutional gridding with the
         anti-aliasing kernel of ``gridding_kernel_params`` (by default the
         ``least_misfit`` kernel of support 9, oversampling 300 and linear
-        lookup).
-        MFS and MVC dispatch visibility, PSF, and prediction work to the shared
-        C++ grid/degrid kernels. With ``gridding_kernel_params={"type":
-        "dft"}`` MFS uses the exact direct Fourier transform with the w term
-        instead.
+        lookup), or ``"direct_fourier_transform"``, which replaces the gridding
+        and the FFTs by the exact direct Fourier transform over the unpadded
+        image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. It uses no
+        kernel and no ``fft_padding``. Its cost is proportional to the samples
+        times the image pixels (30 to 40 s per residual update of 451,500
+        samples, four correlations and 160 x 160 pixels on one core), so give
+        it several ``processing_function_threads``; its results do not depend
+        on their number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        anti-alias gridder's that sum times the kernel's stencil sums.
     restoration_output : {"apparent", "primary_beam_corrected", "both"}, default "primary_beam_corrected"
         Restored products to compute: ``"apparent"``, ``"primary_beam_corrected"``,
         or ``"both"``. Cube outputs are ``SKY_RESTORED`` and
@@ -3147,20 +3159,8 @@ def image_continuum_single_field(
         the image kept (a support too large for the ``fft_padding``, e.g. 17
         at 1.05) is refused. The kernel of the
         former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
-        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
-        the gridding and the FFTs by the exact direct Fourier transform over the
-        unpadded image, w term included: with the phase
-        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
-        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
-        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
-        the measurement equation of ``simulate_processing_set``. Its cost is
-        proportional to the samples times the image pixels (30 to 40 s per
-        residual update of 451,500 samples, four correlations and 160 x 160
-        pixels on one core), so give it several
-        ``processing_function_threads``; its results do not depend on their
-        number. Its ``VISIBILITY_NORMALIZATION`` and
-        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
-        gridders' that sum times the kernel's stencil sums.
+        not ``"prolate_spheroidal"``. The gridder ``"direct_fourier_transform"``
+        uses no kernel: ``gridding_kernel_params`` must then be ``None``.
     clean_mask : str or None, optional
         Two-dimensional CLEAN mask of shape ``image_params["image_size"]``:
         the path of a NumPy ``.npy`` file for the distributed applications and
@@ -3445,8 +3445,8 @@ def image_continuum_single_field(
     from xradio.image import make_empty_sky_image, write_image
     from xradio.measurement_set import open_processing_set
 
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-        is_direct_fourier_transform,
+    from astroviper.processing_functions.imaging.gridders.gridder_registry import (
+        GRIDDERS,
     )
     from astroviper.processing_functions.imaging.utils import (
         CONTINUUM_IMAGING_TIMING_PHASES,
@@ -3474,7 +3474,6 @@ def image_continuum_single_field(
     # Validation ran at the entry boundary. Preserve the supplied configuration
     # while selecting the execution path and loading the actual CLEAN mask.
     image_params = dict(image_params)
-    direct_fourier_transform = is_direct_fourier_transform(gridding_kernel_params)
     clean_mask_array = load_clean_mask(clean_mask, image_params["image_size"])
 
     from astroviper.processing_functions.imaging.config_check._common import (
@@ -3969,17 +3968,15 @@ def image_continuum_single_field(
             # are reduced. Later cycles only produce new residual products; the
             # static PSF/PB products are supplied by
             # continuum_cycle_append_node.
-            if continuum_mode == "mfs" and direct_fourier_transform:
-                # The direct Fourier transform's map tasks return the sums of
-                # the Taylor images (and PSFs) instead of uv grids.
+            if continuum_mode == "mfs":
+                # The map tasks return what the gridder accumulates (the uv
+                # grids, or the sums of the Taylor images and PSFs of the
+                # direct Fourier transform) with its normalizations.
                 reduce_input_params = {
                     "continuum_mode": "mfs",
-                    "additive_variables": (
-                        "SKY_RESIDUAL",
-                        "VISIBILITY_NORMALIZATION",
-                    )
+                    "additive_variables": tuple(GRIDDERS[gridder].grid_roles.values())
                     + (
-                        ("POINT_SPREAD_FUNCTION", "UV_SAMPLING_NORMALIZATION")
+                        tuple(GRIDDERS[gridder].grid_uv_sampling_roles.values())
                         if is_first_cycle
                         else ()
                     )
@@ -3992,33 +3989,6 @@ def image_continuum_single_field(
                         else ()
                     ),
                 }
-            elif continuum_mode == "mfs":
-                if is_first_cycle:
-                    reduce_input_params = {
-                        "continuum_mode": "mfs",
-                        "additive_variables": (
-                            "VISIBILITY",
-                            "VISIBILITY_NORMALIZATION",
-                            "UV_SAMPLING",
-                            "UV_SAMPLING_NORMALIZATION",
-                        )
-                        + (
-                            (
-                                "MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR",
-                                "MFS_PRIMARY_BEAM_FIT_MOMENTS",
-                            )
-                            if restore
-                            else ()
-                        ),
-                    }
-                else:
-                    reduce_input_params = {
-                        "continuum_mode": "mfs",
-                        "additive_variables": (
-                            "VISIBILITY",
-                            "VISIBILITY_NORMALIZATION",
-                        ),
-                    }
             else:
                 mvc_residual_additive_variables = (
                     "MVC_RESIDUAL_TAYLOR_NUMERATOR",
@@ -4061,6 +4031,7 @@ def image_continuum_single_field(
                 "image_data_group_out_name": "model",
                 "image_params": image_params,
                 "gridding_kernel_params": gridding_kernel_params,
+                "gridder": gridder,
                 "image_data_variables_keep": image_data_variables_keep,
                 "fft_backend": fft_backend,
                 "single_precision_image": single_precision_image,

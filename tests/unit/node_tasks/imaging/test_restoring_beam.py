@@ -28,7 +28,7 @@ FWHM = 2.0 * np.sqrt(2.0 * np.log(2.0))
 PSF_SIGMA_PIXELS = (2.0, 1.5)
 PSF_PARAMS = {
     "continuum_mode": "mfs",
-    "gridding_kernel_params": {"type": "dft"},
+    "gridder": "direct_fourier_transform",
     "image_params": {"n_taylor_terms": 1, "reference_frequency": 1e9},
 }
 

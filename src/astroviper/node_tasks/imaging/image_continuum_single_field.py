@@ -751,6 +751,7 @@ def _resolve_continuum_append_configuration(input_params, *, input_checked=False
             "residual",
         ),
         "gridding_kernel_params": input_params.get("gridding_kernel_params"),
+        "gridder": input_params.get("gridder", "anti_alias"),
     }
 
 
@@ -1126,6 +1127,7 @@ def residual_update_continuum_single_field(
     *,
     input_checked: bool = False,
     calculate_auto_sensitivity: bool = False,
+    gridder="anti_alias",
 ):
     """Compute one frequency chunk's continuum products in memory.
 
@@ -1148,9 +1150,9 @@ def residual_update_continuum_single_field(
     - ``UV_SAMPLING``;
     - ``UV_SAMPLING_NORMALIZATION``;
 
-    or, with the direct Fourier transform (``gridding_kernel_params={"type":
-    "dft"}``), the unnormalised Taylor images ``SKY_RESIDUAL`` and
-    ``POINT_SPREAD_FUNCTION`` in place of the two grids.
+    or, with the direct Fourier transform
+    (``gridder="direct_fourier_transform"``), the unnormalised Taylor images
+    ``SKY_RESIDUAL`` and ``POINT_SPREAD_FUNCTION`` in place of the two grids.
 
     MVC instead returns ``MVC_RESIDUAL_TAYLOR_NUMERATOR``,
     ``MVC_RESIDUAL_WEIGHT_SUM`` and, in the first imaging cycle for
@@ -1407,20 +1409,8 @@ def residual_update_continuum_single_field(
         the image kept (a support too large for the ``fft_padding``, e.g. 17
         at 1.05) is refused. The kernel of the
         former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
-        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
-        the gridding and the FFTs by the exact direct Fourier transform over the
-        unpadded image, w term included: with the phase
-        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
-        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
-        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
-        the measurement equation of ``simulate_processing_set``. Its cost is
-        proportional to the samples times the image pixels (30 to 40 s per
-        residual update of 451,500 samples, four correlations and 160 x 160
-        pixels on one core), so give it several
-        ``processing_function_threads``; its results do not depend on their
-        number. Its ``VISIBILITY_NORMALIZATION`` and
-        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
-        gridders' that sum times the kernel's stencil sums.
+        not ``"prolate_spheroidal"``. The gridder ``"direct_fourier_transform"``
+        uses no kernel: ``gridding_kernel_params`` must then be ``None``.
 
     input_checked : bool, optional
         Skip configuration checks already performed by the calling layer.
@@ -1432,6 +1422,26 @@ def residual_update_continuum_single_field(
         On the first cycle, return additive weight statistics for automatic
         cycle limits with zero threshold. Uses loaded weights, not visibility
         or UVW data; no driver preflight scan is performed.
+    gridder : str, optional
+        Registry name of the gridder (a key of
+        :data:`~astroviper.processing_functions.imaging.gridders.gridder_registry.GRIDDERS`):
+        ``"anti_alias"`` (the default), convolutional gridding with the
+        anti-aliasing kernel of ``gridding_kernel_params`` (by default the
+        ``least_misfit`` kernel of support 9, oversampling 300 and linear
+        lookup), or ``"direct_fourier_transform"``, which replaces the gridding
+        and the FFTs by the exact direct Fourier transform over the unpadded
+        image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. It uses no
+        kernel and no ``fft_padding``. Its cost is proportional to the samples
+        times the image pixels (30 to 40 s per residual update of 451,500
+        samples, four correlations and 160 x 160 pixels on one core), so give
+        it several ``processing_function_threads``; its results do not depend
+        on their number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        anti-alias gridder's that sum times the kernel's stencil sums.
 
     Returns
     -------
@@ -1699,6 +1709,7 @@ def residual_update_continuum_single_field(
         mvc_model_update_approximation=mvc_model_update_approximation,
         gridding_kernel_params=gridding_kernel_params,
         input_checked=True,
+        gridder=gridder,
     )
 
     auto_weight_sums = None
@@ -2555,7 +2566,7 @@ def _prepare_continuum_image(
     For ``continuum_mode='mfs'``, the reduced visibility grids already represent
     Taylor residual terms. They are inverse Fourier-transformed directly into
     ``SKY_RESIDUAL(taylor_term)``. With the direct Fourier transform
-    (``gridding_kernel_params={"type": "dft"}``) the reduced residual and PSF
+    (``gridder="direct_fourier_transform"``) the reduced residual and PSF
     are already Taylor images and are only divided by their normalization.
 
     For ``continuum_mode='mvc'``, map tasks have already normalized and inverse
@@ -2612,14 +2623,10 @@ def _prepare_continuum_image(
     from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
         transform_polarization_basis,
     )
-    from astroviper.processing_functions.imaging.direct_fourier_transform import (
-        normalize_dft_image,
-    )
-    from astroviper.processing_functions.imaging.gridders.anti_alias.gridder_anti_alias import (
-        GridderAntiAlias,
+    from astroviper.processing_functions.imaging.gridders.gridder_registry import (
+        GRIDDERS,
     )
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-        is_direct_fourier_transform,
         make_gridding_kernel,
     )
     from astroviper.processing_functions.imaging.image_continuum_single_field import (
@@ -2649,17 +2656,17 @@ def _prepare_continuum_image(
     # With the direct Fourier transform the MFS map tasks returned the sums of
     # the Taylor images themselves, which are only normalised here.
     residual_output_name = "SKY_RESIDUAL"
-    direct_fourier_transform = is_direct_fourier_transform(
-        config["gridding_kernel_params"]
-    )
+    gridder = config["gridder"]
 
-    if continuum_mode == "mfs" and direct_fourier_transform:
-        normalize_dft_image(img_xds, image_data_group_name, uv_sampling=False)
-    elif continuum_mode == "mfs":
-        gridding_kernel = make_gridding_kernel(
-            config["gridding_kernel_params"], image_params["fft_padding"]
+    if continuum_mode == "mfs":
+        gridding_kernel = (
+            make_gridding_kernel(
+                config["gridding_kernel_params"], image_params["fft_padding"]
+            )
+            if "anti_alias" in GRIDDERS[gridder].gcf_terms
+            else None
         )
-        img_xds = GridderAntiAlias.uv_to_image(
+        img_xds = GRIDDERS[gridder].uv_to_image(
             img_xds,
             image_params=image_params,
             image_data_group_in_name=image_data_group_name,
@@ -2844,10 +2851,8 @@ def _prepare_continuum_image(
     # ------------------------------------------------------------------
 
     if initialize_static_products:
-        if continuum_mode == "mfs" and direct_fourier_transform:
-            normalize_dft_image(img_xds, image_data_group_name, uv_sampling=True)
-        elif continuum_mode == "mfs":
-            img_xds = GridderAntiAlias.uv_to_image(
+        if continuum_mode == "mfs":
+            img_xds = GRIDDERS[gridder].uv_to_image(
                 img_xds,
                 image_params=image_params,
                 image_data_group_in_name=image_data_group_name,
@@ -3173,6 +3178,7 @@ def _prepare_post_update_continuum_model_state(
             fft_backend=input_params.get("fft_backend", "pyfftw"),
             gridding_kernel_params=input_params.get("gridding_kernel_params"),
             input_checked=input_checked or input_params.get("input_checked", False),
+            gridder=input_params.get("gridder", "anti_alias"),
         )
     elif continuum_mode == "mvc":
         model_uv_xds = None

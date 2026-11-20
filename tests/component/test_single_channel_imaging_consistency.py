@@ -29,7 +29,7 @@ truth times the exact primary beam (:func:`oracle_model_update`), and the
 residual written is the residual of the true model.
 
 * ``test_direct_fourier_transform_truth``: with the exact direct Fourier
-  transform (``gridding_kernel_params={"type": "dft"}``, w term included)
+  transform (``gridder="direct_fourier_transform"``, w term included)
   there is neither a kernel nor a w error. The imaging weights the PSF is made
   of, the PSF, the clean mask, the dirty image and the fitted beam of the two
   imagers agree to ``PRODUCT_RTOL`` of their peaks (measured on Linux x86-64:
@@ -234,7 +234,7 @@ KEEP = [
 ]
 # the far region: the mask beyond 3 fitted major axes of every source
 FAR_RADIUS_BEAMS = 3.0
-DFT = {"type": "dft"}
+DFT = "direct_fourier_transform"
 # the NumPy direct Fourier transform is evaluated at the source pixels and at
 # this many seeded others
 REFERENCE_PIXELS = 58
@@ -556,7 +556,9 @@ def image(
         "processing_function_threads": 1,
         "n_mapping_parallelism": {"frequency": 1},
         "restore": deconvolve,
-        "gridding_kernel_params": dict(gridding_kernel_params),
+        "gridding_kernel_params": (
+            None if gridding_kernel_params is None else dict(gridding_kernel_params)
+        ),
         "overwrite": True,
     }
     if imager == "cube":
@@ -808,11 +810,13 @@ def deconvolution_errors(run, sky, threshold):
     return out
 
 
-def run_pair(work_dir, field, w_term, gridding_kernel_params, tag):
+def run_pair(work_dir, field, w_term, gridding_kernel_params, tag, **overrides):
     """The cube and the continuum run of one store and kernel, and the far region."""
     store, sky = field["stores"][w_term], field["sky"]
     runs = {
-        imager: image(work_dir, store, imager, sky, gridding_kernel_params, tag)
+        imager: image(
+            work_dir, store, imager, sky, gridding_kernel_params, tag, **overrides
+        )
         for imager in ("cube", "continuum")
     }
     cube = runs["cube"]
@@ -854,7 +858,7 @@ def field(tmp_path_factory):
 def dft_pair(request, field, tmp_path_factory):
     """Both imagers with the direct Fourier transform on one store, for both tests."""
     work_dir = str(tmp_path_factory.mktemp("dft"))
-    runs, far = run_pair(work_dir, field, request.param, DFT, "dft")
+    runs, far = run_pair(work_dir, field, request.param, None, "dft", gridder=DFT)
     return {"w_term": request.param, "runs": runs, "far": far}
 
 

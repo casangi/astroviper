@@ -1,6 +1,6 @@
 """Unit tests for the direct Fourier transform option of continuum (MFS) imaging.
 
-``gridding_kernel_params={"type": "dft"}`` makes the Taylor residuals, the Taylor
+``gridder="direct_fourier_transform"`` makes the Taylor residuals, the Taylor
 PSFs and the model visibilities of a continuum map task by the exact transforms of
 :mod:`astroviper.processing_functions.imaging.direct_fourier_transform`, whose
 convention is the measurement equation of ``simulate_processing_set``. A polarized
@@ -40,7 +40,7 @@ from astroviper.utils.beam_models import airy_disk_model
 from astroviper.utils.coordinate_transforms import inverse_sin_project
 from astroviper.utils.telescope_layout import read_telescope_layout
 
-DFT = {"type": "dft"}
+DFT = "direct_fourier_transform"
 PHASE_CENTER = np.array([4.267, np.deg2rad(-23.0)])
 CELL = 0.7 * np.pi / (180 * 3600)
 SIZE = 64
@@ -158,7 +158,7 @@ def _residual_update(
         fft_backend="scipy",
         is_first_cycle=model_uv_xds is None,
         model_uv_xds=model_uv_xds,
-        gridding_kernel_params=DFT,
+        gridder=DFT,
     )
     normalize_dft_image(img_xds, "residual", uv_sampling=False)
     if model_uv_xds is None:
@@ -232,7 +232,7 @@ def _image(store, threads=1, true_model=False, single_precision=False):
             ),
             image_params,
             single_precision_image=single_precision,
-            gridding_kernel_params=DFT,
+            gridder=DFT,
         )
         img_xds = _residual_update(
             ps_xdt, image_params, threads, model_uv_xds, single_precision
@@ -364,7 +364,7 @@ def test_the_model_for_the_dft_is_its_taylor_images_in_the_correlation_basis():
         _image_params(np.array([FREQUENCY])),
         single_precision_image=False,
         image_data_group_out_name="model_dft",
-        gridding_kernel_params=DFT,
+        gridder=DFT,
     )
     assert "VISIBILITY_MODEL" not in model_uv_xds
     for group in ("model", "model_dft"):

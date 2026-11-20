@@ -260,6 +260,29 @@ def test_node_task_images_one_channel_at_a_time(tmp_path, fake_science):
     assert stats.sizes["frequency"] == 3
 
 
+def test_the_gridder_reaches_the_science_function(tmp_path, fake_science):
+    """GraphVIPER hands a node task only the keys of input_params it declares:
+    every channel is imaged with the gridder of input_params (a node task
+    without it would image with the anti-alias gridder)."""
+    import importlib
+
+    from astroviper.node_tasks.imaging.image_cube_single_field import (
+        image_cube_single_field,
+    )
+
+    graph_map = importlib.import_module("graphviper.graph_tools.map")
+    graph_map.make_graph_node_task(image_cube_single_field)(
+        {
+            **_task_inputs(tmp_path),
+            "gridder": "direct_fourier_transform",
+            "input_data": _fake_processing_set({"ms_a": VIS_FREQUENCIES}),
+        }
+    )
+    assert [call["kwargs"]["gridder"] for call in fake_science.calls] == [
+        "direct_fourier_transform"
+    ] * 3
+
+
 @pytest.mark.parametrize(
     "cycle_control_params, model_statistics",
     [

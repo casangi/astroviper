@@ -21,7 +21,7 @@ the image, sigma, is 1.27e-4 Jy by the weights).
   0.991 to 1.010 over eight other seeds), with a mean within four standard
   errors of 0.
 * ``test_gridding_kernel_floor``: without noise, the dirty image against that
-  of the exact transform (``gridding_kernel_params={"type": "dft"}``) and the
+  of the exact transform (``gridder="direct_fourier_transform"``) and the
   residual of the true model (the model update leaves the truth, so one
   residual update measures the kernel alone), over the peak of the exact
   dirty image, and the PSF against the exact one (its peak is 1), in both
@@ -377,6 +377,7 @@ def run_image(
     controls,
     kernel=None,
     restore=False,
+    gridder="anti_alias",
 ):
     """Image a copy of ``ps_store`` with the cube or the continuum imager: the
     convergence record, imaging stop code and final residual entropy of
@@ -414,6 +415,7 @@ def run_image(
         # are compared bit for bit
         "processing_function_threads": 1,
         "gridding_kernel_params": kernel,
+        "gridder": gridder,
         "restore": restore,
         "overwrite": True,
     }
@@ -553,7 +555,7 @@ def kernel_floors(noise_free, clean_mask, tmp_path_factory):
                 "hogbom",
                 mask_file,
                 DIRTY_CONTROLS,
-                {"type": "dft"},
+                gridder="direct_fourier_transform",
             )
         dirty = run_image(
             noise_free["ps_store"],

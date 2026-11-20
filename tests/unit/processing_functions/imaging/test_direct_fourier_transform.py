@@ -1,6 +1,6 @@
 """Unit tests for the direct Fourier transform option of the single-field imager.
 
-``gridding_kernel_params={"type": "dft"}`` replaces gridding and FFT by the exact
+``gridder="direct_fourier_transform"`` replaces gridding and FFT by the exact
 transforms of :mod:`astroviper.processing_functions.imaging.direct_fourier_transform`,
 whose convention is the measurement equation of ``simulate_processing_set``. Point
 sources simulated by ``simulate_processing_set`` (four correlations, polarized, the
@@ -35,6 +35,7 @@ from astroviper.processing_functions.imaging.gridding_convolution_functions.grid
     map_error,
 )
 from astroviper.processing_functions.imaging.make_point_spread_function import (
+    make_point_spread_function_single_field,
     make_subtraction_point_spread_function_single_field,
 )
 from astroviper.processing_functions.imaging.make_point_spread_function_continuum_single_field import (
@@ -61,7 +62,7 @@ from astroviper.utils.data_group_tools import (
 )
 from astroviper.utils.telescope_layout import read_telescope_layout
 
-DFT = {"type": "dft"}
+DFT = "direct_fourier_transform"
 # the exponential of a semicircle of support 7 with linear lookup in a table of 300
 # samples per cell: a gridder kernel with a floor far below the sky's 1 / n here
 ES7 = {
@@ -190,7 +191,9 @@ def _add_model(img_xds, pixel, stokes):
     return img_xds
 
 
-def _image(store, field, kernel, pixel=None, threads=1, single_precision=False):
+def _image(
+    store, field, gridder, kernel=None, pixel=None, threads=1, single_precision=False
+):
     """Setup, dirty residual update and, with ``pixel``, the true model's residual update."""
     ps_xdt = load_processing_set(store)
     common = dict(
@@ -199,6 +202,7 @@ def _image(store, field, kernel, pixel=None, threads=1, single_precision=False):
         fft_backend="scipy",
         gridding_kernel_params=kernel,
         processing_function_threads=threads,
+        gridder=gridder,
     )
     image_params = _image_params(field)
     img_xds, _ = imaging_setup_single_field(
@@ -277,7 +281,7 @@ def test_the_image_carries_the_n_the_two_dimensional_gridder_does_not(simulated)
     n = _n("wide_100MHz", pixel)
     assert 1.0 - n > 1e-3  # the test resolves the factor
     dft = _image(store, "wide_100MHz", DFT)
-    gridder = _image(store, "wide_100MHz", ES7)
+    gridder = _image(store, "wide_100MHz", "anti_alias", ES7)
     apparent = STOKES * dft["primary_beam"][pixel]
     # 1e-9: the imager's Airy beam is a radial table (AIRY_TABLE_STEP)
     np.testing.assert_allclose(
@@ -292,7 +296,7 @@ def test_agreement_with_the_gridder_to_its_kernel_error(simulated):
     """On w-off data the DFT and the gridder differ by the kernel's map error only."""
     store, pixel = simulated("small_100GHz", False)
     dft = _image(store, "small_100GHz", DFT, pixel=pixel)
-    gridder = _image(store, "small_100GHz", ES7, pixel=pixel)
+    gridder = _image(store, "small_100GHz", "anti_alias", ES7, pixel=pixel)
     size = dft["dirty"].shape[-1]
     x = (np.arange(size) - size // 2) / padded_grid_size([size, size], FFT_PADDING)[0]
     error = map_error(make_gridding_kernel(ES7, FFT_PADDING), x)
@@ -340,7 +344,7 @@ def test_flagged_samples_and_the_normalization(simulated):
         processing_set_data_group_name="base",
         single_precision_image=False,
         fft_backend="scipy",
-        gridding_kernel_params=DFT,
+        gridder=DFT,
     )
     image_params = _image_params("small_100GHz")
     img_xds, _ = imaging_setup_single_field(
@@ -393,7 +397,7 @@ def test_subtraction_psf_of_twice_the_size_holds_the_image_psf(simulated):
         _image_params("small_100GHz"),
         ["XX", "XY", "YX", "YY"],
         ms_data_group_in_name="base",
-        gridding_kernel_params=DFT,
+        gridder=DFT,
     )
     n_l, n_m = img_xds.sizes["l"], img_xds.sizes["m"]
     rows = slice(n_l - n_l // 2, n_l - n_l // 2 + n_l)
@@ -408,9 +412,21 @@ def test_refused_kernel_keys_with_the_dft(simulated):
     store, _ = simulated("small_100GHz", False)
     for extra in ({"support": 7}, {"oversampling": 100}, {"interpolation": "linear"}):
         with pytest.raises(
-            ValueError, match="DFT accepts only gridding_kernel_params="
+            ValueError,
+            match="gridder='direct_fourier_transform' has no gridding kernel",
         ):
-            _image(store, "small_100GHz", {**DFT, **extra})
+            _image(store, "small_100GHz", DFT, extra)
+
+
+def test_the_point_spread_function_refuses_a_kernel_recipe_with_the_dft():
+    """It runs no configuration check, and refuses before reading any data."""
+    with pytest.raises(
+        ValueError,
+        match="gridder='direct_fourier_transform' has no gridding kernel",
+    ):
+        make_point_spread_function_single_field(
+            None, None, None, gridding_kernel_params={"support": 7}, gridder=DFT
+        )
 
 
 @pytest.mark.parametrize(
@@ -525,7 +541,7 @@ CONTINUUM_DFT_CALLS = {
     ),
     "make_point_spread_function_continuum_single_field": lambda count, frequency: (
         make_point_spread_function_continuum_single_field(
-            None, None, {}, count, frequency, gridding_kernel_params=DFT
+            None, None, {}, count, frequency, gridder=DFT
         )
     ),
     "make_visibility_model_continuum_single_field": lambda count, frequency: (
@@ -542,5 +558,7 @@ CONTINUUM_DFT_CALLS = {
     [(1.5, 1e9), (True, 1e9), ("2", 1e9), (1, "1e9"), (1, 0), (1, float("nan"))],
 )
 def test_dft_rejects_original_parameters_before_accessing_data(name, count, frequency):
-    with pytest.raises((TypeError, ValueError)):
+    # a case gives either a wrong count with a valid frequency or a wrong frequency
+    wrong = "n_taylor_terms" if frequency == 1e9 else "reference_frequency"
+    with pytest.raises((TypeError, ValueError), match=f"{wrong} must"):
         CONTINUUM_DFT_CALLS[name](count, frequency)

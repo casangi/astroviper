@@ -18,14 +18,12 @@ from astroviper.processing_functions.imaging.gridding_convolution_functions.grid
     CASA_GRIDDING_KERNEL_PARAMS,
     CORRECTION_FLOOR,
     DEFAULT_GRIDDING_KERNEL_PARAMS,
-    DIRECT_FOURIER_TRANSFORM,
     KERNEL_TYPES,
     _gcf_xds_from_table,
     anti_alias_kernel_arguments,
     as_gridding_kernel,
     correction,
     correction_1D,
-    is_direct_fourier_transform,
     kept_half_width,
     make_gridding_kernel,
     map_error,
@@ -124,23 +122,19 @@ class TestParams:
         resolve_gridding_kernel_params(casa)["oversampling"] = 5
         assert CASA_GRIDDING_KERNEL_PARAMS["oversampling"] == 100
 
-    def test_direct_fourier_transform(self):
-        assert DIRECT_FOURIER_TRANSFORM == "dft"
-        assert resolve_gridding_kernel_params({"type": "dft"}) == {"type": "dft"}
-        assert is_direct_fourier_transform({"type": "dft"})
-        assert not is_direct_fourier_transform(None)
-        assert not is_direct_fourier_transform({"type": "prolate_spheroidal"})
-        # the kernel keys do not apply: refused, as is a kernel for it
+    def test_the_type_dft_is_refused(self):
+        """The direct Fourier transform is the gridder "direct_fourier_transform",
+        not a kernel type."""
+        type_refused = r"gridding_kernel_params\['type'\] must be one of"
         for extra in (
+            {},
             {"support": 7},
             {"oversampling": 100},
             {"interpolation": "nearest"},
         ):
-            with pytest.raises(ValueError, match="DFT accepts only"):
+            with pytest.raises(ValueError, match=type_refused):
                 resolve_gridding_kernel_params({"type": "dft", **extra})
-            with pytest.raises(ValueError, match="DFT accepts only"):
-                is_direct_fourier_transform({"type": "dft", **extra})
-        with pytest.raises(ValueError, match="has no gridding kernel"):
+        with pytest.raises(ValueError, match=type_refused):
             make_gridding_kernel({"type": "dft"})
         with pytest.raises(ValueError, match="must be one of"):
             resolve_gridding_kernel_params({"type": "boxcar"})

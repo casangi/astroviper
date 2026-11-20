@@ -6,7 +6,10 @@
         "image_params": { "required": true, "type": ["dict"] },
         "imaging_weights_params": { "required": true, "type": ["dict"] },
         "cycle_control_params": { "required": true, "type": ["dict"] },
-        "gridder": { "type": ["str"], "allowed": ["anti_alias"] },
+        "gridder": {
+            "type": ["str"],
+            "allowed": ["anti_alias", "direct_fourier_transform"]
+        },
         "deconvolver": {
             "type": ["str"],
             "allowed": ["hogbom", "hogbom_many_threads", "asp"]

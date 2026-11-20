@@ -88,7 +88,7 @@ def test_finalization_real_preparation_reuses_only_checked_configuration(
         "restore": False,
     }
     if mode == "mfs":
-        params["gridding_kernel_params"] = {"type": "dft"}
+        params["gridder"] = "direct_fourier_transform"
         runtime_name = "astroviper.processing_functions.imaging.direct_fourier_transform.normalize_dft_image"
     else:
         params["static_xds"]["PRIMARY_BEAM"] = params[

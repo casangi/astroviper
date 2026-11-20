@@ -850,6 +850,83 @@ def test_residual_update_node_passes_the_gridding_kernel_on(
     assert received["gridding_kernel_params"] == gridding_kernel_params
 
 
+@pytest.mark.parametrize("gridder", ["anti_alias", "direct_fourier_transform"])
+def test_residual_update_node_passes_the_gridder_on(monkeypatch, gridder):
+    """GraphVIPER hands a node task only the keys of input_params it declares:
+    the map node receives the gridder and hands it to the processing function
+    (a node without it would grid with the anti-alias gridder)."""
+    graph_map = importlib.import_module("graphviper.graph_tools.map")
+    monkeypatch.setattr("xradio.image.make_empty_sky_image", _empty_weight_image)
+    monkeypatch.setattr(
+        continuum_node, "_load_continuum_weights_in_place", lambda ps, *a, **k: ps
+    )
+    received = {}
+
+    def fake_residual_update(ps_xdt, img_xds, *args, **kwargs):
+        received.update(kwargs)
+        return img_xds, pd.DataFrame({"imaging_weights_calculated": [0.0]})
+
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.residual_update_continuum_single_field",
+        fake_residual_update,
+    )
+    params = _weight_node_params()
+    params.update(
+        make_primary_beam_taylor=False,
+        image_store="image.zarr",
+        weight_memory_mode="in_place",
+        weight_cache_is_active=True,
+        continuum_mode="mfs",
+        data_group={"correlated_data": "VISIBILITY"},
+        gridder=gridder,
+    )
+
+    graph_map.make_graph_node_task(
+        continuum_node.residual_update_continuum_single_field
+    )(params)
+
+    assert received["gridder"] == gridder
+
+
+def test_append_preparation_normalizes_by_the_gridder_of_its_parameters(
+    monkeypatch,
+):
+    """The append node's parameters carry the gridder: the reduced products of
+    the direct Fourier transform are divided by their normalization, without a
+    kernel or an inverse FFT."""
+    image = make_runaway_taylor_image()
+    dft = importlib.import_module(
+        "astroviper.processing_functions.imaging.direct_fourier_transform"
+    )
+    kernel = importlib.import_module(
+        "astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel"
+    )
+
+    def no_kernel(*args, **kwargs):
+        raise AssertionError("the direct Fourier transform needs no kernel")
+
+    class Normalized(Exception):
+        pass
+
+    def normalize(img_xds, image_data_group_name, uv_sampling=False):
+        assert img_xds is image
+        assert (image_data_group_name, uv_sampling) == ("residual", False)
+        raise Normalized
+
+    monkeypatch.setattr(kernel, "make_gridding_kernel", no_kernel)
+    monkeypatch.setattr(dft, "normalize_dft_image", normalize)
+    with pytest.raises(Normalized):
+        continuum_node._prepare_continuum_image(
+            image,
+            {
+                "image_params": {"n_taylor_terms": 2, "reference_frequency": 1e9},
+                "gridder": "direct_fourier_transform",
+                "input_checked": True,
+            },
+            initialize_static_products=True,
+        )
+
+
 def test_weight_density_node_returns_valid_reducer_leaf(monkeypatch):
     """The first weighting node packages density products and timings."""
     monkeypatch.setattr("xradio.image.make_empty_sky_image", _empty_weight_image)
@@ -2686,7 +2763,14 @@ def test_preparation_checks_actual_taylor_layout_with_shared_predicate(
         "n_psf_taylor_terms": 3,
         "reference_frequency": 1e9,
         "image_data_group_in_name": "residual",
-        "gridding_kernel_params": {"type": "dft"},
+        "gridding_kernel_params": None,
+        "gridder": "direct_fourier_transform",
+        # arguments of the gridder's uv_to_image, unused by the direct
+        # Fourier transform
+        "image_data_variables_keep": [],
+        "processing_function_threads": 1,
+        "fft_backend": "pyfftw",
+        "complex_dtype": np.complex64,
     }
     monkeypatch.setattr(
         continuum_node,

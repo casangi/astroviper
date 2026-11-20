@@ -43,13 +43,12 @@ def test_mfs_dft_dispatch_preserves_configuration_and_skips_kernel(
     ms_xdt = object()
     img_xds = xr.Dataset(attrs={"data_groups": {"residual": {}}})
     params = {"n_taylor_terms": 2, "reference_frequency": 1e9}
-    recipe = {"type": "dft"}
     result, _ = module.make_point_spread_function_continuum_single_field(
         {"ms": ms_xdt},
         img_xds,
         params,
-        gridding_kernel_params=recipe,
         input_checked=checked,
+        gridder="direct_fourier_transform",
     )
     assert result is img_xds
     assert check.call_count == (0 if checked else 1)
@@ -60,4 +59,3 @@ def test_mfs_dft_dispatch_preserves_configuration_and_skips_kernel(
     assert transform.call_args.kwargs["gridder"] == "direct_fourier_transform"
     build.assert_not_called()
     assert params == {"n_taylor_terms": 2, "reference_frequency": 1e9}
-    assert recipe == {"type": "dft"}

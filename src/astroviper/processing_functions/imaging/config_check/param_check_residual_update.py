@@ -64,9 +64,13 @@ def check_residual_update(config, *, mode, require_complete=False):
         check_fft_backend(config["fft_backend"])
 
     # --- Implemented gridder ---
-    # The single-field nodes implement anti-alias gridding only; no fallback.
-    if "gridder" in config and config["gridder"] != "anti_alias":
-        raise ValueError("Single-field imaging supports only gridder='anti_alias'.")
+    # The single-field nodes implement the gridders of the registry; no fallback.
+    if "gridder" in config:
+        from astroviper.processing_functions.imaging.config_check._gridding import (
+            check_gridder,
+        )
+
+        check_gridder(config["gridder"])
 
     # --- MVC model-update approximation ---
     # Each approximation needs its own static products; reject unknown names
@@ -154,14 +158,21 @@ def check_residual_update(config, *, mode, require_complete=False):
             raise TypeError("complex_dtype must be complex64 or complex128.")
 
     # --- Continuum construction ---
-    # Continuum residuals can be formed by either the MFS or MVC path.
+    # Continuum residuals can be formed by either the MFS or MVC path; MVC
+    # needs a gridder that makes uv grids.
     continuum_mode = config.get("continuum_mode", "mfs")
     if mode.imaging_kind == "continuum":
         from astroviper.processing_functions.imaging.config_check._common import (
             check_continuum_mode,
         )
+        from astroviper.processing_functions.imaging.config_check._gridding import (
+            check_gridder_continuum_mode,
+        )
 
         check_continuum_mode(continuum_mode)
+        check_gridder_continuum_mode(
+            config.get("gridder", "anti_alias"), continuum_mode
+        )
 
     # --- Cube weighting scope ---
     # Cube imaging does not implement a density shared across all channels.
@@ -350,15 +361,21 @@ def check_residual_update(config, *, mode, require_complete=False):
 
     # --- Kernel design ---
     # Validate schema, padding and cached image-edge correction before gridding.
+    # A gridder without the anti-alias term uses no kernel, so it takes none.
     if "gridding_kernel_params" in config:
         from astroviper.processing_functions.imaging.config_check._gridding import (
+            check_gridder_kernel,
             check_gridding_kernel,
         )
 
-        check_gridding_kernel(
-            config["gridding_kernel_params"],
-            fft_padding=image_params.get("fft_padding"),
+        gridder_class = check_gridder_kernel(
+            config.get("gridder", "anti_alias"), config["gridding_kernel_params"]
         )
+        if "anti_alias" in gridder_class.gcf_terms:
+            check_gridding_kernel(
+                config["gridding_kernel_params"],
+                fft_padding=image_params.get("fft_padding"),
+            )
 
     # --- Weighting method ---
     # Keep uniform as a public method; its kernel recipe must not rewrite inputs.

@@ -158,6 +158,13 @@ _FIELD_NAME_DOC = (
     "not currently filter fields; prepare a single-field input Processing Set."
 )
 
+_UNDECONVOLVED_IMAGE_GRIDDER_DOC = (
+    "Registry name of the gridder (a key of\n"
+    ":data:`~astroviper.processing_functions.imaging.gridders.gridder_registry.GRIDDERS`):\n"
+    '``"anti_alias"`` (the default) or ``"direct_fourier_transform"``,\n'
+    'which uses neither ``gcf_xds`` nor ``image_params["fft_padding"]``.'
+)
+
 # The parameters of find_continuum.
 _FIND_CONTINUUM_PARAM_DOCS = {
     "input_image_store": "xradio image store of the dirty cube (Stokes I is used).",
@@ -647,6 +654,31 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
     ),
     "continuum_mode": _CONTINUUM_MODE_DOC,
     "resolve_continuum_primary_beam.continuum_mode": (_CONTINUUM_PRIMARY_BEAM_MODE_DOC),
+    "gridder": (
+        "Registry name of the gridder (a key of\n"
+        ":data:`~astroviper.processing_functions.imaging.gridders.gridder_registry.GRIDDERS`):\n"
+        '``"anti_alias"`` (the default), convolutional gridding with the\n'
+        "anti-aliasing kernel of ``gridding_kernel_params`` (by default the\n"
+        "``least_misfit`` kernel of support 9, oversampling 300 and linear\n"
+        'lookup), or ``"direct_fourier_transform"``, which replaces the gridding\n'
+        "and the FFTs by the exact direct Fourier transform over the unpadded\n"
+        "image, w term included: with the phase\n"
+        "``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the\n"
+        "model visibilities are ``sum M exp(+i phase) / n`` over the model pixels\n"
+        "and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,\n"
+        "the measurement equation of ``simulate_processing_set``. It uses no\n"
+        "kernel and no ``fft_padding``. Its cost is proportional to the samples\n"
+        "times the image pixels (30 to 40 s per residual update of 451,500\n"
+        "samples, four correlations and 160 x 160 pixels on one core), so give\n"
+        "it several ``processing_function_threads``; its results do not depend\n"
+        "on their number. Its ``VISIBILITY_NORMALIZATION`` and\n"
+        "``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the\n"
+        "anti-alias gridder's that sum times the kernel's stencil sums."
+    ),
+    "make_undeconvolved_image_single_field.gridder": _UNDECONVOLVED_IMAGE_GRIDDER_DOC,
+    "make_undeconvolved_image_continuum_single_field.gridder": (
+        _UNDECONVOLVED_IMAGE_GRIDDER_DOC
+    ),
     "gridding_kernel_params": (
         "The gridding convolution kernel the gridder and degridder use:\n"
         '``type`` (``"prolate_spheroidal_casa"``, Schwab\'s rational\n'
@@ -682,20 +714,8 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
         "the image kept (a support too large for the ``fft_padding``, e.g. 17\n"
         "at 1.05) is refused. The kernel of the\n"
         'former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,\n'
-        'not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces\n'
-        "the gridding and the FFTs by the exact direct Fourier transform over the\n"
-        "unpadded image, w term included: with the phase\n"
-        "``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the\n"
-        "model visibilities are ``sum M exp(+i phase) / n`` over the model pixels\n"
-        "and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,\n"
-        "the measurement equation of ``simulate_processing_set``. Its cost is\n"
-        "proportional to the samples times the image pixels (30 to 40 s per\n"
-        "residual update of 451,500 samples, four correlations and 160 x 160\n"
-        "pixels on one core), so give it several\n"
-        "``processing_function_threads``; its results do not depend on their\n"
-        "number. Its ``VISIBILITY_NORMALIZATION`` and\n"
-        "``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the\n"
-        "gridders' that sum times the kernel's stencil sums."
+        'not ``"prolate_spheroidal"``. The gridder ``"direct_fourier_transform"``\n'
+        "uses no kernel: ``gridding_kernel_params`` must then be ``None``."
     ),
     "gcf_xds": (
         "The ``gcf_xds`` of the gridding kernel, from\n"
