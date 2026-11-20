@@ -1024,7 +1024,7 @@ def test_asp_hands_taylor_term_zero_to_the_cube_asp_kernel(monkeypatch, asp_opti
     """The adapter runs the cube Asp path on Taylor term zero of every
     (time, polarization) plane, with the per-plane limits, the divergence
     limits of Asp and the Asp options, and copies the model back."""
-    import astroviper.processing_functions.imaging.deconvolution as deconvolution
+    from astroviper.processing_functions.imaging.model_update import deconvolve
 
     image, _, _ = make_single_term_continuum_image()
     limits = np.array([[[3, 4]], [[5, 6]]])  # (time, plane, polarization)
@@ -1046,7 +1046,7 @@ def test_asp_hands_taylor_term_zero_to_the_cube_asp_kernel(monkeypatch, asp_opti
             "model_flux": np.full(limits.shape, 0.5),
         }
 
-    monkeypatch.setattr(deconvolution.aspclean, "clean_cube", clean_cube)
+    monkeypatch.setattr(deconvolve.aspclean, "clean_cube", clean_cube)
     statistics, timing = model_update_mtmfs_single_field(
         image,
         "asp",

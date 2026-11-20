@@ -2,7 +2,7 @@
 
 import pytest
 
-from astroviper.processing_functions.imaging.deconvolution import (
+from astroviper.processing_functions.imaging.model_update.deconvolve import (
     _validate_deconvolve_params,
     validate_exact_psf_subtraction,
 )

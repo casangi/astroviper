@@ -964,7 +964,7 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
         "  leaves on resolved emission in far fewer iterations, and take no\n"
         "  residual below ``threshold_per_cycle``. Further keys\n"
         "  (``asp_residual_component_*``) are described in\n"
-        "  :func:`~astroviper.processing_functions.imaging.deconvolution.asp_clean`.\n"
+        "  :func:`~astroviper.processing_functions.imaging.model_update.deconvolve.asp_clean`.\n"
         "  Asp only. Default ``True``. No CASA equivalent.\n"
         "- ``asp_scale_significance`` : If ``True``, Asp measures the noise of\n"
         "  the residual smoothed with each of its initial scales and, once the\n"

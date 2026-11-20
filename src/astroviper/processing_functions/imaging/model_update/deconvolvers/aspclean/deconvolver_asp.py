@@ -23,10 +23,10 @@ class DeconvolverAsp(Deconvolver):
         *,
         input_checked=False,
     ):
-        """:meth:`Deconvolver.deconvolve` by :func:`~astroviper.processing_functions.imaging.deconvolution.asp_clean`."""
-        from astroviper.processing_functions.imaging import deconvolution
+        """:meth:`Deconvolver.deconvolve` by :func:`~astroviper.processing_functions.imaging.model_update.deconvolve.asp_clean`."""
+        from astroviper.processing_functions.imaging.model_update import deconvolve
 
-        return deconvolution.asp_clean(
+        return deconvolve.asp_clean(
             residual_cube=residual_cube,
             psf_cube=psf_cube,
             model_cube=model_cube,

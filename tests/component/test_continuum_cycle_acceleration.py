@@ -326,7 +326,7 @@ def test_driver_warns_once_when_momentum_switches_off_on_a_plane(run, monkeypatc
     driver warns once, for that plane only."""
     import toolviper.utils.logger as logger
 
-    import astroviper.processing_functions.imaging.cycle_acceleration as acceleration
+    import astroviper.processing_functions.imaging.model_update.cycle_acceleration as acceleration
 
     step_function = acceleration.nesterov_momentum_model_step
     calls = []

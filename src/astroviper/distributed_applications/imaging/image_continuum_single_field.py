@@ -2436,7 +2436,7 @@ def _refuse_unsupported_continuum_cycle_options(deconvolver, cycle_control_param
 
     Every continuum deconvolver records ``record_iteration_history``, which
     the cube check
-    (:func:`~astroviper.processing_functions.imaging.deconvolution.validate_record_iteration_history`)
+    (:func:`~astroviper.processing_functions.imaging.model_update.deconvolve.validate_record_iteration_history`)
     takes as a bool. No continuum deconvolver does ``exact_psf_subtraction``: the
     continuum graph makes no PSF of twice the image size. Called before
     anything is written.
@@ -3033,7 +3033,7 @@ def image_continuum_single_field(
           leaves on resolved emission in far fewer iterations, and take no
           residual below ``threshold_per_cycle``. Further keys
           (``asp_residual_component_*``) are described in
-          :func:`~astroviper.processing_functions.imaging.deconvolution.asp_clean`.
+          :func:`~astroviper.processing_functions.imaging.model_update.deconvolve.asp_clean`.
           Asp only. Default ``True``. No CASA equivalent.
         - ``asp_scale_significance`` : If ``True``, Asp measures the noise of
           the residual smoothed with each of its initial scales and, once the

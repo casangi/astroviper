@@ -120,7 +120,7 @@ struct AspResult {
 };
 
 // Options of Asp beyond CASA's and LibRA's AspMatrixCleaner, all off by default
-// in the kernel but asp_min_mask_coverage; deconvolution.asp_clean() turns
+// in the kernel but asp_min_mask_coverage; deconvolve.asp_clean() turns
 // asp_scale_significance, asp_residual_components and
 // asp_residual_component_positive_only on: the
 // first two together clean the ring residuals Asp leaves on resolved

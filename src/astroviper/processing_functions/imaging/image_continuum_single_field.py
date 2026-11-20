@@ -3450,7 +3450,7 @@ def _model_update_native_mtmfs(
     from astroviper.processing_functions.image_analysis import (
         image_statistics as imgstats,
     )
-    from astroviper.processing_functions.imaging.deconvolution import (
+    from astroviper.processing_functions.imaging.model_update.deconvolve import (
         _divergence_factors,
     )
     from astroviper.processing_functions.imaging.model_update.deconvolvers import mtmfs
@@ -3779,7 +3779,7 @@ def model_update_mtmfs_single_field(
         ``asp_min_mask_coverage`` of their flux on them). When a clean mask is
         present, its intersection with that PB support is used; the stop
         test measures the same pixels. With ``"asp"`` the keys of
-        :func:`~astroviper.processing_functions.imaging.deconvolution.asp_clean`
+        :func:`~astroviper.processing_functions.imaging.model_update.deconvolve.asp_clean`
         (``asp_largest_scale``, ``asp_residual_components``,
         ``asp_scale_significance`` and the others) reach the Asp kernel
         unchanged.

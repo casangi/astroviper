@@ -1,5 +1,5 @@
 """
-Unit tests for :mod:`astroviper.processing_functions.imaging.deconvolution`.
+Unit tests for :mod:`astroviper.processing_functions.imaging.model_update.deconvolve`.
 
 These tests exercise the Python-level orchestration of the CLEAN
 pipeline:
@@ -22,7 +22,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from astroviper.processing_functions.imaging.deconvolution import (
+from astroviper.processing_functions.imaging.model_update.deconvolve import (
     _divergence_factors,
     _plane_peak_abs_signed,
     _validate_deconvolve_params,
@@ -604,7 +604,7 @@ class TestHogbomCleanCube:
     def test_each_function_logs_its_own_debug_lines(self, monkeypatch, clean, lines):
         logged = []
         monkeypatch.setattr(
-            "astroviper.processing_functions.imaging.deconvolution.logger.debug",
+            "astroviper.processing_functions.imaging.model_update.deconvolve.logger.debug",
             lambda message, *args, **kwargs: logged.append(message),
         )
         resid = np.zeros((1, 1, 1, 8, 8), dtype=np.float32)
@@ -1134,7 +1134,7 @@ class TestAspClean:
         assert results[True]["iterations_performed"][0, 0, 0] < 400
 
     def test_stop_after_hogbom_run_must_be_a_bool(self):
-        from astroviper.processing_functions.imaging.deconvolution import (
+        from astroviper.processing_functions.imaging.model_update.deconvolve import (
             _validate_deconvolve_params,
         )
 
@@ -1148,7 +1148,7 @@ class TestAspClean:
         "key", ["asp_residual_components", "asp_scale_significance"]
     )
     def test_ring_cleaning_switches_are_bools_and_on(self, key):
-        from astroviper.processing_functions.imaging.deconvolution import (
+        from astroviper.processing_functions.imaging.model_update.deconvolve import (
             _validate_deconvolve_params,
         )
 

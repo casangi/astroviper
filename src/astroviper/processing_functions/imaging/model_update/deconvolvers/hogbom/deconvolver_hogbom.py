@@ -23,10 +23,10 @@ class DeconvolverHogbom(Deconvolver):
         *,
         input_checked=False,
     ):
-        """:meth:`Deconvolver.deconvolve` by :func:`~astroviper.processing_functions.imaging.deconvolution.hogbom_clean`."""
-        from astroviper.processing_functions.imaging import deconvolution
+        """:meth:`Deconvolver.deconvolve` by :func:`~astroviper.processing_functions.imaging.model_update.deconvolve.hogbom_clean`."""
+        from astroviper.processing_functions.imaging.model_update import deconvolve
 
-        return deconvolution.hogbom_clean(
+        return deconvolve.hogbom_clean(
             residual_cube=residual_cube,
             psf_cube=psf_cube,
             model_cube=model_cube,

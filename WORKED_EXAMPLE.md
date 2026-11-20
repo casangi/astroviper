@@ -155,7 +155,7 @@ via the cycle control functions on `cycle_control_state`:
 - Restore: `restore.py` (`restore_image`) — clean-beam-convolved model plus
   residual (FFT convolution, clean beam built from the residual group's
   `beam_fit_params_point_spread_function`).
-- Deconvolvers: `deconvolution.py` dispatch → `model_update/deconvolvers/hogbom` (C++),
+- Deconvolvers: `model_update/deconvolve.py` dispatch → `model_update/deconvolvers/hogbom` (C++),
   `model_update/deconvolvers/aspclean` (C++).
 - The anti-aliasing gridder is implemented in C++
   (`gridders/anti_alias/anti_alias_grid_cpp`); `gridding_kernel_params` selects its

@@ -2159,7 +2159,7 @@ def _run_accelerated_append(
 @pytest.mark.parametrize("params", [{}, {"cycle_acceleration": "none"}])
 def test_default_append_does_not_enter_cycle_acceleration(monkeypatch, params):
     """Without acceleration the next helper receives the model update's own image."""
-    import astroviper.processing_functions.imaging.cycle_acceleration as acceleration
+    import astroviper.processing_functions.imaging.model_update.cycle_acceleration as acceleration
 
     def unexpected(*args, **kwargs):
         pytest.fail("The default imaging cycle must not run an acceleration")
@@ -2378,7 +2378,7 @@ def test_plain_step_planes_follow_the_stop_test_after_the_model_update(
     controller nor the history."""
     import copy
 
-    import astroviper.processing_functions.imaging.cycle_acceleration as acceleration
+    import astroviper.processing_functions.imaging.model_update.cycle_acceleration as acceleration
     from astroviper.processing_functions.imaging.utils.cycle_control import (
         IMAGING_CONTINUE,
         ensure_planes,
@@ -2437,7 +2437,7 @@ def test_plain_step_planes_follow_the_residual_the_model_update_ends_with(
     the model update brings Stokes I to 0.101 (threshold 0.1) and uses up
     Q's ``max_iter``. The controller keeps the codes of the check before."""
     _stub_mvc_beam_diagnostic(monkeypatch)
-    import astroviper.processing_functions.imaging.cycle_acceleration as acceleration
+    import astroviper.processing_functions.imaging.model_update.cycle_acceleration as acceleration
     from astroviper.processing_functions.imaging.utils import (
         StopCode,
         make_cycle_control_state,

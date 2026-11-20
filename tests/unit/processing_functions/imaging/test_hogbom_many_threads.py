@@ -21,7 +21,7 @@ try:
 except ImportError:  # pragma: no cover
     HOGBOM_AVAILABLE = False
 
-from astroviper.processing_functions.imaging.deconvolution import (
+from astroviper.processing_functions.imaging.model_update.deconvolve import (
     hogbom_clean,
     hogbom_clean_many_threads,
 )

@@ -2,10 +2,8 @@
 
 import pytest
 
-from astroviper.processing_functions.imaging import (
-    deconvolution,
-    image_continuum_single_field,
-)
+from astroviper.processing_functions.imaging import image_continuum_single_field
+from astroviper.processing_functions.imaging.model_update import deconvolve
 from astroviper.processing_functions.imaging.model_update.deconvolvers.deconvolver_registry import (
     DECONVOLVERS,
 )
@@ -25,7 +23,7 @@ def test_pixel_deconvolvers_pass_every_argument_by_keyword(
 ):
     calls = []
     monkeypatch.setattr(
-        deconvolution, function, lambda **kwargs: calls.append(kwargs) or "results"
+        deconvolve, function, lambda **kwargs: calls.append(kwargs) or "results"
     )
     arguments = {
         "residual_cube": object(),

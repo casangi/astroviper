@@ -3235,7 +3235,7 @@ def _accelerate_continuum_model_increment(
     import numpy as np
     import xarray as xr
 
-    from astroviper.processing_functions.imaging.cycle_acceleration import (
+    from astroviper.processing_functions.imaging.model_update.cycle_acceleration import (
         conjugate_gradient_model_step,
         nesterov_momentum_model_step,
     )

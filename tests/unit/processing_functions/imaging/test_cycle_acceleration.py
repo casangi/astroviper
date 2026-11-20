@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from astroviper.processing_functions.imaging.cycle_acceleration import (
+from astroviper.processing_functions.imaging.model_update.cycle_acceleration import (
     conjugate_gradient_model_step,
     nesterov_momentum_model_step,
 )
@@ -1077,7 +1077,7 @@ def test_momentum_plain_step_planes_reset_only_their_plane():
 
 @pytest.mark.parametrize("coefficient", [True, "0.5", float("nan"), -0.1, 1.0])
 def test_momentum_checks_configuration_before_accessing_arrays(coefficient):
-    from astroviper.processing_functions.imaging.cycle_acceleration import (
+    from astroviper.processing_functions.imaging.model_update.cycle_acceleration import (
         nesterov_momentum_model_step,
     )
 

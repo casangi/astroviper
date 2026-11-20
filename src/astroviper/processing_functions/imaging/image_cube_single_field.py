@@ -273,7 +273,7 @@ def imaging_preparation_single_field(
           leaves on resolved emission in far fewer iterations, and take no
           residual below ``threshold_per_cycle``. Further keys
           (``asp_residual_component_*``) are described in
-          :func:`~astroviper.processing_functions.imaging.deconvolution.asp_clean`.
+          :func:`~astroviper.processing_functions.imaging.model_update.deconvolve.asp_clean`.
           Asp only. Default ``True``. No CASA equivalent.
         - ``asp_scale_significance`` : If ``True``, Asp measures the noise of
           the residual smoothed with each of its initial scales and, once the
@@ -764,7 +764,7 @@ def image_cube_single_field(
           leaves on resolved emission in far fewer iterations, and take no
           residual below ``threshold_per_cycle``. Further keys
           (``asp_residual_component_*``) are described in
-          :func:`~astroviper.processing_functions.imaging.deconvolution.asp_clean`.
+          :func:`~astroviper.processing_functions.imaging.model_update.deconvolve.asp_clean`.
           Asp only. Default ``True``. No CASA equivalent.
         - ``asp_scale_significance`` : If ``True``, Asp measures the noise of
           the residual smoothed with each of its initial scales and, once the

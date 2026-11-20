@@ -7,7 +7,9 @@ import numpy as np
 import pytest
 
 from astroviper.processing_functions.image_analysis import image_statistics as imgstats
-from astroviper.processing_functions.imaging.deconvolution import _hogbom_peak_cube
+from astroviper.processing_functions.imaging.model_update.deconvolve import (
+    _hogbom_peak_cube,
+)
 
 
 def _reference_peak_abs_signed(plane, mask=None):

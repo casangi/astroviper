@@ -24,7 +24,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from astroviper.processing_functions.imaging.deconvolution import (
+from astroviper.processing_functions.imaging.model_update.deconvolve import (
     _validate_deconvolve_params,
     asp_clean,
     deconvolve,
