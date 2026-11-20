@@ -127,29 +127,29 @@ def add_to_imaging_dict(imaging_dict, value, time, pol, chan):
     if key not in imaging_dict:
         # First time seeing this key - initialize
         imaging_dict[key] = {}
-        for field, field_value in value.items():
-            if field in FIELD_ACCUM:
-                # Initialize as single-element list
+    for field, field_value in value.items():
+        if field in FIELD_ACCUM:
+            # Append to history
+            if field in imaging_dict[key]:
+                # Handle backward compatibility: convert to list if needed
+                if not isinstance(imaging_dict[key][field], list):
+                    imaging_dict[key][field] = [imaging_dict[key][field]]
+                imaging_dict[key][field].append(field_value)
+            else:
+                # First occurrence of this field
                 imaging_dict[key][field] = [field_value]
-            else:
-                # Store as single value
-                imaging_dict[key][field] = field_value
-    else:
-        # Key exists - update with history tracking
-        for field, field_value in value.items():
-            if field in FIELD_ACCUM:
-                # Append to history
-                if field in imaging_dict[key]:
-                    # Handle backward compatibility: convert to list if needed
-                    if not isinstance(imaging_dict[key][field], list):
-                        imaging_dict[key][field] = [imaging_dict[key][field]]
-                    imaging_dict[key][field].append(field_value)
-                else:
-                    # First occurrence of this field
-                    imaging_dict[key][field] = [field_value]
-            else:
-                # Replace single value
-                imaging_dict[key][field] = field_value
+        else:
+            # Replace single value
+            imaging_dict[key][field] = field_value
+
+
+def _matches(key, time, pol, chan):
+    """True if an imaging_dict key matches the (time, pol, chan) selection."""
+    return (
+        (time is None or key.time == time)
+        and (pol is None or key.pol == pol)
+        and (chan is None or key.chan == chan)
+    )
 
 
 def select_from_imaging_dict(imaging_dict, time=None, pol=None, chan=None):
@@ -170,11 +170,7 @@ def select_from_imaging_dict(imaging_dict, time=None, pol=None, chan=None):
     """
     matches = []
     for key, value in imaging_dict.items():
-        if (
-            (time is None or key.time == time)
-            and (pol is None or key.pol == pol)
-            and (chan is None or key.chan == chan)
-        ):
+        if _matches(key, time, pol, chan):
             matches.append(value)
 
     if len(matches) == 1:

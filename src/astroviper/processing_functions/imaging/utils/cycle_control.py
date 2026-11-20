@@ -47,6 +47,7 @@ from astroviper.processing_functions.imaging.utils.imaging_dict import (
     FIELD_ACCUM,
     ITERATION_HISTORY_FIELDS,
     Key,
+    _matches,
     add_to_imaging_dict,
     ends_with_stop_test,
     select_from_imaging_dict,
@@ -178,6 +179,38 @@ def _validate_imaging_dict_selection(
             available_str = f"Available keys (first 10 of {len(available_keys)}): {available_keys[:10]}"
 
         raise KeyError(f"No entries found for {filter_str}. {available_str}")
+
+
+def _select_entries(imaging_dict, time, pol, chan):
+    """The entries of the planes that match ``time``, ``pol`` and ``chan``, as a list.
+
+    Raises the KeyError of :func:`_validate_imaging_dict_selection` for an
+    explicit selection that matches no plane.
+    """
+    selected = select_from_imaging_dict(imaging_dict, time=time, pol=pol, chan=chan)
+    _validate_imaging_dict_selection(imaging_dict, selected, time, pol, chan)
+    if not isinstance(selected, list):
+        selected = [selected] if selected is not None else []
+    return selected
+
+
+def _sum_latest(imaging_dict, field, time, pol, chan):
+    """Sum of the latest values of ``field`` over the selected planes, from 0.0.
+
+    A plane whose ``field`` is an empty list is left out.
+    """
+    total = 0.0
+    for entry in _select_entries(imaging_dict, time, pol, chan):
+        if entry is not None and field in entry:
+            # Extract value (handle both list and single value for backward compatibility)
+            value = entry[field]
+            if isinstance(value, list):
+                if len(value) == 0:
+                    continue
+                # Use latest value (last in list)
+                value = value[-1]
+            total += value
+    return total
 
 
 def merge_imaging_dicts(
@@ -334,11 +367,7 @@ def get_peak_residual_from_imaging_dict(
         Maximum peak residual across selected planes (latest value from history)
         Returns 0.0 if no valid data found
     """
-    selected = select_from_imaging_dict(imaging_dict, time=time, pol=pol, chan=chan)
-    _validate_imaging_dict_selection(imaging_dict, selected, time, pol, chan)
-
-    if not isinstance(selected, list):
-        selected = [selected] if selected is not None else []
+    selected = _select_entries(imaging_dict, time, pol, chan)
 
     peak = 0.0
     key = "peakres" if use_mask else "peakres_nomask"
@@ -395,25 +424,7 @@ def get_masksum_from_imaging_dict(
         Sum of latest mask values across selected planes
         Returns 0.0 if no mask data found
     """
-    selected = select_from_imaging_dict(imaging_dict, time=time, pol=pol, chan=chan)
-    _validate_imaging_dict_selection(imaging_dict, selected, time, pol, chan)
-
-    if not isinstance(selected, list):
-        selected = [selected] if selected is not None else []
-
-    total_masksum = 0.0
-    for entry in selected:
-        if entry is not None and "masksum" in entry:
-            # Extract value (handle both list and single value for backward compatibility)
-            value = entry["masksum"]
-            if isinstance(value, list):
-                if len(value) == 0:
-                    continue
-                # Use latest value (last in list)
-                value = value[-1]
-            total_masksum += value
-
-    return total_masksum
+    return _sum_latest(imaging_dict, "masksum", time, pol, chan)
 
 
 def get_iterations_done_from_imaging_dict(
@@ -444,11 +455,7 @@ def get_iterations_done_from_imaging_dict(
     total_iterations : int
         Sum of all iterations done across entire history and selected planes
     """
-    selected = select_from_imaging_dict(imaging_dict, time=time, pol=pol, chan=chan)
-    _validate_imaging_dict_selection(imaging_dict, selected, time, pol, chan)
-
-    if not isinstance(selected, list):
-        selected = [selected] if selected is not None else []
+    selected = _select_entries(imaging_dict, time, pol, chan)
 
     total_iters = 0
     for entry in selected:
@@ -497,11 +504,7 @@ def get_max_psf_sidelobe_from_imaging_dict(
         Maximum PSF sidelobe level across selected planes
         Returns 0.2 (conservative default) if not found
     """
-    selected = select_from_imaging_dict(imaging_dict, time=time, pol=pol, chan=chan)
-    _validate_imaging_dict_selection(imaging_dict, selected, time, pol, chan)
-
-    if not isinstance(selected, list):
-        selected = [selected] if selected is not None else []
+    selected = _select_entries(imaging_dict, time, pol, chan)
 
     max_sidelobe = 0.0
     found_any = False
@@ -563,27 +566,7 @@ def get_model_flux_from_imaging_dict(
     >>> get_model_flux_from_imaging_dict(rd, time=0, pol=0, chan=0)
     2.3  # Latest cumulative flux
     """
-    selected = select_from_imaging_dict(imaging_dict, time=time, pol=pol, chan=chan)
-    _validate_imaging_dict_selection(imaging_dict, selected, time, pol, chan)
-
-    if not isinstance(selected, list):
-        selected = [selected] if selected is not None else []
-
-    total_flux = 0.0
-
-    for entry in selected:
-        if entry is not None and "model_flux" in entry:
-            # Extract value (handle both list and single value for backward compatibility)
-            value = entry["model_flux"]
-            if isinstance(value, list):
-                if len(value) == 0:
-                    continue
-                # Use latest value (last in list) - represents cumulative flux
-                value = value[-1]
-
-            total_flux += value
-
-    return total_flux
+    return _sum_latest(imaging_dict, "model_flux", time, pol, chan)
 
 
 ENTROPY_PARAM_DEFAULTS = {
@@ -984,15 +967,6 @@ def make_cycle_control_state(
 # ------------------------------------------------------------------
 # Per-plane state helpers
 # ------------------------------------------------------------------
-
-
-def _matches(key, time, pol, chan):
-    """True if an imaging_dict key matches the (time, pol, chan) selection."""
-    return (
-        (time is None or key.time == time)
-        and (pol is None or key.pol == pol)
-        and (chan is None or key.chan == chan)
-    )
 
 
 def _key_index(key):

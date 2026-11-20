@@ -1885,12 +1885,7 @@ def combine_continuum_chunks(input_data, input_params):
     combined_image.attrs["n_continuum_chunks_combined"] = int(len(combined_timing))
     combined_image.attrs["continuum_additive_variables"] = list(additive_variables)
 
-    if deconvolution_dicts:
-        combined_deconvolution = merge_imaging_dicts(deconvolution_dicts)
-    else:
-        # Keep the output schema stable even when no input supplied
-        # deconvolution metadata.
-        combined_deconvolution = {}
+    combined_deconvolution = merge_imaging_dicts(deconvolution_dicts)
 
     return_dict = {
         "image": combined_image,
