@@ -653,7 +653,7 @@ def _target_kernel_and_transform():
     from astroviper.processing_functions.imaging.imaging_conclude.restore import (
         _clean_beam_kernel_ft,
     )
-    from tests.unit.processing_functions.imaging.test_restore import (
+    from tests.unit.processing_functions.imaging.imaging_conclude.test_restore import (
         _correcting_transform,
     )
 

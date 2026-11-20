@@ -15,7 +15,7 @@ import pytest
 
 # The processing set lives next to the stakeholder imaging test.
 PS_STORE = (
-    Path(__file__).resolve().parents[3]
+    Path(__file__).resolve().parents[4]
     / "stakeholder"
     / "twhya_selfcal_lsrk_5chans.ps.zarr"
 )

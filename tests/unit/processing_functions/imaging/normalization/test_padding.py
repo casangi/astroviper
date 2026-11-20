@@ -1,5 +1,5 @@
 # run using eg
-# python -m pytest astroviper/tests/unit/processing_functions/imaging/test_padding.py
+# python -m pytest astroviper/tests/unit/processing_functions/imaging/normalization/test_padding.py
 
 import unittest
 

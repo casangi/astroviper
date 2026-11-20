@@ -13,7 +13,9 @@ from astroviper.processing_functions.imaging.imaging_conclude.restore import (
     resolve_restoration_product,
     restore_image,
 )
-from tests.unit.processing_functions.imaging.test_restore import _make_restore_xds
+from tests.unit.processing_functions.imaging.imaging_conclude.test_restore import (
+    _make_restore_xds,
+)
 from tests.utils.continuum_images import make_continuum_image
 
 

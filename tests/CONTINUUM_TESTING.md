@@ -21,7 +21,7 @@ Paths below are relative to `tests/`.
 
 ## New test modules
 
-- `unit/processing_functions/imaging/test_mfs_beam_streaming.py`: dense-sum
+- `unit/processing_functions/imaging/imaging_setup/test_mfs_beam_streaming.py`: dense-sum
   equivalence for both Airy prescriptions, float32/64 beams, 1–4 Taylor terms,
   multiple times/polarizations, and zero-weight channels. It checks exact beam
   samples and that each channel allocation is released before the next one.
@@ -177,6 +177,7 @@ Run from the repository root using an environment containing this checkout:
 
 ```bash
 python -m pytest tests/unit/processing_functions/imaging/test_continuum*.py \
+  tests/unit/processing_functions/imaging/imaging_setup/imaging_weighting/test_continuum_weight_density_products.py \
   tests/unit/node_tasks/imaging/test_continuum*.py \
   tests/unit/distributed_applications/imaging/test_continuum*.py \
   tests/component/test_continuum_configurations.py -q
