@@ -124,13 +124,16 @@ def check_residual_update(config, *, mode, require_complete=False):
                 raise KeyError(f"image_params must contain {name!r}.")
 
     # --- Channel frequencies ---
-    # Selected frequencies must be nonempty, finite, and strictly positive.
+    # Frequencies must be nonempty, finite, positive, and strictly increasing:
+    # duplicate or reversed centres cannot define the requested channel axis.
     if "frequency_coords" in image_params:
         frequencies = require_finite_real(
             "frequency_coords", image_params["frequency_coords"], positive=True
         )
         if frequencies.ndim != 1:
             raise ValueError("frequency_coords must be one-dimensional.")
+        if np.any(frequencies[1:] <= frequencies[:-1]):
+            raise ValueError("frequency_coords must be strictly increasing.")
 
     # --- Reference frequency ---
     # The Taylor reference must be one finite, strictly positive frequency.
