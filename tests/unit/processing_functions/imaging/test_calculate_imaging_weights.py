@@ -17,7 +17,9 @@ import pytest
     ["grid_imaging_weight_density_continuum", "degrid_imaging_weights_continuum"],
 )
 def test_density_operations_reject_unsupported_configuration_before_data(name, params):
-    from astroviper.processing_functions.imaging import calculate_imaging_weights
+    from astroviper.processing_functions.imaging.imaging_setup.imaging_weighting import (
+        calculate_imaging_weights,
+    )
 
     function = getattr(calculate_imaging_weights, name)
     with pytest.raises((ValueError, TypeError)):

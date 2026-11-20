@@ -649,7 +649,7 @@ def test_global_weight_preparation_builds_factors_and_returns_all_tasks(monkeypa
     )
     monkeypatch.setattr("dask.compute", lambda graph: (graph_result,))
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.calculate_imaging_weights.normalize_imaging_weight_params",
+        "astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.calculate_imaging_weights.normalize_imaging_weight_params",
         lambda params: {"weighting": "briggs", "robust": 0.5},
     )
     monkeypatch.setattr(

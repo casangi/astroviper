@@ -34,7 +34,7 @@ from astroviper.processing_functions.imaging.gridding_convolution_functions.grid
     make_gridding_kernel,
     map_error,
 )
-from astroviper.processing_functions.imaging.make_point_spread_function import (
+from astroviper.processing_functions.imaging.imaging_setup.make_point_spread_function import (
     make_point_spread_function_single_field,
     make_subtraction_point_spread_function_single_field,
 )

@@ -95,7 +95,7 @@ def make_primary_beam_single_field(
     See Also
     --------
     astroviper.processing_functions.simulation.antenna_beams.symmetric_beam_response
-    astroviper.processing_functions.imaging.make_point_spread_function.make_point_spread_function_single_field
+    astroviper.processing_functions.imaging.imaging_setup.make_point_spread_function.make_point_spread_function_single_field
     astroviper.processing_functions.imaging.correct_sky_by_primary_beam.correct_sky_by_primary_beam
     """
     import time

@@ -2039,7 +2039,7 @@ def grid_imaging_weight_density_continuum_node(
     import toolviper.utils.logger as logger
     from xradio.image import make_empty_sky_image
 
-    from astroviper.processing_functions.imaging.calculate_imaging_weights import (
+    from astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.calculate_imaging_weights import (
         grid_imaging_weight_density_continuum,
     )
     from astroviper.processing_functions.imaging.utils.imaging_polarization import (
@@ -2352,7 +2352,7 @@ def degrid_imaging_weights_continuum_node(
     import xarray as xr
     from xradio.image import make_empty_sky_image
 
-    from astroviper.processing_functions.imaging.calculate_imaging_weights import (
+    from astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.calculate_imaging_weights import (
         degrid_imaging_weights_continuum,
     )
     from astroviper.processing_functions.imaging.utils.imaging_polarization import (

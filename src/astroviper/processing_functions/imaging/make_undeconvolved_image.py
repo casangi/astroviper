@@ -30,7 +30,7 @@ def make_undeconvolved_image_single_field(
     one by the other.  In the single-field
     imager the UV-sampling grid that becomes the PSF is built once, separately,
     by
-    :func:`~astroviper.processing_functions.imaging.make_point_spread_function.make_point_spread_function_single_field`.
+    :func:`~astroviper.processing_functions.imaging.imaging_setup.make_point_spread_function.make_point_spread_function_single_field`.
 
     Parameters
     ----------

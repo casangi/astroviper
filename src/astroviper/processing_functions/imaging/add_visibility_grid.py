@@ -337,7 +337,7 @@ def _add_grid_single_field(
     """Grid the visibilities, or the weights, of one measurement set into ``img_xds``.
 
     The body of :func:`add_visibility_grid_single_field` and of
-    :func:`~astroviper.processing_functions.imaging.make_point_spread_function.add_uv_sampling_grid_single_field`,
+    :func:`~astroviper.processing_functions.imaging.imaging_setup.make_point_spread_function.add_uv_sampling_grid_single_field`,
     whose other parameters it takes, and the gridding of
     :func:`~astroviper.processing_functions.imaging.add_visibility_grid_continuum_mvc.add_visibility_grid_mvc_single_field`.
 

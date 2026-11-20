@@ -98,7 +98,7 @@ def test_direct_prediction_rejects_order_before_accessing_products():
 
 @pytest.mark.parametrize("reference", [0.0, float("nan"), [1e9, 2e9]])
 def test_legacy_reference_helper_preserves_its_value_error_api(reference):
-    from astroviper.processing_functions.imaging.imaging_setup_continuum_single_field import (
+    from astroviper.processing_functions.imaging.imaging_setup.imaging_setup import (
         _get_reference_frequency,
     )
 

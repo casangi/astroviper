@@ -1,7 +1,7 @@
 """Unit tests for the single-field point-spread-function processing function.
 
 Exercises
-:func:`astroviper.processing_functions.imaging.make_point_spread_function.make_point_spread_function_single_field`
+:func:`astroviper.processing_functions.imaging.imaging_setup.make_point_spread_function.make_point_spread_function_single_field`
 on the local TW Hya processing set used by the stakeholder imaging test (the
 download fixture for this data is not yet published, so the test is skipped when
 the local copy is absent).  The PSF normalization (peak ``1.0`` at the image
@@ -40,10 +40,10 @@ def psf_result():
     from xradio.measurement_set import open_processing_set
     from xradio.measurement_set.load_processing_set import load_processing_set
 
-    from astroviper.processing_functions.imaging.calculate_imaging_weights import (
+    from astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.calculate_imaging_weights import (
         calculate_imaging_weights,
     )
-    from astroviper.processing_functions.imaging.make_point_spread_function import (
+    from astroviper.processing_functions.imaging.imaging_setup.make_point_spread_function import (
         make_point_spread_function_single_field,
     )
 

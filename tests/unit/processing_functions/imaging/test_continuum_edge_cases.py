@@ -16,7 +16,7 @@ from astroviper.processing_functions.imaging.gridding_convolution_functions.grid
 from astroviper.processing_functions.imaging.image_continuum_single_field import (
     prepare_model_uv_continuum_single_field,
 )
-from astroviper.processing_functions.imaging.imaging_setup_continuum_single_field import (
+from astroviper.processing_functions.imaging.imaging_setup.imaging_setup import (
     _get_reference_frequency,
     _imaging_weights_are_available,
     _validate_continuum_parameters,

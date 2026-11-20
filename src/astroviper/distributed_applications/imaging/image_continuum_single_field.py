@@ -1003,13 +1003,13 @@ def prepare_continuum_imaging_weights_global(
     import xarray as xr
     from graphviper.graph_tools import generate_dask_workflow, map, reduce
 
-    from astroviper.processing_functions.imaging.calculate_imaging_weights import (
+    from astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.briggs_weighting import (
+        calculate_briggs_params,
+    )
+    from astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.calculate_imaging_weights import (
         check_continuum_briggs_factor_shape,
         check_continuum_weight_density_products,
         normalize_imaging_weight_params,
-    )
-    from astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.briggs_weighting import (
-        calculate_briggs_params,
     )
 
     timings = {}
@@ -2004,7 +2004,7 @@ def combine_continuum_weight_density_chunks(
         "SUM_WEIGHT",
     )
 
-    from astroviper.processing_functions.imaging.calculate_imaging_weights import (
+    from astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.calculate_imaging_weights import (
         check_continuum_weight_density_products,
     )
 

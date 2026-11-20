@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from astroviper.processing_functions.imaging.imaging_setup_continuum_single_field import (
+from astroviper.processing_functions.imaging.imaging_setup.imaging_setup import (
     _convert_primary_beam_to_reference_frequency,
 )
 

@@ -955,7 +955,7 @@ def test_weight_density_node_returns_valid_reducer_leaf(monkeypatch):
         )
 
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.calculate_imaging_weights."
+        "astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.calculate_imaging_weights."
         "grid_imaging_weight_density_continuum",
         fake_grid,
     )
@@ -1000,7 +1000,7 @@ def test_weight_degrid_node_extracts_only_registered_weight_arrays(monkeypatch):
         attrs={"data_groups": {"base": {"weight_imaging": "WEIGHT_IMAGING"}}},
     )
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.calculate_imaging_weights."
+        "astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.calculate_imaging_weights."
         "degrid_imaging_weights_continuum",
         lambda *args, **kwargs: {"ms": child},
     )
@@ -1039,7 +1039,7 @@ def test_weight_degrid_node_writes_in_place_and_returns_no_array_cache(monkeypat
         attrs={"data_groups": {"base": {"weight_imaging": "WEIGHT_IMAGING"}}},
     )
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.calculate_imaging_weights."
+        "astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.calculate_imaging_weights."
         "degrid_imaging_weights_continuum",
         lambda *args, **kwargs: {"ms": child},
     )

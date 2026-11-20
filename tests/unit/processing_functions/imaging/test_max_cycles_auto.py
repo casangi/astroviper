@@ -382,7 +382,7 @@ NOISE = 1e-3
 def _weighted_processing_set(xds, noise=NOISE):
     """:func:`_processing_set` (absolute weights) with the natural imaging
     weights the imaging setup adds to its data group."""
-    from astroviper.processing_functions.imaging.calculate_imaging_weights import (
+    from astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.calculate_imaging_weights import (
         calculate_imaging_weights,
     )
 

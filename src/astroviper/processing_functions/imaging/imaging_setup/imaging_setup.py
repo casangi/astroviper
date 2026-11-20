@@ -729,7 +729,7 @@ def imaging_setup_continuum_single_field(
 
     # if weights are not available, we compute them locally
     if not weights_available:
-        from astroviper.processing_functions.imaging.calculate_imaging_weights import (
+        from astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.calculate_imaging_weights import (
             calculate_imaging_weights,
         )
 

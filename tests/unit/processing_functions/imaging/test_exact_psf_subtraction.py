@@ -118,8 +118,8 @@ def _same(a, b, extra=()):
 def test_the_psf_of_twice_the_image_size(
     monkeypatch, n, single_precision_image, imaging_weights_params
 ):
-    import astroviper.processing_functions.imaging.make_point_spread_function as mpsf
-    from astroviper.processing_functions.imaging.calculate_imaging_weights import (
+    import astroviper.processing_functions.imaging.imaging_setup.make_point_spread_function as mpsf
+    from astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.calculate_imaging_weights import (
         calculate_imaging_weights,
     )
     from astroviper.processing_functions.imaging.residual_update.residual_update import (
@@ -229,7 +229,7 @@ def test_one_uv_grid_when_the_correlation_weights_are_equal(
     included, give one uv grid, whose PSF is copied to the other correlation;
     unequal weights a grid per correlation. Both give the bits of the PSF
     maker on a 2n image of both correlations."""
-    import astroviper.processing_functions.imaging.make_point_spread_function as mpsf
+    import astroviper.processing_functions.imaging.imaging_setup.make_point_spread_function as mpsf
     from astroviper.processing_functions.imaging.residual_update.residual_update import (
         imaging_setup_single_field,
     )
@@ -318,7 +318,7 @@ def test_equals_the_image_sized_kernel_on_an_embedded_image(
         deconvolver=deconvolver,
     )
 
-    import astroviper.processing_functions.imaging.make_point_spread_function as mpsf
+    import astroviper.processing_functions.imaging.imaging_setup.make_point_spread_function as mpsf
 
     made = []
     original_psf = mpsf.make_point_spread_function_single_field
@@ -421,7 +421,7 @@ def test_asp_is_refused_before_any_imaging(monkeypatch):
 def test_the_psf_is_made_once_when_a_model_update_can_use_it(
     monkeypatch, option, max_iter, made
 ):
-    import astroviper.processing_functions.imaging.make_point_spread_function as mpsf
+    import astroviper.processing_functions.imaging.imaging_setup.make_point_spread_function as mpsf
 
     calls = []
     original = mpsf.make_subtraction_point_spread_function_single_field
@@ -446,7 +446,7 @@ def test_the_psf_is_freed_before_the_restore(monkeypatch):
     import gc
     import weakref
 
-    import astroviper.processing_functions.imaging.make_point_spread_function as mpsf
+    import astroviper.processing_functions.imaging.imaging_setup.make_point_spread_function as mpsf
     import astroviper.processing_functions.imaging.restore as restore
 
     made, alive = [], []

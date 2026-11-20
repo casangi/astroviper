@@ -218,10 +218,10 @@ def imaging_setup_single_field(
     from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
         transform_polarization_basis,
     )
-    from astroviper.processing_functions.imaging.calculate_imaging_weights import (
+    from astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.calculate_imaging_weights import (
         calculate_imaging_weights,
     )
-    from astroviper.processing_functions.imaging.make_point_spread_function import (
+    from astroviper.processing_functions.imaging.imaging_setup.make_point_spread_function import (
         make_point_spread_function_single_field,
     )
     from astroviper.processing_functions.imaging.primary_beam.make_primary_beam import (

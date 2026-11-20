@@ -416,7 +416,7 @@ def make_continuum_primary_beam_single_field(
     See Also
     --------
     astroviper.processing_functions.imaging.primary_beam.make_pb_symmetric.airy_disk_rorder_v2
-    astroviper.processing_functions.imaging.make_point_spread_function.make_point_spread_function_single_field
+    astroviper.processing_functions.imaging.imaging_setup.make_point_spread_function.make_point_spread_function_single_field
     """
     import time
 

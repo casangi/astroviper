@@ -219,7 +219,7 @@ def test_global_weight_preparation_reports_corrupt_upstream_results(
     )
     monkeypatch.setattr("dask.compute", lambda graph: (result,))
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.calculate_imaging_weights.normalize_imaging_weight_params",
+        "astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.calculate_imaging_weights.normalize_imaging_weight_params",
         lambda p: params,
     )
     monkeypatch.setattr(

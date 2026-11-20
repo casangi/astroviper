@@ -134,10 +134,10 @@ via the cycle control functions on `cycle_control_state`:
 > `make_primary_beam_single_field`, `make_undeconvolved_image_single_field`,
 > `imaging_setup_single_field`, …).
 
-- Weighting: `calculate_imaging_weights.py` (`"natural"`, `"briggs"`/robust).
+- Weighting: `imaging_setup/imaging_weighting/calculate_imaging_weights.py` (`"natural"`, `"briggs"`/robust).
 - Gridding (vis → uv grid): `add_visibility_grid.py`
   (`add_visibility_grid_single_field`).
-- PSF / UV-sampling grid: `make_point_spread_function.py`
+- PSF / UV-sampling grid: `imaging_setup/make_point_spread_function.py`
   (`make_point_spread_function_single_field`, plus the
   `add_uv_sampling_grid_single_field` / `add_uv_sampling_grid_mosaic` gridders
   that build the PSF numerator — gridding the imaging weights *is* the first

@@ -7,7 +7,7 @@ import pytest
 import xarray as xr
 import xradio.image.image_xds  # noqa: F401 -- register the image accessor
 
-from astroviper.processing_functions.imaging.calculate_imaging_weights import (
+from astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.calculate_imaging_weights import (
     calculate_imaging_weights,
 )
 
@@ -97,7 +97,8 @@ def test_mvc_psf_accepts_shifted_frequency_with_cube_gridder():
     with (
         patch(module + "utils.drop_auto_correlations"),
         patch(
-            module + "make_point_spread_function.add_uv_sampling_grid_single_field"
+            module
+            + "imaging_setup.make_point_spread_function.add_uv_sampling_grid_single_field"
         ) as grid,
     ):
         make_point_spread_function_mvc_single_field(ps, image, {"fft_padding": 1.2})
@@ -107,7 +108,7 @@ def test_mvc_psf_accepts_shifted_frequency_with_cube_gridder():
 
 def test_collapsed_global_weight_lookup_maps_channels_without_repeating_grid():
     """Continuum weighting shares one density plane through a zero channel map."""
-    from astroviper.processing_functions.imaging.calculate_imaging_weights import (
+    from astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.calculate_imaging_weights import (
         degrid_imaging_weights_continuum,
     )
 
@@ -194,16 +195,16 @@ def test_one_channel_continuum_weights_equal_cube_weights(monkeypatch, weighting
     """Both continuum scopes use the cube's nearest density cell, bit for bit."""
     import importlib
 
-    from astroviper.processing_functions.imaging.calculate_imaging_weights import (
-        degrid_imaging_weights_continuum,
-        grid_imaging_weight_density_continuum,
-        normalize_imaging_weight_params,
+    from astroviper.processing_functions.imaging.imaging_setup.imaging_setup import (
+        imaging_setup_continuum_single_field,
     )
     from astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.briggs_weighting import (
         calculate_briggs_params,
     )
-    from astroviper.processing_functions.imaging.imaging_setup_continuum_single_field import (
-        imaging_setup_continuum_single_field,
+    from astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.calculate_imaging_weights import (
+        degrid_imaging_weights_continuum,
+        grid_imaging_weight_density_continuum,
+        normalize_imaging_weight_params,
     )
     from astroviper.processing_functions.imaging.residual_update.residual_update import (
         imaging_setup_single_field,
@@ -214,7 +215,7 @@ def test_one_channel_continuum_weights_equal_cube_weights(monkeypatch, weighting
 
     module = "astroviper.processing_functions.imaging."
     for name in (
-        "make_point_spread_function.make_point_spread_function_single_field",
+        "imaging_setup.make_point_spread_function.make_point_spread_function_single_field",
         "make_point_spread_function_continuum_single_field."
         "make_point_spread_function_continuum_single_field",
     ):

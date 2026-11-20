@@ -290,7 +290,7 @@ def imaging_preparation_continuum_single_field(
 
     import toolviper.utils.logger as logger
 
-    from astroviper.processing_functions.imaging.imaging_setup_continuum_single_field import (
+    from astroviper.processing_functions.imaging.imaging_setup.imaging_setup import (
         imaging_setup_continuum_single_field,
     )
 

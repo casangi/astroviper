@@ -21,13 +21,13 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from astroviper.processing_functions.imaging.calculate_imaging_weights import (
+from astroviper.processing_functions.imaging.check_imaging_parameters import (
+    check_imaging_weights_params,
+)
+from astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.calculate_imaging_weights import (
     _equalize_parallel_hand_weights,
     calculate_imaging_weights,
     grid_imaging_weight_density_continuum,
-)
-from astroviper.processing_functions.imaging.check_imaging_parameters import (
-    check_imaging_weights_params,
 )
 from astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.grid_imaging_weights import (
     degrid_imaging_weights,

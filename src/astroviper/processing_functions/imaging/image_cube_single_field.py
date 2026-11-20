@@ -1079,7 +1079,7 @@ def image_cube_single_field(
     from astroviper.processing_functions.image_analysis.make_auto_mask import (
         make_auto_mask,
     )
-    from astroviper.processing_functions.imaging.make_point_spread_function import (
+    from astroviper.processing_functions.imaging.imaging_setup.make_point_spread_function import (
         make_subtraction_point_spread_function_single_field,
     )
     from astroviper.processing_functions.imaging.model_update.model_update import (

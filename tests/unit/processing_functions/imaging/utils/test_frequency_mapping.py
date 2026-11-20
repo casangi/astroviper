@@ -26,7 +26,7 @@ from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_
 from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
     as_gridding_kernel,
 )
-from astroviper.processing_functions.imaging.make_point_spread_function import (
+from astroviper.processing_functions.imaging.imaging_setup.make_point_spread_function import (
     add_uv_sampling_grid_single_field,
 )
 from astroviper.processing_functions.imaging.utils.frequency_mapping import (

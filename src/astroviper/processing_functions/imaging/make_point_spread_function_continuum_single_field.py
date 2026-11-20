@@ -473,7 +473,7 @@ def make_point_spread_function_mvc_single_field(
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
         make_gridding_kernel,
     )
-    from astroviper.processing_functions.imaging.make_point_spread_function import (
+    from astroviper.processing_functions.imaging.imaging_setup.make_point_spread_function import (
         add_uv_sampling_grid_single_field,
     )
     from astroviper.processing_functions.imaging.utils import drop_auto_correlations

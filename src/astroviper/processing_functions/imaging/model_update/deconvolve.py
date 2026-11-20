@@ -154,7 +154,7 @@ def _validate_deconvolve_params(deconvolve_params, *, input_checked=False):
         - ``subtraction_psf_cube`` : ``(nt, nf, np_psf, 2 ny, 2 nx)`` array,
           the PSF of twice the image size that ``exact_psf_subtraction``
           subtracts, as
-          :func:`~astroviper.processing_functions.imaging.make_point_spread_function.make_subtraction_point_spread_function_single_field`
+          :func:`~astroviper.processing_functions.imaging.imaging_setup.make_point_spread_function.make_subtraction_point_spread_function_single_field`
           makes it. Read by :func:`deconvolve` only.
         - ``asp_stop_after_hogbom_run`` : bool, end an Asp model update after
           a Hogbom run as CASA and LibRA do (see :func:`asp_clean`). Default

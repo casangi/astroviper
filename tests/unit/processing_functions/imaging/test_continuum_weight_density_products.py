@@ -6,7 +6,7 @@ import pytest
 import xarray as xr
 from dask import delayed
 
-from astroviper.processing_functions.imaging.calculate_imaging_weights import (
+from astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.calculate_imaging_weights import (
     check_continuum_briggs_factor_shape,
     check_continuum_weight_density_products,
     degrid_imaging_weights_continuum,
