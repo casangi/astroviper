@@ -166,6 +166,75 @@ def test_read_hex_fill_values(tmp_path, sharded, fully_written, dtype, encoded):
         )
 
 
+@pytest.mark.parametrize("sharded", [False, True])
+@pytest.mark.parametrize("dtype", ["float32", "complex64"])
+def test_big_endian_v3_rejected_before_chunk_io(tmp_path, sharded, dtype):
+    """Refuse valid big-endian stores without reading bad values or writing."""
+    from astroviper.utils.chunk_io.zarr_chunks import precreate_sharded_files
+
+    path = tmp_path / "SKY_RESIDUAL"
+    dims = ("time", "frequency", "polarization", "l", "m")
+    shape = (1, 2, 1, 2, 2)
+    kwargs = {"shards": shape} if sharded else {}
+    arr = zarr.create_array(
+        str(path),
+        shape=shape,
+        chunks=(1, 1, 1, 2, 2),
+        dtype=dtype,
+        dimension_names=dims,
+        serializer=zarr.codecs.BytesCodec(endian="big"),
+        **kwargs,
+    )
+    data = np.arange(1, 9, dtype=np.float32).reshape(shape).astype(dtype)
+    arr[:] = data
+    np.testing.assert_array_equal(zarr.open_array(str(path), mode="r")[:], data)
+    before = {
+        p.relative_to(path): p.read_bytes() for p in path.rglob("*") if p.is_file()
+    }
+    out = np.full(shape, 42, dtype=dtype)
+    with pytest.raises(NotImplementedError, match="Big-endian Zarr v3 bytes codecs"):
+        read_array_region(str(path), {}, out=out)
+    np.testing.assert_array_equal(out, np.full(shape, 42, dtype=dtype))
+    img = xr.Dataset({"SKY_RESIDUAL": (dims, data)})
+    writer = write_zarr_sharded if sharded else write_zarr
+    with pytest.raises(NotImplementedError, match="Big-endian Zarr v3 bytes codecs"):
+        writer(
+            str(tmp_path), ["sky_residual"], {"frequency": {"slice": slice(0, 2)}}, img
+        )
+    if sharded:
+        with pytest.raises(
+            NotImplementedError, match="Big-endian Zarr v3 bytes codecs"
+        ):
+            precreate_sharded_files(str(path))
+    after = {
+        p.relative_to(path): p.read_bytes() for p in path.rglob("*") if p.is_file()
+    }
+    assert after == before
+
+
+def test_big_endian_shard_index_rejected(tmp_path):
+    """The same restriction applies to the shard's uint64 index codec."""
+    from astroviper.utils.chunk_io.zarr_chunks import _read_array_meta
+
+    path = tmp_path / "index"
+    zarr.create_array(
+        str(path),
+        shape=(4,),
+        chunks=(2,),
+        shards=(4,),
+        dtype="float32",
+        dimension_names=("frequency",),
+    )
+    meta_path = path / "zarr.json"
+    meta = json.loads(meta_path.read_text())
+    for codec in meta["codecs"][0]["configuration"]["index_codecs"]:
+        if codec["name"] == "bytes":
+            codec["configuration"]["endian"] = "big"
+    meta_path.write_text(json.dumps(meta))
+    with pytest.raises(NotImplementedError, match="Big-endian Zarr v3 bytes codecs"):
+        _read_array_meta(str(path))
+
+
 def _write_minimal_processing_set_child(store, ms_name, frequencies, offset=0):
     """Write one tiny child used by direct-loader frequency-selection tests."""
     frequencies = np.asarray(frequencies, dtype=np.float64)

@@ -129,17 +129,33 @@ def _decode_fill_value(fill, dtype):
     return dtype.type(fill) if dtype.kind in "biufc" else fill
 
 
+def _check_v3_codec_endianness(codecs, array_path):
+    """Reject unsupported big-endian data and shard-index bytes before I/O."""
+    for codec in codecs:
+        config = codec.get("configuration", {})
+        if codec["name"] == "bytes" and config.get("endian") == "big":
+            raise NotImplementedError(
+                f"Big-endian Zarr v3 bytes codecs are not supported by the "
+                f"chunk I/O engine: {array_path}. Use a little-endian store."
+            )
+        if codec["name"] == "sharding_indexed":
+            _check_v3_codec_endianness(config.get("codecs", []), array_path)
+            _check_v3_codec_endianness(config.get("index_codecs", []), array_path)
+
+
 def _read_array_meta(array_path):
     """Read just one array's Zarr metadata (no data, no group/tree open).
 
     Supports Zarr v3 (``zarr.json``, optionally ``sharding_indexed``) and v2
     (``.zarray`` + ``.zattrs``). Returns a small plain dict.
+    Big-endian v3 data/index codecs raise ``NotImplementedError`` before I/O.
     """
     v3_path = os.path.join(array_path, "zarr.json")
     if os.path.exists(v3_path):
         with open(v3_path) as fh:
             m = json.load(fh)
         codecs = m["codecs"]
+        _check_v3_codec_endianness(codecs, array_path)
         sharding = next((c for c in codecs if c["name"] == "sharding_indexed"), None)
         key = m.get("chunk_key_encoding", {}).get("configuration", {})
         return {
