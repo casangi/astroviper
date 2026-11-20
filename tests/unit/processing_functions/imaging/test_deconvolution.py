@@ -581,6 +581,37 @@ class TestHogbomCleanCube:
         with pytest.raises(ValueError, match="mask_cube"):
             hogbom_clean(resid, psf, model, mask_cube=bad_mask)
 
+    @pytest.mark.parametrize(
+        ("clean", "lines"),
+        [
+            (
+                hogbom_clean,
+                [
+                    "Residual cube shape: (1, 1, 1, 8, 8)",
+                    "PSF cube shape: (1, 1, 1, 8, 8)",
+                    "Running Hogbom CLEAN on cube with processing_function_threads=2",
+                ],
+            ),
+            (
+                hogbom_clean_many_threads,
+                [
+                    "Running many-threads Hogbom CLEAN on cube with "
+                    "processing_function_threads=2"
+                ],
+            ),
+        ],
+    )
+    def test_each_function_logs_its_own_debug_lines(self, monkeypatch, clean, lines):
+        logged = []
+        monkeypatch.setattr(
+            "astroviper.processing_functions.imaging.deconvolution.logger.debug",
+            lambda message, *args, **kwargs: logged.append(message),
+        )
+        resid = np.zeros((1, 1, 1, 8, 8), dtype=np.float32)
+        psf = _delta_psf_cube(1, 1, 1, 8, 8)
+        clean(resid, psf, np.zeros_like(resid), {"max_iter": 1}, 2, input_checked=True)
+        assert logged == lines
+
 
 # ---------------------------------------------------------------------------
 # deconvolve (end-to-end)
@@ -1291,6 +1322,16 @@ class TestAspClean:
         model = np.zeros_like(resid)
         with pytest.raises(ValueError, match="polarization"):
             asp_clean(resid, psf, model)
+
+    def test_rejects_psf_of_twice_the_image_size(self):
+        resid = np.zeros((1, 1, 1, 16, 16), dtype=np.float32)
+        psf = np.zeros((1, 1, 1, 32, 32), dtype=np.float32)
+        with pytest.raises(ValueError) as error:
+            asp_clean(resid, psf, np.zeros_like(resid), input_checked=True)
+        assert str(error.value) == (
+            "psf_cube must match residual_cube on (time, frequency, y, x). "
+            "Got psf shape (1, 1, 1, 32, 32) vs residual shape (1, 1, 1, 16, 16)"
+        )
 
     @pytest.mark.parametrize(
         ("max_iter_divergence", "iterations", "diverged"),

@@ -1088,6 +1088,137 @@ def _run_hogbom(
     return result
 
 
+def _check_cubes(residual_cube, psf_cube, model_cube, mask_cube, allow_twice_psf):
+    """Refuse residual, PSF, model and mask cubes that do not fit together.
+
+    The checks of :func:`hogbom_clean`, :func:`hogbom_clean_many_threads`
+    and :func:`asp_clean`; ``allow_twice_psf`` also accepts a PSF of twice
+    the image size, as the Hogbom kernels do.
+    """
+    for name, arr in (
+        ("residual_cube", residual_cube),
+        ("psf_cube", psf_cube),
+        ("model_cube", model_cube),
+    ):
+        if not isinstance(arr, np.ndarray) or arr.ndim != 5:
+            raise ValueError(
+                f"{name} must be a 5D numpy array with shape (nt, nf, np, ny, nx)"
+            )
+
+    if residual_cube.shape != model_cube.shape:
+        raise ValueError(
+            "residual_cube and model_cube must have same shape. "
+            f"Got {residual_cube.shape} and {model_cube.shape}"
+        )
+
+    # PSF cube may broadcast on the polarization axis.
+    nt, nf, npol_img, ny, nx = residual_cube.shape
+    nt_p, nf_p, npol_psf, ny_p, nx_p = psf_cube.shape
+    if allow_twice_psf:
+        if (nt_p, nf_p) != (nt, nf) or (ny_p, nx_p) not in (
+            (ny, nx),
+            (2 * ny, 2 * nx),
+        ):
+            raise ValueError(
+                "psf_cube must match residual_cube on (time, frequency, y, x), or "
+                "on (time, frequency) with twice its (y, x) size. "
+                f"Got psf shape {psf_cube.shape} vs residual shape "
+                f"{residual_cube.shape}"
+            )
+    elif (nt_p, nf_p, ny_p, nx_p) != (nt, nf, ny, nx):
+        raise ValueError(
+            "psf_cube must match residual_cube on (time, frequency, y, x). "
+            f"Got psf shape {psf_cube.shape} vs residual shape "
+            f"{residual_cube.shape}"
+        )
+    if npol_psf not in (npol_img, 1):
+        raise ValueError(
+            "psf_cube polarization axis must equal residual_cube "
+            "polarization axis or be 1 (Stokes I broadcast). "
+            f"Got np_psf={npol_psf}, np_img={npol_img}"
+        )
+
+    if mask_cube is not None and mask_cube.shape != residual_cube.shape:
+        raise ValueError(
+            "mask_cube must have the same shape as residual_cube. "
+            f"Got {mask_cube.shape} and {residual_cube.shape}"
+        )
+
+
+def _hogbom_clean(
+    clean_cube,
+    deconvolver,
+    residual_cube,
+    psf_cube,
+    model_cube,
+    deconvolve_params,
+    processing_function_threads,
+    mask_cube,
+    input_checked,
+):
+    """The body of :func:`hogbom_clean` and :func:`hogbom_clean_many_threads`.
+
+    ``clean_cube`` is the Hogbom kernel of the function and ``deconvolver``
+    its name.
+    """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CUBE_SINGLE_FIELD,
+            check_model_update,
+        )
+
+        check_model_update(
+            {"deconvolver": deconvolver, "deconvolve_params": deconvolve_params or {}},
+            mode=CUBE_SINGLE_FIELD,
+        )
+
+    deconvolve_params = _validate_deconvolve_params(
+        deconvolve_params, input_checked=True
+    )
+
+    _check_cubes(residual_cube, psf_cube, model_cube, mask_cube, allow_twice_psf=True)
+    nt, nf, npol_img = residual_cube.shape[:3]
+
+    if deconvolver == "hogbom":
+        logger.debug(f"Residual cube shape: {residual_cube.shape}")
+        logger.debug(f"PSF cube shape: {psf_cube.shape}")
+        logger.debug(
+            f"Running Hogbom CLEAN on cube with processing_function_threads={processing_function_threads}"
+        )
+    else:
+        logger.debug(
+            f"Running many-threads Hogbom CLEAN on cube with processing_function_threads={processing_function_threads}"
+        )
+
+    clean_box = deconvolve_params["clean_box"]
+    if clean_box is None:
+        clean_box = (-1, -1, -1, -1)
+
+    mask_arg = (
+        mask_cube if mask_cube is not None else np.array([], dtype=residual_cube.dtype)
+    )
+
+    # Per-plane iteration control: each (time, frequency, polarization) plane
+    # is cleaned with its own iteration limit and threshold_per_cycle.
+    max_iter_per_cycle_updated, threshold_per_cycle = _per_plane_per_cycle_limits(
+        deconvolve_params, nt, nf, npol_img, residual_cube.dtype
+    )
+
+    return _run_hogbom(
+        clean_cube,
+        residual_cube=residual_cube,
+        psf_cube=psf_cube,
+        model_cube=model_cube,
+        peak_mask_cube=mask_cube,
+        mask_arg=mask_arg,
+        clean_box=clean_box,
+        max_iter_per_cycle_updated=max_iter_per_cycle_updated,
+        threshold_per_cycle=threshold_per_cycle,
+        deconvolve_params=deconvolve_params,
+        processing_function_threads=processing_function_threads,
+    )
+
+
 def hogbom_clean(
     residual_cube: np.ndarray,
     psf_cube: np.ndarray,
@@ -1232,93 +1363,16 @@ def hogbom_clean(
     Recording does not change the residual or the model: they are the same
     to the bit with and without it.
     """
-    if not input_checked:
-        from astroviper.processing_functions.imaging.config_check import (
-            CUBE_SINGLE_FIELD,
-            check_model_update,
-        )
-
-        check_model_update(
-            {"deconvolver": "hogbom", "deconvolve_params": deconvolve_params or {}},
-            mode=CUBE_SINGLE_FIELD,
-        )
-
-    deconvolve_params = _validate_deconvolve_params(
-        deconvolve_params, input_checked=True
-    )
-
-    for name, arr in (
-        ("residual_cube", residual_cube),
-        ("psf_cube", psf_cube),
-        ("model_cube", model_cube),
-    ):
-        if not isinstance(arr, np.ndarray) or arr.ndim != 5:
-            raise ValueError(
-                f"{name} must be a 5D numpy array with shape (nt, nf, np, ny, nx)"
-            )
-
-    if residual_cube.shape != model_cube.shape:
-        raise ValueError(
-            "residual_cube and model_cube must have same shape. "
-            f"Got {residual_cube.shape} and {model_cube.shape}"
-        )
-
-    # PSF cube may broadcast on the polarization axis.
-    nt, nf, npol_img, ny, nx = residual_cube.shape
-    nt_p, nf_p, npol_psf, ny_p, nx_p = psf_cube.shape
-    if (nt_p, nf_p) != (nt, nf) or (ny_p, nx_p) not in ((ny, nx), (2 * ny, 2 * nx)):
-        raise ValueError(
-            "psf_cube must match residual_cube on (time, frequency, y, x), or "
-            "on (time, frequency) with twice its (y, x) size. "
-            f"Got psf shape {psf_cube.shape} vs residual shape "
-            f"{residual_cube.shape}"
-        )
-    if npol_psf not in (npol_img, 1):
-        raise ValueError(
-            "psf_cube polarization axis must equal residual_cube "
-            "polarization axis or be 1 (Stokes I broadcast). "
-            f"Got np_psf={npol_psf}, np_img={npol_img}"
-        )
-
-    if mask_cube is not None:
-        if mask_cube.shape != residual_cube.shape:
-            raise ValueError(
-                "mask_cube must have the same shape as residual_cube. "
-                f"Got {mask_cube.shape} and {residual_cube.shape}"
-            )
-
-    logger.debug(f"Residual cube shape: {residual_cube.shape}")
-    logger.debug(f"PSF cube shape: {psf_cube.shape}")
-    logger.debug(
-        f"Running Hogbom CLEAN on cube with processing_function_threads={processing_function_threads}"
-    )
-
-    clean_box = deconvolve_params["clean_box"]
-    if clean_box is None:
-        clean_box = (-1, -1, -1, -1)
-
-    mask_arg = (
-        mask_cube if mask_cube is not None else np.array([], dtype=residual_cube.dtype)
-    )
-
-    # Per-plane iteration control: each (time, frequency, polarization) plane
-    # is cleaned with its own iteration limit and threshold_per_cycle.
-    max_iter_per_cycle_updated, threshold_per_cycle = _per_plane_per_cycle_limits(
-        deconvolve_params, nt, nf, npol_img, residual_cube.dtype
-    )
-
-    return _run_hogbom(
+    return _hogbom_clean(
         hogbom.clean_cube,
-        residual_cube=residual_cube,
-        psf_cube=psf_cube,
-        model_cube=model_cube,
-        peak_mask_cube=mask_cube,
-        mask_arg=mask_arg,
-        clean_box=clean_box,
-        max_iter_per_cycle_updated=max_iter_per_cycle_updated,
-        threshold_per_cycle=threshold_per_cycle,
-        deconvolve_params=deconvolve_params,
-        processing_function_threads=processing_function_threads,
+        "hogbom",
+        residual_cube,
+        psf_cube,
+        model_cube,
+        deconvolve_params,
+        processing_function_threads,
+        mask_cube,
+        input_checked,
     )
 
 
@@ -1340,88 +1394,16 @@ def hogbom_clean_many_threads(
         Skip configuration checks already performed by the calling layer.
         Runtime checks on newly created data always remain active.
     """
-    if not input_checked:
-        from astroviper.processing_functions.imaging.config_check import (
-            CUBE_SINGLE_FIELD,
-            check_model_update,
-        )
-
-        check_model_update(
-            {
-                "deconvolver": "hogbom_many_threads",
-                "deconvolve_params": deconvolve_params or {},
-            },
-            mode=CUBE_SINGLE_FIELD,
-        )
-
-    deconvolve_params = _validate_deconvolve_params(
-        deconvolve_params, input_checked=True
-    )
-
-    for name, arr in (
-        ("residual_cube", residual_cube),
-        ("psf_cube", psf_cube),
-        ("model_cube", model_cube),
-    ):
-        if not isinstance(arr, np.ndarray) or arr.ndim != 5:
-            raise ValueError(
-                f"{name} must be a 5D numpy array with shape (nt, nf, np, ny, nx)"
-            )
-    if residual_cube.shape != model_cube.shape:
-        raise ValueError(
-            "residual_cube and model_cube must have same shape. "
-            f"Got {residual_cube.shape} and {model_cube.shape}"
-        )
-
-    nt, nf, npol_img, ny, nx = residual_cube.shape
-    nt_p, nf_p, npol_psf, ny_p, nx_p = psf_cube.shape
-    if (nt_p, nf_p) != (nt, nf) or (ny_p, nx_p) not in ((ny, nx), (2 * ny, 2 * nx)):
-        raise ValueError(
-            "psf_cube must match residual_cube on (time, frequency, y, x), or "
-            "on (time, frequency) with twice its (y, x) size. "
-            f"Got psf shape {psf_cube.shape} vs residual shape {residual_cube.shape}"
-        )
-    if npol_psf not in (npol_img, 1):
-        raise ValueError(
-            "psf_cube polarization axis must equal residual_cube polarization "
-            f"axis or be 1 (Stokes I broadcast). Got np_psf={npol_psf}, np_img={npol_img}"
-        )
-    if mask_cube is not None and mask_cube.shape != residual_cube.shape:
-        raise ValueError(
-            "mask_cube must have the same shape as residual_cube. "
-            f"Got {mask_cube.shape} and {residual_cube.shape}"
-        )
-
-    logger.debug(
-        f"Running many-threads Hogbom CLEAN on cube with processing_function_threads={processing_function_threads}"
-    )
-
-    clean_box = deconvolve_params["clean_box"]
-    if clean_box is None:
-        clean_box = (-1, -1, -1, -1)
-
-    mask_arg = (
-        mask_cube if mask_cube is not None else np.array([], dtype=residual_cube.dtype)
-    )
-
-    # Per-plane iteration control: each plane has its own iteration limit and
-    # threshold_per_cycle (shared with the C++ path via _per_plane_per_cycle_limits).
-    max_iter_per_cycle_updated, threshold_per_cycle = _per_plane_per_cycle_limits(
-        deconvolve_params, nt, nf, npol_img, residual_cube.dtype
-    )
-
-    return _run_hogbom(
+    return _hogbom_clean(
         hogbom.clean_cube_many_threads,
-        residual_cube=residual_cube,
-        psf_cube=psf_cube,
-        model_cube=model_cube,
-        peak_mask_cube=mask_cube,
-        mask_arg=mask_arg,
-        clean_box=clean_box,
-        max_iter_per_cycle_updated=max_iter_per_cycle_updated,
-        threshold_per_cycle=threshold_per_cycle,
-        deconvolve_params=deconvolve_params,
-        processing_function_threads=processing_function_threads,
+        "hogbom_many_threads",
+        residual_cube,
+        psf_cube,
+        model_cube,
+        deconvolve_params,
+        processing_function_threads,
+        mask_cube,
+        input_checked,
     )
 
 
@@ -1627,43 +1609,8 @@ def asp_clean(
         deconvolve_params, input_checked=True
     )
 
-    for name, arr in (
-        ("residual_cube", residual_cube),
-        ("psf_cube", psf_cube),
-        ("model_cube", model_cube),
-    ):
-        if not isinstance(arr, np.ndarray) or arr.ndim != 5:
-            raise ValueError(
-                f"{name} must be a 5D numpy array with shape (nt, nf, np, ny, nx)"
-            )
-
-    if residual_cube.shape != model_cube.shape:
-        raise ValueError(
-            "residual_cube and model_cube must have same shape. "
-            f"Got {residual_cube.shape} and {model_cube.shape}"
-        )
-
-    # PSF cube may broadcast on the polarization axis.
-    nt, nf, npol_img, ny, nx = residual_cube.shape
-    nt_p, nf_p, npol_psf, ny_p, nx_p = psf_cube.shape
-    if (nt_p, nf_p, ny_p, nx_p) != (nt, nf, ny, nx):
-        raise ValueError(
-            "psf_cube must match residual_cube on (time, frequency, y, x). "
-            f"Got psf shape {psf_cube.shape} vs residual shape "
-            f"{residual_cube.shape}"
-        )
-    if npol_psf not in (npol_img, 1):
-        raise ValueError(
-            "psf_cube polarization axis must equal residual_cube "
-            "polarization axis or be 1 (Stokes I broadcast). "
-            f"Got np_psf={npol_psf}, np_img={npol_img}"
-        )
-
-    if mask_cube is not None and mask_cube.shape != residual_cube.shape:
-        raise ValueError(
-            "mask_cube must have the same shape as residual_cube. "
-            f"Got {mask_cube.shape} and {residual_cube.shape}"
-        )
+    _check_cubes(residual_cube, psf_cube, model_cube, mask_cube, allow_twice_psf=False)
+    nt, nf, npol_img = residual_cube.shape[:3]
 
     logger.debug(f"Residual cube shape: {residual_cube.shape}")
     logger.debug(f"PSF cube shape: {psf_cube.shape}")
