@@ -232,6 +232,28 @@ def test_cos_sin_turns_reduce_exactly_at_every_magnitude():
     np.testing.assert_array_equal(sin_values, 0)
 
 
+def test_transforms_reduce_phases_beyond_2_51_turns_exactly():
+    """At l = 1/2, u = 2^52 + 2 and 2^52 + 1 wavelengths (frequency c, w = 0)
+    have the phases 2^51 + 1 and 2^51 + 1/2 turns: exp(i phase) is 1 and -1."""
+    n = np.sqrt(0.75)
+    maps = (np.zeros(1, dtype=np.int64),) * 3  # frequency, time, polarization
+    uvw = np.zeros((1, 2, 3))
+    uvw[0, :, 0] = [2.0**52 + 2, 2.0**52 + 1]
+    frequency, l, m = np.array([C]), np.array([0.5]), np.array([0.0])  # noqa: E741
+    vis = np.zeros((1, 2, 1, 1), dtype=np.complex128)
+    dft_predict(np.ones((1, 1, 1, 1, 1)), vis, uvw, frequency, *maps, l, m)
+    np.testing.assert_array_equal(vis.ravel(), [1 / n, -1 / n])
+    weight = np.array([1.0, 2.0]).reshape(1, 2, 1, 1)
+    image, normalization = np.zeros((1, 1, 1, 1, 1), dtype=complex), np.zeros((1, 1, 1))
+    dft_image(
+        image, normalization, np.ones_like(vis), uvw, frequency, *maps, weight, l, m
+    )
+    np.testing.assert_array_equal(image.ravel(), [-n])
+    psf, normalization = np.zeros((1, 1, 1, 1, 1)), np.zeros((1, 1, 1))
+    dft_image_uv_sampling(psf, normalization, uvw, frequency, *maps, weight, l, m)
+    np.testing.assert_array_equal(psf.ravel(), [-n])
+
+
 @pytest.mark.parametrize("dtype", [np.complex128, np.complex64, np.float64, np.float32])
 def test_dft_image_matches_the_definition(dtype):
     inp = _inputs()
