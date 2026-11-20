@@ -115,6 +115,7 @@ def test_read_v3_sharded_multichannel(tmp_path, fsel):
         ("float64", float("-inf")),
         ("int32", -7),
         ("bool", True),
+        ("bool", False),
     ],
 )
 def test_read_encoded_fill_values(tmp_path, layout, dtype, fill):
@@ -131,12 +132,32 @@ def test_read_encoded_fill_values(tmp_path, layout, dtype, fill):
     if layout == "v2":
         arr.attrs["_ARRAY_DIMENSIONS"] = ["frequency", "polarization"]
     # One stored chunk, one empty inner chunk, and an entirely absent shard.
-    arr[:2, :] = 1
+    stored_value = not fill if dtype == "bool" else 1
+    arr[:2, :] = stored_value
     out = np.empty((6, 4), dtype=dtype)
-    got, dims = read_array_region(path, {"frequency": slice(1, 7)}, out=out)
+    counters = {}
+    got, dims = read_array_region(
+        path, {"frequency": slice(1, 7)}, out=out, counters=counters
+    )
     assert got is out
     assert dims == ["frequency", "polarization"]
     assert _equal(got, arr[1:7, :])
+    assert counters["bytes"] > 0  # A fill-only write would omit the chunk.
+    if dtype == "bool":
+        np.testing.assert_array_equal(got[0], np.full(4, stored_value))
+        np.testing.assert_array_equal(got[1:], np.full((5, 4), fill))
+        if layout == "sharded":
+            # Distinguish an omitted inner chunk in an existing shard from
+            # an entirely missing shard; both return the fill without data I/O.
+            for selection, expected_opens in [(slice(2, 4), 1), (slice(4, 7), 0)]:
+                missing_counters = {}
+                missing, _ = read_array_region(
+                    path, {"frequency": selection}, counters=missing_counters
+                )
+                np.testing.assert_array_equal(missing, np.full(missing.shape, fill))
+                assert missing_counters["bytes"] == 0
+                assert missing_counters["shard_opens"] == expected_opens
+                assert (missing_counters["index_bytes"] > 0) == bool(expected_opens)
     got, _ = read_array_region(
         path, {"frequency": slice(1, 7)}, out=out, chunk_mask=np.array(False)
     )
