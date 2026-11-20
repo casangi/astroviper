@@ -1334,6 +1334,7 @@ def image_cube_single_field(
         }
     from astroviper.processing_functions.imaging.utils.frequency_mapping import (
         attach_observation_frequency_boundaries,
+        without_frequency_mapping_metadata,
     )
 
     ps_xdt = attach_observation_frequency_boundaries(
@@ -1516,6 +1517,7 @@ def image_cube_single_field(
 
         # ---- A whole on-disk frequency chunk is done: statistics, write, free ----
         chunk_xds = accumulator.assemble()
+        chunk_xds = without_frequency_mapping_metadata(chunk_xds)
         chunk_task_coords = _chunk_task_coords(
             task_coords, data_selection, accumulator.start, accumulator.stop
         )

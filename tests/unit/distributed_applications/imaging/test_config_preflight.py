@@ -119,6 +119,16 @@ def test_generated_cube_records_channel_preflight(tmp_path, generated_store):
     )
     assert len(image.attrs["input_validation"]["cube_channel_sampling"]) == 4
     assert result["input_validation"] == image.attrs["input_validation"]
+    internal = {
+        "full_image_frequencies",
+        "frequency_boundaries",
+        "image_frequency_boundaries",
+        "observation_frequency_boundaries",
+    }
+    assert not internal.intersection(image.frequency.attrs)
+    assert result["image_statistics"]
+    for statistics in result["image_statistics"].values():
+        assert not internal.intersection(statistics.frequency.attrs)
     image.close()
 
 

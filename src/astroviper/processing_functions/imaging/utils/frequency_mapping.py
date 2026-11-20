@@ -40,9 +40,10 @@ def map_visibility_frequencies_to_image(
         axes have one channel any frequency maps onto that plane.
 
     full_image_frequencies : array-like, optional
-        Original, unpartitioned image axis. When supplied, assignment and
-        boundary checks use this axis; returned indices refer to the local
-        ``image_frequencies`` subset. Channels belonging to other tasks raise.
+        Original, unpartitioned image-frequency axis (Hz), retained for legacy
+        callers. Mapping and boundary checks use this axis, with observations
+        required to belong to the local image-frequency subset. Precomputed
+        ``frequency_boundaries`` take precedence when supplied.
 
     frequency_boundaries : dict, optional
         Precomputed image-channel acceptance intervals (Hz), keyed by channel
@@ -420,3 +421,37 @@ def get_frequency_boundaries(img_xds, ms_xds):
     if common is not None:
         return common
     return ms_xds.frequency.attrs.get("image_frequency_boundaries")
+
+
+def without_frequency_mapping_metadata(img_xds):
+    """Remove execution-only frequency metadata from a finished image.
+
+    Parameters
+    ----------
+    img_xds : xarray.Dataset
+        Finished image, after all frequency mapping has completed.
+
+    Returns
+    -------
+    xarray.Dataset
+        Image with mapping context removed from the frequency attributes.
+        Scientific metadata and array buffers are preserved. The input is
+        unchanged; a shallow copy is made only when mapping context is present.
+    """
+    internal = {
+        "full_image_frequencies",
+        "frequency_boundaries",
+        "image_frequency_boundaries",
+        "observation_frequency_boundaries",
+    }
+    if "frequency" not in img_xds.coords or not internal.intersection(
+        img_xds.frequency.attrs
+    ):
+        return img_xds
+    result = img_xds.copy(deep=False)
+    result.frequency.attrs = {
+        name: value
+        for name, value in img_xds.frequency.attrs.items()
+        if name not in internal
+    }
+    return result

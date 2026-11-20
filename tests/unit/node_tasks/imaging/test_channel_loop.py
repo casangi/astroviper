@@ -895,3 +895,47 @@ def test_preloaded_single_channel_task_keeps_observation_specific_boundaries(
     image_cube_single_field(**params, input_data=ps)
     assert len(fake.calls) == 1
     assert set(fake.calls[0]["vis_frequencies"]) == set(axes)
+
+
+@pytest.mark.parametrize("n_chan", [1, 3])
+def test_finished_cube_statistics_and_store_omit_mapping_metadata(
+    tmp_path, monkeypatch, n_chan
+):
+    import astroviper.processing_functions.imaging as pf_imaging
+    from astroviper.node_tasks.imaging.image_cube_single_field import (
+        image_cube_single_field,
+    )
+
+    internal = {
+        "full_image_frequencies",
+        "frequency_boundaries",
+        "image_frequency_boundaries",
+        "observation_frequency_boundaries",
+    }
+    fake = _FakeScience([1] * n_chan)
+    frequency_attrs = _image_frequency_attrs(VIS_FREQUENCIES[:n_chan])
+
+    def science(ps, image, *args, **kwargs):
+        assert "frequency_boundaries" in image.frequency.attrs
+        # Simulate legacy and observation-specific context on a science product.
+        image.frequency.attrs = {
+            **image.frequency.attrs,
+            **{name: {} for name in internal},
+        }
+        return fake(ps, image, *args, **kwargs)
+
+    monkeypatch.setattr(pf_imaging, "image_cube_single_field", science)
+    params = _task_inputs(tmp_path, n_chan=n_chan)
+    params["image_frequency_attrs"] = frequency_attrs
+    result = image_cube_single_field(
+        **params, input_data=_fake_processing_set({"ms_a": VIS_FREQUENCIES[:n_chan]})
+    )
+    assert len(fake.calls) == n_chan
+    assert result["image_statistics"]
+    for statistics in result["image_statistics"].values():
+        assert not internal.intersection(statistics.frequency.attrs)
+        assert statistics.frequency.attrs == frequency_attrs
+    with xr.open_zarr(params["image_store"]) as output:
+        assert not internal.intersection(output.frequency.attrs)
+        assert output.frequency.attrs == frequency_attrs
+        np.testing.assert_array_equal(output.frequency, VIS_FREQUENCIES[:n_chan])

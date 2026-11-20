@@ -2123,9 +2123,6 @@ def grid_imaging_weight_density_continuum_node(
         time_coords=image_params["time_coords"],
         do_sky_coords=False,
     )
-    img_xds.frequency.attrs["frequency_boundaries"] = task_frequency_boundaries(
-        task_coords, image_params
-    )
 
     # Required by the xradio image accessor used to retrieve the image
     # cell size.
@@ -2452,9 +2449,6 @@ def degrid_imaging_weights_continuum_node(
         pol_coords=correlation_pol_coords,
         time_coords=image_params["time_coords"],
         do_sky_coords=False,
-    )
-    img_xds.frequency.attrs["frequency_boundaries"] = task_frequency_boundaries(
-        task_coords, image_params
     )
     img_xds.attrs["type"] = "image_dataset"
 

@@ -775,7 +775,10 @@ def load_processing_set(
         Single-channel image boundaries keyed by observation name, computed
         from each observation's full frequency axis before selection.
     full_image_frequencies : array-like, optional
-        Original image-frequency axis used to validate task-local selections.
+        Original, unpartitioned image-frequency axis (Hz), retained for legacy
+        callers. Mapping and boundary checks use this axis, with observations
+        required to belong to the local image-frequency subset. Precomputed
+        ``frequency_boundaries`` take precedence when supplied.
     map_frequencies : callable
         ``map_frequencies(visibility_frequencies, task_frequencies)`` returns
         the index of the task frequency each selected channel is imaged onto

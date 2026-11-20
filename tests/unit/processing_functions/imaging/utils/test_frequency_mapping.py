@@ -493,3 +493,37 @@ def test_single_channel_observations_keep_distinct_intervals_after_slicing():
             [1.2e9], [1.5e9], frequency_boundaries=bounds["narrow"]
         )
     assert calculate_observation_frequency_boundaries([1.0e9, 2.0e9], full) == {}
+
+
+def test_finished_image_metadata_cleanup_preserves_input_and_array_buffers():
+    import copy
+
+    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        without_frequency_mapping_metadata,
+    )
+
+    _, image, _ = build_datasets(
+        visibility_frequencies=[1e9, 1.2e9],
+        image_frequencies=[1e9, 1.2e9],
+        sky_value=2.0 + 0j,
+    )
+    scientific_attrs = {
+        "units": ["Hz"],
+        "observer": "lsrk",
+        "rest_frequency": {"data": 1.1e9, "units": ["Hz"]},
+    }
+    image.frequency.attrs = {
+        **scientific_attrs,
+        "full_image_frequencies": [1e9, 1.2e9],
+        "frequency_boundaries": {"1000000000.0": [0.9e9, 1.1e9]},
+        "image_frequency_boundaries": {},
+        "observation_frequency_boundaries": {},
+    }
+    original_attrs = copy.deepcopy(image.frequency.attrs)
+    cleaned = without_frequency_mapping_metadata(image)
+    assert image.frequency.attrs == original_attrs
+    assert cleaned.frequency.attrs == scientific_attrs
+    np.testing.assert_array_equal(cleaned.frequency, image.frequency)
+    for name in image.data_vars:
+        assert cleaned[name].data is image[name].data
+    assert without_frequency_mapping_metadata(cleaned) is cleaned

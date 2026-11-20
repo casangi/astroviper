@@ -400,6 +400,11 @@ def point_spread_function_cube_single_field(
 
     psf_xds = xr.concat(psf_channels, dim="frequency")
     psf_channels = None
+    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        without_frequency_mapping_metadata,
+    )
+
+    psf_xds = without_frequency_mapping_metadata(psf_xds)
 
     start = time.time()
     if image_store is not None:

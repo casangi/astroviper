@@ -525,6 +525,12 @@ _FIND_CONTINUUM_ULTRA_PARAM_DOCS = {
 }
 
 IMAGING_PARAM_DOCS = {
+    "full_image_frequencies": (
+        "Original, unpartitioned image-frequency axis (Hz), retained for legacy\n"
+        "callers. Mapping and boundary checks use this axis, with observations\n"
+        "required to belong to the local image-frequency subset. Precomputed\n"
+        "``frequency_boundaries`` take precedence when supplied."
+    ),
     "observation_frequency_boundaries": (
         "Single-channel image boundaries keyed by observation name, computed\n"
         "from each observation's full frequency axis before selection."
