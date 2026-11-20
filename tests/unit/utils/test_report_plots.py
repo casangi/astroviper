@@ -20,6 +20,7 @@ from astroviper.utils.report_plots import (
     plane_maximum_detections,
     plot_antenna_positions,
     plot_continuum_selection,
+    plot_continuum_subtraction,
     plot_deconvolution_summary,
     plot_image_statistics,
     plot_plane_deconvolution_summary,
@@ -614,6 +615,32 @@ def test_continuum_selection():
         "spectrum",
         "thresholds",
         "corrected median",
+    ]
+
+
+def test_continuum_subtraction():
+    frequency = 230e9 + 1e6 * np.arange(12)
+    before = np.ones((12, 2), dtype=complex)
+    before[4:7] += 2.0
+    after = before - 1.0
+    fraction = np.ones(12)
+    fraction[4:7] = 0.0
+    fraction[3] = fraction[7] = 0.5
+    figure = plot_continuum_subtraction(
+        frequency, before, after, fraction, ["XX", "YY"], title="ALMA_spw_0"
+    )
+    _assert_pyplot_free(figure, 2)
+    axes = figure.axes
+    assert axes[0].get_ylabel() == "|mean XX| (Jy)"
+    np.testing.assert_allclose(axes[1].lines[1].get_ydata(), np.abs(after[:, 1]))
+    # Shaded: the runs at every time (0-2, 8-11) and at some times (3, 7).
+    assert len(axes[0].patches) == 4
+    labels = axes[0].get_legend_handles_labels()[1]
+    assert labels == [
+        "continuum at every time",
+        "continuum at some times",
+        "before",
+        "after",
     ]
 
 

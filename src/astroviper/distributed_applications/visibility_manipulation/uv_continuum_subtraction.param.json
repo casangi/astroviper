@@ -1,0 +1,18 @@
+{
+  "uv_continuum_subtraction": {
+    "ps_store": {"required": true, "type": ["str"]},
+    "spectral_window_name": {"required": true, "type": ["str"]},
+    "continuum_frequency_ranges": {"required": true, "type": ["list", "ndarray"]},
+    "continuum_frequency_frame": {"required": true, "type": ["str"]},
+    "fit_order": {"type": ["int"]},
+    "ms_data_group_in_name": {"type": ["str"]},
+    "ms_data_group_out_name": {"type": ["str"]},
+    "ms_data_group_out_modified": {"type": ["dict"], "nullable": true},
+    "n_mapping_parallelism": {"type": ["dict"], "nullable": true},
+    "thread_info": {"type": ["dict"], "nullable": true},
+    "overwrite": {"type": "boolean"},
+    "monitor_resources_seconds": {"type": ["int", "float"], "nullable": true},
+    "report": {"type": ["str"], "nullable": true, "allowed": ["html", "pdf", "notebook"]},
+    "input_checked": {"type": "boolean"}
+  }
+}
