@@ -38,7 +38,9 @@ public:
         Reference(const ScalarBuffer& buffer, std::ptrdiff_t index) : buffer_(buffer), index_(index) {}
         operator Value() const { return buffer_.load(index_); }
         Reference& operator=(Value value) { buffer_.store(index_, value); return *this; }
-        Reference& operator+=(Value value) { return *this = buffer_.load(index_) + value; }
+        // Match built-in +=: promote for addition, then narrow on assignment.
+        template <typename Rhs>
+        Reference& operator+=(Rhs value) { return *this = buffer_.load(index_) + value; }
     };
     auto operator[](std::ptrdiff_t index) const {
         if constexpr (std::is_const_v<T>) return load(index);
