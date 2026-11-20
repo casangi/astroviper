@@ -226,6 +226,21 @@ def test_decreasing_frequency_axis(topo_ms, lsrk_ms):
         np.testing.assert_array_equal(out[name].values, lsrk_ms[name].values)
 
 
+def test_single_output_channel(topo_ms, lsrk_ms):
+    out = ms_spectral_frame_conversion(
+        topo_ms, output_frequency=lsrk_ms.frequency.values[[74]]
+    )
+    for name in REGRIDDED:
+        np.testing.assert_array_equal(
+            out[name].values, lsrk_ms[name].values[:, :, [74]]
+        )
+    np.testing.assert_allclose(
+        out.frequency.attrs["channel_width"]["data"],
+        topo_ms.frequency.attrs["channel_width"]["data"]
+        * doppler_factor(topo_ms).mean(),
+    )
+
+
 def test_lazy_input(data_dir, lsrk_ms):
     ps = xr.open_datatree(data_dir / TOPO_PS)
     out = ms_spectral_frame_conversion(ps[next(iter(ps.children))])
@@ -285,16 +300,36 @@ def test_refusals(topo_ms):
     with pytest.raises(ValueError, match="output_frequency"):
         ms_spectral_frame_conversion(topo_ms, output_frequency=np.ones((2, 2)))
 
-    lsrk_input = topo_ms.copy()
-    lsrk_input.dataset = topo_ms.to_dataset().assign_coords(
-        frequency=topo_ms.frequency.assign_attrs(observer="lsrk")
-    )
-    with pytest.raises(ValueError, match="must be TOPO"):
-        ms_spectral_frame_conversion(lsrk_input)
-
-    extra = topo_ms.copy()
-    extra.dataset = topo_ms.to_dataset().assign(
-        EFFECTIVE_CHANNEL_WIDTH=topo_ms.WEIGHT.astype(np.float64)
-    )
-    with pytest.raises(ValueError, match="EFFECTIVE_CHANNEL_WIDTH"):
-        ms_spectral_frame_conversion(extra)
+    dataset = topo_ms.to_dataset()
+    for modified, message in (
+        (
+            dataset.assign_coords(
+                frequency=topo_ms.frequency.assign_attrs(observer="lsrk")
+            ),
+            "must be TOPO",
+        ),
+        (
+            dataset.assign_coords(
+                frequency=topo_ms.frequency.assign_attrs(units="GHz")
+            ),
+            "must be in Hz",
+        ),
+        (
+            dataset.assign(EFFECTIVE_CHANNEL_WIDTH=topo_ms.WEIGHT.astype(np.float64)),
+            "EFFECTIVE_CHANNEL_WIDTH",
+        ),
+        (
+            dataset.assign(WEIGHT=topo_ms.WEIGHT.transpose("baseline_id", "time", ...)),
+            "time as its first dimension",
+        ),
+        (
+            dataset.assign_coords(
+                channel=("frequency", np.arange(topo_ms.sizes["frequency"]))
+            ),
+            "Coordinate channel",
+        ),
+    ):
+        ms = topo_ms.copy()
+        ms.dataset = modified
+        with pytest.raises(ValueError, match=message):
+            ms_spectral_frame_conversion(ms)
