@@ -115,3 +115,39 @@ def test_psf_node_checks_configuration_before_loading():
             None,
             "missing.ps.zarr",
         )
+
+
+def test_the_gridder_reaches_the_setup(monkeypatch):
+    """GraphVIPER hands a node task only the keys of input_params it declares:
+    the node task receives the gridder and hands it to the setup of the
+    channel (one without it would grid with the anti-alias gridder)."""
+    import importlib
+
+    graph_map = importlib.import_module("graphviper.graph_tools.map")
+    residual_update = importlib.import_module(
+        "astroviper.processing_functions.imaging.residual_update"
+    )
+
+    class SetupReached(Exception):
+        pass
+
+    def setup(*args, **kwargs):
+        raise SetupReached(kwargs["gridder"])
+
+    monkeypatch.setattr(residual_update, "imaging_setup_single_field", setup)
+    node_task = graph_map.make_graph_node_task(point_spread_function_cube_single_field)
+    with pytest.raises(SetupReached, match="^direct_fourier_transform$"):
+        node_task(
+            {
+                "image_params": IMAGE_PARAMS,
+                "imaging_weights_params": {"weighting": "natural"},
+                "task_coords": {
+                    "frequency": {"data": np.array([FREQUENCY]), "slice": slice(0, 1)}
+                },
+                "data_selection": {"ms_0": {"frequency": slice(0, 1)}},
+                "input_data_store": "unused.ps.zarr",
+                "processing_set_data_group_name": "base",
+                "input_data": _processing_set(),
+                "gridder": "direct_fourier_transform",
+            }
+        )

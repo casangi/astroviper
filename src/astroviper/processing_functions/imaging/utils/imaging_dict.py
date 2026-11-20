@@ -1,18 +1,27 @@
 """
-Module to hold the ImagingDict class. The ImagingDict class is a convenience
-class around a regular nested dictionary, allowing for more flexible indexing
-and seaerching. By keeping it as a dict underneath, it remains generic
-and lightweight.
+The imaging_dict, the convergence record of the imaging cycles.
 
-History Tracking (Added 2025-12-10):
--------------------------------------
-The ImagingDict.add() method now maintains convergence history by tracking
-certain fields as lists (appending values) while keeping others as single
-values (replacing). This enables convergence visualization and monitoring
-deconvolution progress across imaging cycles.
+Schema
+------
+An imaging_dict is a plain dictionary that maps ``Key(time, pol, chan)``, the
+indices of an image plane, to a dictionary of fields of two kinds:
+
+- a field in ``FIELD_ACCUM`` is a list of per-cycle measurements, to which
+  :func:`add_to_imaging_dict` appends;
+- a field in ``FIELD_SINGLE_VALUE`` is a single value, which
+  :func:`add_to_imaging_dict` replaces.
+
+A field in neither set is kept as a single value. Such fields are
+``stop_code`` (a ``StopCode``, or None; ``create_imaging_dict``,
+``check_convergence``, the native MT-MFS model update),
+``stop_description`` (``check_convergence``, native MT-MFS), ``stokes``,
+``frequency`` and ``time`` (``create_imaging_dict``, native MT-MFS),
+``min_psf_fraction`` and ``max_psf_fraction`` (``create_imaging_dict``),
+and ``scales``, ``hessian_condition_number`` and
+``taylor_hessian_condition_number`` (native MT-MFS).
 """
 
-from collections import OrderedDict, namedtuple
+from collections import namedtuple
 
 from astroviper.processing_functions.image_analysis.image_statistics import (
     RESIDUAL_STATISTICS,
@@ -92,89 +101,85 @@ FIELD_SINGLE_VALUE = {
 }
 
 
-class ImagingDict:
-    def __init__(self):
-        self._data = OrderedDict()
+def add_to_imaging_dict(imaging_dict, value, time, pol, chan):
+    """
+    Add value to imaging_dict with history tracking.
 
-    @property
-    def data(self):
-        return self._data
+    For fields in FIELD_ACCUM (peakres, iter_done, masksum, peakres_nomask),
+    values are appended to lists. For fields in FIELD_SINGLE_VALUE
+    (max_psf_sidelobe, gain, max_iter, threshold), values replace previous values.
 
-    @data.setter
-    def data(self, value):
-        self._data = value
+    Parameters:
+    -----------
+    imaging_dict : dict
+        The imaging_dict the value is added to, in place
+    value : dict
+        Dictionary of field values to add
+    time : int
+        Time index
+    pol : int
+        Polarization index
+    chan : int
+        Channel index
+    """
+    key = Key(time, pol, chan)
 
-    def add(self, value, time, pol, chan):
-        """
-        Add value to ImagingDict with history tracking.
-
-        For fields in FIELD_ACCUM (peakres, iter_done, masksum, peakres_nomask),
-        values are appended to lists. For fields in FIELD_SINGLE_VALUE
-        (max_psf_sidelobe, gain, max_iter, threshold), values replace previous values.
-
-        Parameters:
-        -----------
-        value : dict
-            Dictionary of field values to add
-        time : int
-            Time index
-        pol : int
-            Polarization index
-        chan : int
-            Channel index
-        """
-        key = Key(time, pol, chan)
-
-        if key not in self.data:
-            # First time seeing this key - initialize
-            self.data[key] = {}
-            for field, field_value in value.items():
-                if field in FIELD_ACCUM:
-                    # Initialize as single-element list
-                    self.data[key][field] = [field_value]
+    if key not in imaging_dict:
+        # First time seeing this key - initialize
+        imaging_dict[key] = {}
+        for field, field_value in value.items():
+            if field in FIELD_ACCUM:
+                # Initialize as single-element list
+                imaging_dict[key][field] = [field_value]
+            else:
+                # Store as single value
+                imaging_dict[key][field] = field_value
+    else:
+        # Key exists - update with history tracking
+        for field, field_value in value.items():
+            if field in FIELD_ACCUM:
+                # Append to history
+                if field in imaging_dict[key]:
+                    # Handle backward compatibility: convert to list if needed
+                    if not isinstance(imaging_dict[key][field], list):
+                        imaging_dict[key][field] = [imaging_dict[key][field]]
+                    imaging_dict[key][field].append(field_value)
                 else:
-                    # Store as single value
-                    self.data[key][field] = field_value
-        else:
-            # Key exists - update with history tracking
-            for field, field_value in value.items():
-                if field in FIELD_ACCUM:
-                    # Append to history
-                    if field in self.data[key]:
-                        # Handle backward compatibility: convert to list if needed
-                        if not isinstance(self.data[key][field], list):
-                            self.data[key][field] = [self.data[key][field]]
-                        self.data[key][field].append(field_value)
-                    else:
-                        # First occurrence of this field
-                        self.data[key][field] = [field_value]
-                else:
-                    # Replace single value
-                    self.data[key][field] = field_value
+                    # First occurrence of this field
+                    imaging_dict[key][field] = [field_value]
+            else:
+                # Replace single value
+                imaging_dict[key][field] = field_value
 
-    def sel(self, time=None, pol=None, chan=None):
-        """Get all items matching the given criteria"""
-        matches = []
-        for key, value in self.data.items():
-            if (
-                (time is None or key.time == time)
-                and (pol is None or key.pol == pol)
-                and (chan is None or key.chan == chan)
-            ):
-                matches.append(value)
 
-        if len(matches) == 1:
-            return matches[0]
-        return matches if matches else None
+def select_from_imaging_dict(imaging_dict, time=None, pol=None, chan=None):
+    """Select the fields of the planes that match the given indices.
 
-    def to_dict(self):
-        return self.data
+    Parameters
+    ----------
+    imaging_dict : dict
+        The imaging_dict to select from.
+    time, pol, chan : int or None
+        Indices to match; None matches every value.
 
-    def __repr__(self):
-        lines = []
-        for key, value in self.data.items():
-            lines.append(f"  {key}: {value}")
-        return "\n".join(lines)
+    Returns
+    -------
+    dict, list of dict or None
+        The fields of the one matching plane, a list of the fields of
+        several matching planes, or None when no plane matches.
+    """
+    matches = []
+    for key, value in imaging_dict.items():
+        if (
+            (time is None or key.time == time)
+            and (pol is None or key.pol == pol)
+            and (chan is None or key.chan == chan)
+        ):
+            matches.append(value)
+
+    if len(matches) == 1:
+        return matches[0]
+    return matches if matches else None
 
 
 def ends_with_stop_test(iter_done, start_peakres):
@@ -185,14 +190,14 @@ def ends_with_stop_test(iter_done, start_peakres):
 
 
 def imaging_dict_to_dataframe(imaging_dict):
-    """Flatten a deconvolution :class:`ImagingDict` to one row per plane.
+    """Flatten a deconvolution ``imaging_dict`` to one row per plane.
 
     Used by the benchmark result saving (and any post-run analysis) to persist
     the per-plane convergence record in a tabular, feather-friendly form.
 
     Parameters
     ----------
-    imaging_dict : ImagingDict
+    imaging_dict : dict
         The merged per-plane deconvolution dict returned by
         ``image_cube_single_field`` (``Key(time, pol, chan)`` ->
         parameters, per-cycle history lists and the stop code).
@@ -225,7 +230,7 @@ def imaging_dict_to_dataframe(imaging_dict):
     import pandas as pd
 
     rows = []
-    for key, value in imaging_dict.data.items():
+    for key, value in imaging_dict.items():
         row = {"time_index": key.time, "pol": key.pol, "chan": key.chan}
         for field, field_value in value.items():
             if isinstance(field_value, tuple) and hasattr(field_value, "_fields"):
@@ -268,11 +273,11 @@ _DERIVED_COLUMNS = (
 
 
 def imaging_dict_from_dataframe(frame):
-    """Rebuild a deconvolution :class:`ImagingDict` from its table.
+    """Rebuild a deconvolution ``imaging_dict`` from its table.
 
     The inverse of :func:`imaging_dict_to_dataframe`: every row becomes the
     fields of the plane ``Key(time_index, pol, chan)``, in row order, set
-    directly (not through :meth:`ImagingDict.add`).
+    directly (not through :func:`add_to_imaging_dict`).
 
     Parameters
     ----------
@@ -282,7 +287,7 @@ def imaging_dict_from_dataframe(frame):
 
     Returns
     -------
-    ImagingDict
+    dict
         The derived columns (``n_cycles``, ``iter_total``, ``peakres_start``,
         ``peakres_final``, ``model_flux_final``) and the key columns are left
         out; ``stop_code_imaging`` and ``stop_code_model_update`` become
@@ -296,7 +301,7 @@ def imaging_dict_from_dataframe(frame):
 
     from astroviper.processing_functions.imaging.utils.cycle_control import StopCode
 
-    imaging_dict = ImagingDict()
+    imaging_dict = {}
     for row in frame.to_dict("records"):
         fields = {}
         for column, value in row.items():
@@ -313,7 +318,7 @@ def imaging_dict_from_dataframe(frame):
             elif not pd.isna(value):
                 fields[column] = value
         key = Key(int(row["time_index"]), int(row["pol"]), int(row["chan"]))
-        imaging_dict.data[key] = fields
+        imaging_dict[key] = fields
     return imaging_dict
 
 

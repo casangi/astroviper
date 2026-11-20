@@ -154,9 +154,9 @@ the future.
    images one frequency channel at a time so every channel runs its own
    imaging cycle loop); never write a processing function that assumes a
    single time, channel or polarization plane.
-   > **Open question:** should temporary/cache data (e.g. a cfcache) be allowed
-   > to be written to disk from this layer? Undecided — raise it before relying
-   > on either answer.
+   Temporary and cache data on disk (for example a cache of gridding
+   convolution functions) are read and written by node tasks, never from
+   this layer.
 4. **`utils/`** — Cross-cutting helpers. Most important:
    `utils/data_group_tools.py` (data-group bookkeeping — read it before touching
    data groups) and `utils/io.py` (Zarr variable definitions + chunk writers).
@@ -580,7 +580,7 @@ per-variable nodes.
     `SKY_MODEL`).
   - **Functions / variables**: `snake_case`, **descriptive** (`image_size`, not
     `imsize`).
-  - **Classes**: `CamelCase` (`CycleController`, `ReturnDict`).
+  - **Classes**: `CamelCase` (`Interface`).
   - **Consistency**: Parameter names should be consistent throughout the stack.
     One name per parameter and one spelling per value: no aliases, no case
     folding. An unsupported value or combination is refused, never coerced or
@@ -593,10 +593,29 @@ per-variable nodes.
     parameters. Never call anything a major or minor cycle (major/minor axis
     of a Gaussian beam is fine). CASA parameter names may be cited in brackets
     for orientation, e.g. `max_cycles` [CASA `nmajor`]. **Cycle control** is
-    the stop test between the residual update and the model update
-    (`CycleController`); **iteration control** is the stop test inside the
-    model update (the deconvolver kernels). A quantity keeps one name from the
-    cycle controller down to the kernel arguments.
+    the stop test between the residual update and the model update (the
+    functions of `processing_functions/imaging/utils/cycle_control.py`,
+    which work on the dictionary
+    `cycle_control_state`); **iteration control** is the stop test inside the
+    model update (the deconvolver kernels). A quantity keeps one name from
+    cycle control down to the kernel arguments.
+- **Interface classes**: a class exists only where several implementations
+  share an interface (imagers, gridders, deconvolvers, solvers). It has the
+  metaclass `astroviper.utils.interface.Interface`, which enforces the first
+  two rules:
+  - static methods only: no `__init__`, instances, class methods or
+    properties;
+  - class attributes are constants that declare the implementation (its
+    `name`, what it supports) and are never reassigned;
+  - a base class defines the interface and the shared helpers, and a subclass
+    calls a helper through the base-class name (no dispatch through `cls` or
+    `self`);
+  - a registry (`make_registry`) maps the user's string to a class; every
+    public function takes the registry name (a `str` such as `"anti_alias"`),
+    and the class is looked up in the registry where its methods are called;
+    drivers never name an implementation;
+  - a method receives all its inputs as arguments, and state lives in the
+    datasets it is given (`ps_xdt`, `img_xds`, `gcf_xds`), never in the class.
 - **Formatting**: **Ruff** (enforced by CI + pre-commit). Don't hand-format.
 - **Imports**: prefer **absolute** imports (`from
   astroviper.processing_functions.imaging.residual_update import ...`). Relative
@@ -637,8 +656,8 @@ per-variable nodes.
   ```
   The log level in node_tasks and processing_functions should always be debug or higher because there will be many instances of these functions.
 - **Performance**: vectorize with NumPy; if not feasible, use C++; verify with timing.
-  Large arrays are timed via `T_*` keys collected into per-chunk `DataFrame`s /
-  `ReturnDict`s — keep that bookkeeping when adding stages.
+  Large arrays are timed via `T_*` keys collected into per-chunk `DataFrame`s —
+  keep that bookkeeping when adding stages.
 - **Parameter validation**: the user-facing distributed-graph entry points use
   **toolviper's schema validation** — decorate the function with
   `@toolviper.utils.parameter.validate(config_dir=...)`. **Rule: the
@@ -675,7 +694,7 @@ per-variable nodes.
     Metadata preflight must stay cheap: inspect coordinates, attributes, shapes,
     and dtypes without reading bulk sample arrays or doing imaging work.
   - **Design for all imaging modes:** each imaging validator distinguishes cube
-    and continuum, and single-field and multifield layouts. Multifield execution
+    and continuum, and single-field and mosaic layouts. Mosaic execution
     is currently unsupported, but its rules belong in the same validation
     architecture. Keep checks in clear logical blocks, with a description of
     each check and motivation for numerical acceptance criteria.

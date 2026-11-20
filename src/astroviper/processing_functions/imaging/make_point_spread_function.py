@@ -6,7 +6,6 @@ first step of forming the point spread function.
 """
 
 import copy
-from typing import TYPE_CHECKING
 
 import numpy as np
 import xarray as xr
@@ -16,11 +15,6 @@ from astroviper.utils.data_group_tools import (
     modify_data_groups_xds,
 )
 from astroviper.utils.param_docs import shares_param_docs
-
-if TYPE_CHECKING:
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-        GriddingKernel,
-    )
 
 
 def add_uv_sampling_grid_mosaic(
@@ -205,7 +199,7 @@ def add_uv_sampling_grid_mosaic(
 
 def add_uv_sampling_grid_single_field(
     ms_xdt: xr.Dataset,
-    cgk_1D: "GriddingKernel | np.ndarray",
+    gcf_xds: xr.Dataset,
     img_xds: xr.Dataset,
     ms_data_group_in_name: str = "base",
     image_data_group_in_name: str = "residual",
@@ -216,19 +210,21 @@ def add_uv_sampling_grid_single_field(
     fft_padding: float = 1.2,
     processing_function_threads: int = 1,
     complex_dtype=None,
+    gridder: str = "anti_alias",
 ):
     """Accumulate the UV-sampling grid for a single-field observation into an image dataset.
 
     Reads imaging weights from ``ms_xdt``, grids them onto the UV plane using a
-    separable 1-D convolutional gridding kernel (``cgk_1D``), and accumulates
+    separable 1-D convolutional gridding kernel (``gcf_xds``), and accumulates
     the result into ``img_xds``.  The UV-sampling grid and its normalization
     (sum of weights) are stored as new data variables in ``img_xds``, and a
     corresponding output data group is registered via
     :func:`~astroviper.utils.data_group_tools.modify_data_groups_xds`.
 
     This function is the non-mosaic counterpart of
-    :func:`add_uv_sampling_grid_mosaic`.  It uses the separable anti-aliasing gridder (the standard gridder in CASA) rather than the
-    direction-dependent mosaic gridder, so no GCF dataset is required.
+    :func:`add_uv_sampling_grid_mosaic`.  By default it uses the separable anti-aliasing gridder (the standard gridder in CASA) rather than the
+    direction-dependent mosaic gridder, so ``gcf_xds`` needs only the
+    anti-alias term.
 
     Parameters
     ----------
@@ -236,10 +232,12 @@ def add_uv_sampling_grid_single_field(
         Measurement set dataset.  Must contain the data variables referenced
         by ``ms_data_group_in_name`` (``uvw``, ``weight_imaging``) and a
         ``frequency`` coordinate.
-    cgk_1D : GriddingKernel or np.ndarray
-        The gridding kernel
-        (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`),
-        or a bare table of CASA's prolate spheroidal kernel of support 7.
+    gcf_xds : xr.Dataset
+        The ``gcf_xds`` of the gridding kernel, from
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.make_gridding_kernel`,
+        or from
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.as_gridding_kernel`
+        for a bare table of CASA's prolate spheroidal kernel of support 7.
     img_xds : xr.Dataset
         Image dataset that accumulates the UV-sampling grid.  The arrays
         named by ``image_data_group_out_modified`` are created on the first call
@@ -252,11 +250,13 @@ def add_uv_sampling_grid_single_field(
     image_data_group_out_name : str, default ``"residual"``
         Key under which the output data group is registered in
         ``img_xds.attrs["data_groups"]``.
-    image_data_group_out_modified : dict, default ``{"uv_sampling": "UV_SAMPLING", "uv_sampling_normalization": "UV_SAMPLING_NORMALIZATION"}``
+    image_data_group_out_modified : dict, default the ``grid_uv_sampling_roles`` of the gridder
         Mapping of role keys to the data-variable names written into
         ``img_xds``.  ``"uv_sampling"`` stores the complex UV grid and
         ``"uv_sampling_normalization"`` stores the per-channel,
-        per-polarization sum of imaging weights.
+        per-polarization sum of imaging weights
+        (``"direct_fourier_transform"`` accumulates into the role
+        ``"point_spread_function"`` in place of ``"uv_sampling"``).
     overwrite : bool, default ``True``
         If ``True``, an existing output data group or output data variables
         are silently overwritten.  Defaults to ``True`` because this function
@@ -277,6 +277,11 @@ def add_uv_sampling_grid_single_field(
         Complex precision of the gridded UV-sampling data (``complex64`` for a
         single-precision image, ``complex128`` otherwise).  Defaults to
         ``numpy.complex128``.
+    gridder : str, default ``"anti_alias"``
+        Registry name of the gridder (a key of
+        :data:`~astroviper.processing_functions.imaging.gridders.gridder_registry.GRIDDERS`):
+        ``"anti_alias"`` or ``"direct_fourier_transform"``, which uses neither
+        ``gcf_xds`` nor ``fft_padding``.
 
     Returns
     -------
@@ -288,108 +293,26 @@ def add_uv_sampling_grid_single_field(
     --------
     add_uv_sampling_grid_mosaic : Mosaic (direction-dependent GCF) variant.
     """
-    if image_data_group_out_modified is None:
-        image_data_group_out_modified = {
-            "uv_sampling": "UV_SAMPLING",
-            "uv_sampling_normalization": "UV_SAMPLING_NORMALIZATION",
-        }
-    # Deep copy so that inputs are not modified
-    _image_data_group_out_modified = copy.deepcopy(image_data_group_out_modified)
+    from astroviper.processing_functions.imaging.add_visibility_grid import (
+        _add_grid_single_field,
+    )
 
-    ms_data_group_in = ms_xdt.attrs["data_groups"][ms_data_group_in_name]
-
-    image_data_group_in, image_data_group_out = create_data_groups_in_and_out(
+    _add_grid_single_field(
+        ms_xdt,
+        gcf_xds,
         img_xds,
-        data_group_in_name=image_data_group_in_name,
-        data_group_out_name=image_data_group_out_name,
-        data_group_out_modified=_image_data_group_out_modified,
+        ms_data_group_in_name=ms_data_group_in_name,
+        image_data_group_in_name=image_data_group_in_name,
+        image_data_group_out_name=image_data_group_out_name,
+        image_data_group_out_modified=image_data_group_out_modified,
         overwrite=overwrite,
-    )
-
-    weight_imaging = ms_xdt[ms_data_group_in["weight_imaging"]].values
-    n_chan = weight_imaging.shape[2]
-
-    if chan_mode == "cube":
-        from astroviper.processing_functions.imaging.utils.frequency_mapping import (
-            map_visibility_frequencies_to_image,
-        )
-
-        n_imag_chan = img_xds.sizes["frequency"]
-        frequency_map = map_visibility_frequencies_to_image(
-            ms_xdt.frequency.values, img_xds.frequency.values
-        )
-    else:  # continuum
-        n_imag_chan = 1  # Making only one continuum image.
-        frequency_map = (np.zeros(n_chan)).astype(int)
-
-    n_imag_pol = weight_imaging.shape[3]
-    pol_map = (np.arange(0, n_imag_pol)).astype(int)
-
-    # Time Map #Currently not implemented.
-    n_image_time = 1
-    n_time = ms_xdt.sizes["time"]
-    time_map = (np.zeros(n_time)).astype(int)
-
-    from astroviper.processing_functions.imaging.utils.fft_sizing import (
-        padded_grid_size,
-    )
-
-    n_uv = padded_grid_size([img_xds.sizes["l"], img_xds.sizes["m"]], fft_padding)
-    delta_lm = img_xds.xr_img.get_lm_cell_size()
-
-    if complex_dtype is None:
-        complex_dtype = np.complex128
-
-    if image_data_group_out["uv_sampling"] not in img_xds:
-        img_xds[image_data_group_out["uv_sampling"]] = xr.DataArray(
-            np.zeros(
-                (n_image_time, n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]),
-                dtype=complex_dtype,
-            ),
-            dims=["time", "frequency", "polarization", "u", "v"],
-        )
-        img_xds[image_data_group_out["uv_sampling_normalization"]] = xr.DataArray(
-            np.zeros((n_image_time, n_imag_chan, n_imag_pol), dtype=np.double),
-            dims=["time", "frequency", "polarization"],
-        )
-        modify_data_groups_xds(
-            img_xds,
-            image_data_group_out_name,
-            image_data_group_out,
-            description="Added UV sampling grid to img_xds with add_uv_sampling_grid_single_field.",
-        )
-
-    grid = img_xds[image_data_group_out["uv_sampling"]].values
-    normalization = img_xds[image_data_group_out["uv_sampling_normalization"]].values
-
-    uvw = ms_xdt[ms_data_group_in["uvw"]].values
-    frequency_coord = ms_xdt.frequency.values
-    imaging_weight = ms_xdt[ms_data_group_in["weight_imaging"]].values
-
-    from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
-        anti_alias_grid_uv_sampling,
-    )
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-        as_gridding_kernel,
-    )
-
-    kernel = as_gridding_kernel(cgk_1D)
-    anti_alias_grid_uv_sampling(
-        grid,
-        normalization,
-        uvw,
-        frequency_coord,
-        frequency_map,
-        time_map,
-        pol_map,
-        imaging_weight,
-        kernel.table,
-        n_uv,
-        delta_lm,
-        support=kernel.support,
-        oversampling=kernel.oversampling,
-        interpolation=kernel.interpolation_code,
+        chan_mode=chan_mode,
+        fft_padding=fft_padding,
         processing_function_threads=processing_function_threads,
+        complex_dtype=complex_dtype,
+        gridder=gridder,
+        uv_sampling=True,
+        description="Added UV sampling grid to img_xds with add_uv_sampling_grid_single_field.",
     )
 
 
@@ -406,6 +329,7 @@ def make_point_spread_function_single_field(
     processing_function_threads=1,
     fft_backend="pyfftw",
     complex_dtype=None,
+    gridder="anti_alias",
 ):
     """Build the point spread function for a single-field image chunk.
 
@@ -426,10 +350,10 @@ def make_point_spread_function_single_field(
     The Gaussian beam fit of the PSF is performed afterwards by
     :func:`~astroviper.processing_functions.image_analysis.point_spread_function_gaussian_fit.point_spread_function_gaussian_fit`.
 
-    With ``gridding_kernel_params={"type": "dft"}`` the PSF is the exact direct
+    With ``gridder="direct_fourier_transform"`` the PSF is the exact direct
     Fourier transform of the imaging weights, w term included, over the
     unpadded image
-    (:func:`~astroviper.processing_functions.imaging.direct_fourier_transform.make_dft_point_spread_function_single_field`);
+    (:class:`~astroviper.processing_functions.imaging.gridders.direct_fourier_transform.gridder_direct_fourier_transform.GridderDirectFourierTransform`);
     no ``UV_SAMPLING`` grid is made.
 
     Parameters
@@ -506,20 +430,8 @@ def make_point_spread_function_single_field(
         the image kept (a support too large for the ``fft_padding``, e.g. 17
         at 1.05) is refused. The kernel of the
         former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
-        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
-        the gridding and the FFTs by the exact direct Fourier transform over the
-        unpadded image, w term included: with the phase
-        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
-        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
-        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
-        the measurement equation of ``simulate_processing_set``. Its cost is
-        proportional to the samples times the image pixels (30 to 40 s per
-        residual update of 451,500 samples, four correlations and 160 x 160
-        pixels on one core), so give it several
-        ``processing_function_threads``; its results do not depend on their
-        number. Its ``VISIBILITY_NORMALIZATION`` and
-        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
-        gridders' that sum times the kernel's stencil sums.
+        not ``"prolate_spheroidal"``. The gridder ``"direct_fourier_transform"``
+        uses no kernel: ``gridding_kernel_params`` must then be ``None``.
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
         kernels.
@@ -529,6 +441,26 @@ def make_point_spread_function_single_field(
     complex_dtype : numpy.dtype, optional
         Complex precision of the gridded data.  Defaults to
         ``numpy.complex128``.
+    gridder : str, optional
+        Registry name of the gridder (a key of
+        :data:`~astroviper.processing_functions.imaging.gridders.gridder_registry.GRIDDERS`):
+        ``"anti_alias"`` (the default), convolutional gridding with the
+        anti-aliasing kernel of ``gridding_kernel_params`` (by default the
+        ``least_misfit`` kernel of support 9, oversampling 300 and linear
+        lookup), or ``"direct_fourier_transform"``, which replaces the gridding
+        and the FFTs by the exact direct Fourier transform over the unpadded
+        image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. It uses no
+        kernel and no ``fft_padding``. Its cost is proportional to the samples
+        times the image pixels (30 to 40 s per residual update of 451,500
+        samples, four correlations and 160 x 160 pixels on one core), so give
+        it several ``processing_function_threads``; its results do not depend
+        on their number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        anti-alias gridder's that sum times the kernel's stencil sums.
 
     Returns
     -------
@@ -547,11 +479,13 @@ def make_point_spread_function_single_field(
 
     import pandas as pd
 
-    from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
-        ifft_norm_img_xds,
+    from astroviper.processing_functions.imaging.config_check._gridding import (
+        check_gridder_kernel,
+    )
+    from astroviper.processing_functions.imaging.gridders.gridder_registry import (
+        GRIDDERS,
     )
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-        is_direct_fourier_transform,
         make_gridding_kernel,
     )
     from astroviper.processing_functions.imaging.utils import drop_auto_correlations
@@ -561,23 +495,25 @@ def make_point_spread_function_single_field(
     if image_data_variables_keep is None:
         image_data_variables_keep = []
 
-    if is_direct_fourier_transform(gridding_kernel_params):
-        from astroviper.processing_functions.imaging.direct_fourier_transform import (
-            make_dft_point_spread_function_single_field,
+    # No configuration check runs here.
+    check_gridder_kernel(gridder, gridding_kernel_params)
+    if "point_spread_function" in GRIDDERS[gridder].grid_uv_sampling_roles:
+        # The gridder accumulates into the point spread function itself.
+        data_group = img_xds.attrs["data_groups"].get(image_data_group_out_name, {})
+        image_name = data_group.get(
+            "point_spread_function",
+            GRIDDERS[gridder].grid_uv_sampling_roles["point_spread_function"],
         )
-
-        return make_dft_point_spread_function_single_field(
-            ps_xdt,
-            img_xds,
-            ms_data_group_in_name=ms_data_group_in_name,
-            image_data_group_in_name=image_data_group_in_name,
-            image_data_group_out_name=image_data_group_out_name,
-            processing_function_threads=processing_function_threads,
-            complex_dtype=complex_dtype,
-        )
+        if image_name in img_xds:
+            img_xds.xr_img.delete_data_variables(variables=[image_name])
 
     T_start_gcf = time.time()
-    cgk_1D = make_gridding_kernel(gridding_kernel_params, image_params["fft_padding"])
+    if "anti_alias" in GRIDDERS[gridder].gcf_terms:
+        fft_padding = image_params["fft_padding"]
+        gcf_xds = make_gridding_kernel(gridding_kernel_params, fft_padding)
+    else:
+        fft_padding = None
+        gcf_xds = None
     T_gcf = time.time() - T_start_gcf
 
     T_vis_mask = 0.0
@@ -590,25 +526,25 @@ def make_point_spread_function_single_field(
         T_start_uv = time.time()
         add_uv_sampling_grid_single_field(
             ms_xdt,
-            cgk_1D,
+            gcf_xds,
             img_xds,
             ms_data_group_in_name=ms_data_group_in_name,
             image_data_group_in_name=image_data_group_in_name,
             image_data_group_out_name=image_data_group_out_name,
-            image_data_group_out_modified={
-                "uv_sampling": "UV_SAMPLING",
-                "uv_sampling_normalization": "UV_SAMPLING_NORMALIZATION",
-            },
+            image_data_group_out_modified=dict(
+                GRIDDERS[gridder].grid_uv_sampling_roles
+            ),
             overwrite=True,
             chan_mode="cube",
-            fft_padding=image_params["fft_padding"],
+            fft_padding=fft_padding,
             processing_function_threads=processing_function_threads,
             complex_dtype=complex_dtype,
+            gridder=gridder,
         )  # Will become the PSF.
         T_uv_sampling_grid += time.time() - T_start_uv
 
     T_start_fft_norm = time.time()
-    img_xds = ifft_norm_img_xds(
+    img_xds = GRIDDERS[gridder].uv_to_image(
         img_xds,
         image_params=image_params,
         image_data_group_in_name=image_data_group_in_name,
@@ -616,11 +552,12 @@ def make_point_spread_function_single_field(
         image_data_group_out_modified={
             "point_spread_function": "POINT_SPREAD_FUNCTION",
         },
+        overwrite=True,
         image_data_variables_keep=image_data_variables_keep,
         processing_function_threads=processing_function_threads,
         fft_backend=fft_backend,
         complex_dtype=complex_dtype,
-        gridding_kernel=cgk_1D,
+        gcf_xds=gcf_xds,
     )
     T_fft_norm = time.time() - T_start_fft_norm
 
@@ -647,6 +584,7 @@ def make_subtraction_point_spread_function_single_field(
     processing_function_threads=1,
     fft_backend="pyfftw",
     complex_dtype=None,
+    gridder="anti_alias",
 ):
     """Build the PSF of twice the image size that exact PSF subtraction uses.
 
@@ -662,7 +600,7 @@ def make_subtraction_point_spread_function_single_field(
     of the kernel table, on uv cells that differ by a factor of two, and the
     aliasing at the edge of the padded grid, which lies at the edge of the image
     for the image-sized PSF and twice as far out for this one. With the direct
-    Fourier transform (``gridding_kernel_params={"type": "dft"}``) those
+    Fourier transform (``gridder="direct_fourier_transform"``) those
     pixels are the image-sized PSF to rounding.
 
     Imaging weights equal in every correlation (``NaN`` at the same samples),
@@ -738,20 +676,8 @@ def make_subtraction_point_spread_function_single_field(
         the image kept (a support too large for the ``fft_padding``, e.g. 17
         at 1.05) is refused. The kernel of the
         former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
-        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
-        the gridding and the FFTs by the exact direct Fourier transform over the
-        unpadded image, w term included: with the phase
-        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
-        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
-        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
-        the measurement equation of ``simulate_processing_set``. Its cost is
-        proportional to the samples times the image pixels (30 to 40 s per
-        residual update of 451,500 samples, four correlations and 160 x 160
-        pixels on one core), so give it several
-        ``processing_function_threads``; its results do not depend on their
-        number. Its ``VISIBILITY_NORMALIZATION`` and
-        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
-        gridders' that sum times the kernel's stencil sums.
+        not ``"prolate_spheroidal"``. The gridder ``"direct_fourier_transform"``
+        uses no kernel: ``gridding_kernel_params`` must then be ``None``.
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
         kernels.
@@ -761,6 +687,26 @@ def make_subtraction_point_spread_function_single_field(
     complex_dtype : numpy.dtype, optional
         Complex precision of the gridded data: ``complex64`` gives a float32
         PSF, ``complex128`` (the default) a float64 one.
+    gridder : str, optional
+        Registry name of the gridder (a key of
+        :data:`~astroviper.processing_functions.imaging.gridders.gridder_registry.GRIDDERS`):
+        ``"anti_alias"`` (the default), convolutional gridding with the
+        anti-aliasing kernel of ``gridding_kernel_params`` (by default the
+        ``least_misfit`` kernel of support 9, oversampling 300 and linear
+        lookup), or ``"direct_fourier_transform"``, which replaces the gridding
+        and the FFTs by the exact direct Fourier transform over the unpadded
+        image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. It uses no
+        kernel and no ``fft_padding``. Its cost is proportional to the samples
+        times the image pixels (30 to 40 s per residual update of 451,500
+        samples, four correlations and 160 x 160 pixels on one core), so give
+        it several ``processing_function_threads``; its results do not depend
+        on their number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        anti-alias gridder's that sum times the kernel's stencil sums.
 
     Returns
     -------
@@ -811,6 +757,7 @@ def make_subtraction_point_spread_function_single_field(
         processing_function_threads=processing_function_threads,
         fft_backend=fft_backend,
         complex_dtype=complex_dtype,
+        gridder=gridder,
     )
     point_spread_function = psf_xds["POINT_SPREAD_FUNCTION"].values
     if made_once:

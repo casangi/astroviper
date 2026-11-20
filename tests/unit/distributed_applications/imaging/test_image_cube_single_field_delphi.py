@@ -528,13 +528,13 @@ def test_delphi_end_to_end_with_stand_in_psf_pass(ps_store, tmp_path, psf_calls)
         assert name in img.data_vars
     controls = result["parameters"]["image_cube_single_field"]["cycle_control_params"]
     record = result["deconvolution"]
-    assert {(key.chan, key.pol) for key in record.data} == {
+    assert {(key.chan, key.pol) for key in record} == {
         (0, 0),
         (0, 1),
         (1, 0),
         (1, 1),
     }
-    for key, entry in record.data.items():
+    for key, entry in record.items():
         threshold = controls["threshold"][key.chan][key.pol]
         assert entry["stop_code"].imaging == IMAGING_THRESHOLD, key
         assert len(entry["iter_done"]) - 1 <= controls["max_cycles"], key

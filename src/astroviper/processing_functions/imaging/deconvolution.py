@@ -7,7 +7,7 @@ from astroviper.processing_functions.imaging.deconvolvers import aspclean, hogbo
 from astroviper.processing_functions.imaging.utils.imaging_dict import (
     COMPONENT_COUNT_FIELDS,
     ITERATION_HISTORY_FIELDS,
-    ImagingDict,
+    add_to_imaging_dict,
 )
 from astroviper.utils.data_group_tools import (
     create_data_groups_in_and_out,
@@ -339,8 +339,8 @@ def _per_plane_per_cycle_limits(deconvolve_params, nt, nf, npol, threshold_dtype
     with a per-plane iteration limit and a per-plane stopping threshold rather
     than single scalars. ``deconvolve_params["max_iter_per_cycle_updated"]``
     and ``deconvolve_params["threshold_per_cycle"]`` may each be either a
-    scalar or an ``(nt, nf, npol)`` array (supplied by the
-    :class:`CycleController`, indexed ``(time, frequency, polarization)``).
+    scalar or an ``(nt, nf, npol)`` array (supplied by
+    ``get_per_cycle_limits``, indexed ``(time, frequency, polarization)``).
     A scalar is broadcast to every plane. A call without them (outside the
     imaging cycle loop) is one model update with all of ``max_iter`` left:
     ``max_iter_per_cycle_updated`` is ``min(max_iter_per_cycle, max_iter)``
@@ -515,7 +515,7 @@ def create_imaging_dict(
     selected_calculations: dict,
 ):
     """
-    Build the per-plane :class:`ImagingDict` summarizing a CLEAN run.
+    Build the per-plane ``imaging_dict`` summarizing a CLEAN run.
 
     Parameters
     ----------
@@ -552,7 +552,7 @@ def create_imaging_dict(
         ``max_iter_per_cycle_updated``, 2 reached ``threshold_per_cycle``, 4
         diverged, 5 a test of the deconvolver itself). Every plane's
         ``stop_code`` placeholder carries it as the model update stop code,
-        which the :class:`CycleController` keeps when it stamps the imaging
+        which cycle control keeps when it stamps the imaging
         stop code, and its ``model_update_stop_code`` field records it, so
         that the merged record holds the code of every model update.
 
@@ -570,9 +570,9 @@ def create_imaging_dict(
 
     Returns
     -------
-    ImagingDict
-        Per-plane deconvolution statistics indexed by
-        ``(time, chan, pol)``.
+    dict
+        Per-plane deconvolution statistics keyed by
+        ``Key(time, pol, chan)``.
     """
     residual_data_group = img_xds.attrs["data_groups"][image_data_group_in_name]
     model_data_group = img_xds.attrs["data_groups"][image_data_group_out_name]
@@ -618,15 +618,15 @@ def create_imaging_dict(
             StopCode,
         )
 
-    # Record the threshold_per_cycle each plane was actually cleaned to: the
-    # controller supplies a per-plane array; standalone callers a scalar (or
+    # Record the threshold_per_cycle each plane was actually cleaned to: cycle
+    # control supplies a per-plane array; standalone callers a scalar (or
     # nothing, in which case the absolute ``threshold`` applies).
     threshold_per_cycle_used = deconvolve_params.get("threshold_per_cycle", None)
     if threshold_per_cycle_used is None:
         threshold_per_cycle_used = deconvolve_params.get("threshold", None)
     threshold_per_cycle_is_per_plane = np.ndim(threshold_per_cycle_used) > 0
 
-    imaging_dict = ImagingDict()
+    imaging_dict = {}
 
     for tt in range(ntime):
         for nn in range(nchan):
@@ -690,7 +690,7 @@ def create_imaging_dict(
                     model_flux_negative[tt, nn, pp]
                 )
 
-                imaging_dict.add(returnvals, time=tt, pol=pp, chan=nn)
+                add_to_imaging_dict(imaging_dict, returnvals, time=tt, pol=pp, chan=nn)
 
     return imaging_dict
 
@@ -757,9 +757,9 @@ def deconvolve(
 
     Returns
     -------
-    imaging_dict : ImagingDict
-        Per-plane deconvolution statistics, indexed by
-        ``(time, chan, pol)``. Each entry contains iteration count, peak
+    imaging_dict : dict
+        Per-plane deconvolution statistics, keyed by
+        ``Key(time, pol, chan)``. Each entry contains iteration count, peak
         residuals before and after, model fluxes, and PSF bookkeeping.
         Each entry also holds the statistics of the residual after the model
         update
@@ -1228,7 +1228,7 @@ def hogbom_clean(
     A diverged model update does not end the plane's imaging cycles: the next
     residual update recomputes the true residual and cleaning resumes from it,
     unless the plane's last ``max_cycles_divergence`` model updates all
-    diverged (cycle control, see :class:`CycleController`).
+    diverged (cycle control, see ``check_convergence``).
 
     **Iteration history.** With ``record_iteration_history`` every plane
     records, for iteration ``k`` of the model update,

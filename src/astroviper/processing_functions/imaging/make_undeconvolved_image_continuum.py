@@ -10,7 +10,7 @@ def make_undeconvolved_image_continuum_single_field(
     ps_xdt,
     img_xds,
     image_params,
-    cgk_1D,
+    gcf_xds,
     n_taylor_terms=None,
     reference_frequency=None,
     ms_data_group_in_name="corrected",
@@ -19,6 +19,7 @@ def make_undeconvolved_image_continuum_single_field(
     complex_dtype=None,
     *,
     input_checked: bool = False,
+    gridder: str = "anti_alias",
 ):
     """Grid residual visibilities into MT-MFS residual Taylor uv grids.
 
@@ -34,6 +35,11 @@ def make_undeconvolved_image_continuum_single_field(
     and
 
     ``VISIBILITY_NORMALIZATION(time, taylor_term, polarization)``.
+
+    A gridder that accumulates into the image itself
+    (``"direct_fourier_transform"``) makes ``SKY_RESIDUAL(time, taylor_term,
+    polarization, l, m)`` in place of ``VISIBILITY``, after deleting an
+    existing residual image.
 
     Parameters
     ----------
@@ -67,10 +73,12 @@ def make_undeconvolved_image_continuum_single_field(
         ``primary_beam_ipower`` is the exponent applied to the voltage pattern
         (default 2, the power beam). These primary-beam keys override the inferred
         beam prescription.
-    cgk_1D : GriddingKernel or numpy.ndarray
-        The gridding kernel
-        (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`),
-        or a bare table of CASA's prolate spheroidal kernel of support 7.
+    gcf_xds : xarray.Dataset
+        The ``gcf_xds`` of the gridding kernel, from
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.make_gridding_kernel`,
+        or from
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.as_gridding_kernel`
+        for a bare table of CASA's prolate spheroidal kernel of support 7.
     n_taylor_terms : int or None, optional
         Number of residual Taylor orders; defaults to ``image_params``.
     reference_frequency : float or None, optional
@@ -90,6 +98,11 @@ def make_undeconvolved_image_continuum_single_field(
         Runtime checks on newly created data always remain active. For graph nodes
         using an input_params dictionary, its input_checked entry also carries this
         flag. Set it only for an unchanged configuration in the same imaging mode.
+    gridder : str, optional
+        Registry name of the gridder (a key of
+        :data:`~astroviper.processing_functions.imaging.gridders.gridder_registry.GRIDDERS`):
+        ``"anti_alias"`` (the default) or ``"direct_fourier_transform"``,
+        which uses neither ``gcf_xds`` nor ``image_params["fft_padding"]``.
 
     Returns
     -------
@@ -113,6 +126,9 @@ def make_undeconvolved_image_continuum_single_field(
     from astroviper.processing_functions.imaging.add_visibility_grid_continuum import (
         add_visibility_grid_continuum_single_field,
     )
+    from astroviper.processing_functions.imaging.gridders.gridder_registry import (
+        GRIDDERS,
+    )
     from astroviper.processing_functions.imaging.utils import drop_auto_correlations
 
     if complex_dtype is None:
@@ -127,6 +143,13 @@ def make_undeconvolved_image_continuum_single_field(
     else:
         reference_frequency = float(reference_frequency)
 
+    if "sky" in GRIDDERS[gridder].grid_roles:
+        # The gridder accumulates into the residual Taylor images themselves.
+        data_group = img_xds.attrs["data_groups"].get(image_data_group_out_name, {})
+        image_name = data_group.get("sky", GRIDDERS[gridder].grid_roles["sky"])
+        if image_name in img_xds:
+            img_xds.xr_img.delete_data_variables(variables=[image_name])
+
     T_vis_mask = 0.0
     T_uv_sampling_grid = 0.0
     T_vis_grid = 0.0
@@ -139,22 +162,24 @@ def make_undeconvolved_image_continuum_single_field(
         start = time.time()
         add_visibility_grid_continuum_single_field(
             ms_xdt,
-            cgk_1D,
+            gcf_xds,
             img_xds,
             n_taylor_terms=n_taylor_terms,
             reference_frequency=reference_frequency,
             ms_data_group_in_name=ms_data_group_in_name,
             image_data_group_in_name=image_data_group_out_name,
             image_data_group_out_name=image_data_group_out_name,
-            image_data_group_out_modified={
-                "visibility": "VISIBILITY",
-                "visibility_normalization": "VISIBILITY_NORMALIZATION",
-            },
+            image_data_group_out_modified=dict(GRIDDERS[gridder].grid_roles),
             overwrite=True,
-            fft_padding=image_params["fft_padding"],
+            fft_padding=(
+                image_params["fft_padding"]
+                if "anti_alias" in GRIDDERS[gridder].gcf_terms
+                else None
+            ),
             processing_function_threads=processing_function_threads,
             complex_dtype=complex_dtype,
             input_checked=True,
+            gridder=gridder,
         )
         T_vis_grid += time.time() - start
 

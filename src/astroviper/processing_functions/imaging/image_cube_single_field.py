@@ -19,12 +19,13 @@ def imaging_preparation_single_field(
     task_id=0,
     *,
     input_checked: bool = False,
+    gridder="anti_alias",
 ):
     """Run the once-per-chunk imaging setup before the imaging cycle loop.
 
     Everything that is done a single time per chunk happens here:
 
-    * construction of the :class:`CycleController` and the (empty) combined
+    * construction of the cycle control state and the (empty) combined
       return dict, and
     * the imaging weights, the point spread function and the primary beam (via
       :func:`~astroviper.processing_functions.imaging.residual_update.imaging_setup_single_field`).
@@ -358,20 +359,8 @@ def imaging_preparation_single_field(
         the image kept (a support too large for the ``fft_padding``, e.g. 17
         at 1.05) is refused. The kernel of the
         former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
-        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
-        the gridding and the FFTs by the exact direct Fourier transform over the
-        unpadded image, w term included: with the phase
-        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
-        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
-        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
-        the measurement equation of ``simulate_processing_set``. Its cost is
-        proportional to the samples times the image pixels (30 to 40 s per
-        residual update of 451,500 samples, four correlations and 160 x 160
-        pixels on one core), so give it several
-        ``processing_function_threads``; its results do not depend on their
-        number. Its ``VISIBILITY_NORMALIZATION`` and
-        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
-        gridders' that sum times the kernel's stencil sums.
+        not ``"prolate_spheroidal"``. The gridder ``"direct_fourier_transform"``
+        uses no kernel: ``gridding_kernel_params`` must then be ``None``.
     primary_beam_params : dict, optional
         The primary beam of the imager, the power pattern that gives the clean
         mask and the primary beam correction: ``telescope`` (``"alma"``,
@@ -408,16 +397,36 @@ def imaging_preparation_single_field(
         Runtime checks on newly created data always remain active. For graph nodes
         using an input_params dictionary, its input_checked entry also carries this
         flag. Set it only for an unchanged configuration in the same imaging mode.
+    gridder : str, optional
+        Registry name of the gridder (a key of
+        :data:`~astroviper.processing_functions.imaging.gridders.gridder_registry.GRIDDERS`):
+        ``"anti_alias"`` (the default), convolutional gridding with the
+        anti-aliasing kernel of ``gridding_kernel_params`` (by default the
+        ``least_misfit`` kernel of support 9, oversampling 300 and linear
+        lookup), or ``"direct_fourier_transform"``, which replaces the gridding
+        and the FFTs by the exact direct Fourier transform over the unpadded
+        image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. It uses no
+        kernel and no ``fft_padding``. Its cost is proportional to the samples
+        times the image pixels (30 to 40 s per residual update of 451,500
+        samples, four correlations and 160 x 160 pixels on one core), so give
+        it several ``processing_function_threads``; its results do not depend
+        on their number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        anti-alias gridder's that sum times the kernel's stencil sums.
 
     Returns
     -------
-    controller : CycleController
-        Freshly constructed controller (``stopcode.imaging == 0``).
+    cycle_control_state : dict
+        Freshly made cycle control state (``stopcode`` with ``imaging == 0``).
     img_xds : xarray.Dataset
         Image dataset with the PSF and primary beam, in the Stokes basis.
     return_df : pandas.DataFrame
         One-row timing frame from the setup step.
-    combined_imaging_dict : ImagingDict
+    combined_imaging_dict : dict
         Empty accumulator for the per-plane convergence statistics.
     T_setup : float
         Wall-clock time of the setup step (seconds).
@@ -438,39 +447,13 @@ def imaging_preparation_single_field(
         imaging_setup_single_field,
     )
     from astroviper.processing_functions.imaging.utils import (
-        CycleController,
-        ImagingDict,
-        validate_entropy_params,
-    )
-    from astroviper.processing_functions.imaging.utils.cycle_control_heuristics import (
-        THRESHOLD_TOLERANCE,
+        make_cycle_control_state_from_params,
     )
 
     logger.debug("Processing chunk " + str(task_id))
 
-    # The entropy stop is optional: its keys take their defaults when absent.
-    entropy_stop, entropy_max_snr, entropy_spatial_bins, entropy_flux_bins = (
-        validate_entropy_params(cycle_control_params)
-    )
-    controller = CycleController(
-        max_iter=cycle_control_params["max_iter"],
-        max_cycles=cycle_control_params["max_cycles"],
-        threshold=cycle_control_params["threshold"],
-        gain=cycle_control_params["gain"],
-        psf_sidelobe_factor=cycle_control_params["psf_sidelobe_factor"],
-        min_psf_fraction=cycle_control_params["min_psf_fraction"],
-        max_psf_fraction=cycle_control_params["max_psf_fraction"],
-        max_iter_per_cycle=cycle_control_params["max_iter_per_cycle"],
-        entropy_stop=entropy_stop,
-        entropy_max_snr=entropy_max_snr,
-        entropy_spatial_bins=entropy_spatial_bins,
-        entropy_flux_bins=entropy_flux_bins,
-        max_cycles_divergence=cycle_control_params.get("max_cycles_divergence", -1),
-        threshold_tolerance=cycle_control_params.get(
-            "threshold_tolerance", THRESHOLD_TOLERANCE
-        ),
-    )
-    combined_imaging_dict = ImagingDict()
+    cycle_control_state = make_cycle_control_state_from_params(cycle_control_params)
+    combined_imaging_dict = {}
 
     # Once-only imaging setup: imaging weights, PSF and primary beam. The dirty
     # image and the model update are NOT done here.
@@ -489,10 +472,11 @@ def imaging_preparation_single_field(
         gridding_kernel_params=gridding_kernel_params,
         primary_beam_params=primary_beam_params,
         input_checked=True,
+        gridder=gridder,
     )
     T_setup = time.time() - start
 
-    return controller, img_xds, return_df, combined_imaging_dict, T_setup
+    return cycle_control_state, img_xds, return_df, combined_imaging_dict, T_setup
 
 
 @shares_param_docs
@@ -520,12 +504,13 @@ def image_cube_single_field(
     task_id=0,
     *,
     input_checked: bool = False,
+    gridder="anti_alias",
 ):
     """Run the imaging cycle CLEAN loop for one single-field image chunk.
 
     Performs the once-per-chunk setup (imaging weights, PSF, primary beam), then
-    iterates imaging cycles (a residual update followed by a model update) under the
-    :class:`CycleController` until convergence. The stop test is made after
+    iterates imaging cycles (a residual update followed by a model update) under
+    cycle control until convergence. The stop test is made after
     every residual update, the first included, on the residual that update has
     just made; the loop ends only there, so ``N`` model updates take ``N + 1``
     residual updates and the residual written is that of the last one.  Every
@@ -918,20 +903,8 @@ def image_cube_single_field(
         the image kept (a support too large for the ``fft_padding``, e.g. 17
         at 1.05) is refused. The kernel of the
         former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
-        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
-        the gridding and the FFTs by the exact direct Fourier transform over the
-        unpadded image, w term included: with the phase
-        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
-        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
-        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
-        the measurement equation of ``simulate_processing_set``. Its cost is
-        proportional to the samples times the image pixels (30 to 40 s per
-        residual update of 451,500 samples, four correlations and 160 x 160
-        pixels on one core), so give it several
-        ``processing_function_threads``; its results do not depend on their
-        number. Its ``VISIBILITY_NORMALIZATION`` and
-        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
-        gridders' that sum times the kernel's stencil sums.
+        not ``"prolate_spheroidal"``. The gridder ``"direct_fourier_transform"``
+        uses no kernel: ``gridding_kernel_params`` must then be ``None``.
     primary_beam_params : dict, optional
         The primary beam of the imager, the power pattern that gives the clean
         mask and the primary beam correction: ``telescope`` (``"alma"``,
@@ -1034,6 +1007,26 @@ def image_cube_single_field(
         Runtime checks on newly created data always remain active. For graph nodes
         using an input_params dictionary, its input_checked entry also carries this
         flag. Set it only for an unchanged configuration in the same imaging mode.
+    gridder : str, optional
+        Registry name of the gridder (a key of
+        :data:`~astroviper.processing_functions.imaging.gridders.gridder_registry.GRIDDERS`):
+        ``"anti_alias"`` (the default), convolutional gridding with the
+        anti-aliasing kernel of ``gridding_kernel_params`` (by default the
+        ``least_misfit`` kernel of support 9, oversampling 300 and linear
+        lookup), or ``"direct_fourier_transform"``, which replaces the gridding
+        and the FFTs by the exact direct Fourier transform over the unpadded
+        image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. It uses no
+        kernel and no ``fft_padding``. Its cost is proportional to the samples
+        times the image pixels (30 to 40 s per residual update of 451,500
+        samples, four correlations and 160 x 160 pixels on one core), so give
+        it several ``processing_function_threads``; its results do not depend
+        on their number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        anti-alias gridder's that sum times the kernel's stencil sums.
 
     Returns
     -------
@@ -1047,7 +1040,7 @@ def image_cube_single_field(
         With ``exact_psf_subtraction`` (and ``max_iter > 0``) it also holds
         ``T_prep_subtraction_psf``, the time of the PSF of twice the image
         size, which ``T_prep`` includes.
-    combined_imaging_dict : ImagingDict
+    combined_imaging_dict : dict
         Per-plane convergence statistics for this chunk: one entry per model
         update and a closing entry from the stop test that ended the loop
         (``iter_done`` 0, ``peakres`` the peak of the written residual inside
@@ -1098,11 +1091,15 @@ def image_cube_single_field(
     from astroviper.processing_functions.imaging.utils import (
         accumulate_timing,
         build_residual_imaging_dict,
+        check_convergence,
         copy_residual_statistics,
+        ensure_planes,
         get_per_cycle_limits,
         merge_imaging_dicts,
         record_cycle_time,
+        record_model_update,
         resolve_auto_max_cycles,
+        update_counts,
     )
     from astroviper.utils.clean_mask import install_clean_mask
 
@@ -1113,12 +1110,12 @@ def image_cube_single_field(
     # turns to Stokes on img_xds.
     correlation_coords = img_xds.polarization.values.copy()
 
-    # All once-only work -- controller setup, imaging weights, PSF and primary
+    # All once-only work -- cycle control setup, imaging weights, PSF and primary
     # beam creation -- happens in the preparation step before the imaging cycle
     # loop. The dirty image and the first model update are the first iteration
     # of the loop below.
     (
-        controller,
+        cycle_control_state,
         img_xds,
         setup_return_df,
         combined_imaging_dict,
@@ -1139,6 +1136,7 @@ def image_cube_single_field(
         primary_beam_params=primary_beam_params,
         task_id=task_id,
         input_checked=True,
+        gridder=gridder,
     )
 
     # Per-chunk timing accumulator, grouped by pipeline phase. The preparation
@@ -1165,6 +1163,7 @@ def image_cube_single_field(
             processing_function_threads=processing_function_threads,
             fft_backend=fft_backend,
             complex_dtype=np.complex64 if single_precision_image else np.complex128,
+            gridder=gridder,
         )
         timing["T_prep_subtraction_psf"] = time.time() - start
         timing["T_prep"] += timing["T_prep_subtraction_psf"]
@@ -1199,6 +1198,7 @@ def image_cube_single_field(
             image_data_variables_keep=image_data_variables_keep,
             gridding_kernel_params=gridding_kernel_params,
             input_checked=True,
+            gridder=gridder,
         )
         t_residual_update = time.time() - start
         timing["T_residual_update"] += t_residual_update
@@ -1259,31 +1259,34 @@ def image_cube_single_field(
         # the sensitivity of the imaging weights (a no-op afterwards, and for
         # a number).
         resolve_auto_max_cycles(
-            controller,
+            cycle_control_state,
             residual_imaging_dict,
             ps_xdt,
             img_xds,
             cycle_control_params,
             processing_set_data_group_name=processing_set_data_group_name,
         )
-        stopcode, stopdesc = controller.check_convergence(residual_imaging_dict)
+        stopcode, stopdesc = check_convergence(
+            cycle_control_state, residual_imaging_dict
+        )
         timing["T_stop_test"] += time.time() - start
 
         # ---- Model-update phase (cycle control + deconvolve + convergence) ----
         model_phase_start = time.time()
         if stopcode.imaging == 0:
             logger.debug("Doing model update")
-            # Size the controller's per-plane state to this cube so cycle
+            # Size the per-plane state to this cube so cycle
             # control (max_iter and threshold) is tracked independently for every
             # (time, frequency, polarization) plane before the deconvolver runs.
             start = time.time()
-            controller.ensure_planes(
+            ensure_planes(
+                cycle_control_state,
                 img_xds.sizes["time"],
                 img_xds.sizes["frequency"],
                 img_xds.sizes["polarization"],
             )
             max_iter_per_cycle_updated, threshold_per_cycle = get_per_cycle_limits(
-                controller, residual_imaging_dict
+                cycle_control_state, residual_imaging_dict
             )
             timing["T_cycle_control"] += time.time() - start
 
@@ -1330,8 +1333,8 @@ def image_cube_single_field(
             # and the no progress and divergence runs are booked for the stop
             # test after the next residual update.
             start = time.time()
-            controller.update_counts(imaging_dict)
-            controller.record_model_update(imaging_dict)
+            update_counts(cycle_control_state, imaging_dict)
+            record_model_update(cycle_control_state, imaging_dict)
         else:
             # The record ends with the stop test that ended the loop.
             start = time.time()

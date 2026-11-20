@@ -484,7 +484,7 @@ def test_mtmfs_ignores_masked_structure_below_the_primary_beam_limit(
     model = np.abs(image.SKY_MODEL.isel(time=0, taylor_term=0, polarization=0))
 
     assert result["n_cycles"] < 15
-    assert result["controller"].total_iter_done > 0
+    assert result["cycle_control_state"]["total_iter_done"] > 0
     assert float(model.max()) > 0.0
     if continuum_mode == "mfs":
         assert float(residual.where(low_beam).max()) > threshold

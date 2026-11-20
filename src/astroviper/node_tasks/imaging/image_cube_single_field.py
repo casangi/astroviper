@@ -69,14 +69,14 @@ def _global_channel_offset(data_selection):
 def _remap_imaging_dict_to_global_channels(
     combined_imaging_dict, task_coords, data_selection
 ):
-    """Shift a chunk-local deconvolve ImagingDict onto image channel numbers.
+    """Shift a chunk-local deconvolve imaging_dict onto image channel numbers.
 
     The per-chunk ``image_cube_single_field`` labels channels ``0..N-1`` within
     the chunk; the offset is the image channel of the task's first channel
     (:func:`_image_channel_start`), so the planes of different spectral windows
     do not collide.
 
-    Returns a new ImagingDict whose ``Key.chan`` values are image channel
+    Returns a new imaging_dict whose ``Key.chan`` values are image channel
     numbers. A no-op returning the input unchanged when the offset is 0.
     """
 
@@ -96,18 +96,15 @@ def _shift_imaging_dict_channels(imaging_dict, chan_offset):
     for a zero offset.
     """
     from astroviper.processing_functions.imaging.utils.imaging_dict import (
-        ImagingDict,
         Key,
     )
 
     if chan_offset == 0:
         return imaging_dict
 
-    shifted = ImagingDict()
-    for key, value in imaging_dict.data.items():
-        shifted.data[Key(time=key.time, pol=key.pol, chan=key.chan + chan_offset)] = (
-            value
-        )
+    shifted = {}
+    for key, value in imaging_dict.items():
+        shifted[Key(time=key.time, pol=key.pol, chan=key.chan + chan_offset)] = value
     return shifted
 
 
@@ -540,6 +537,7 @@ def image_cube_single_field(
     *,
     image_frequency_attrs,
     input_checked: bool = False,
+    gridder="anti_alias",
 ):
     """Image one frequency chunk of a single-field cube and write it to disk.
 
@@ -959,20 +957,8 @@ def image_cube_single_field(
         the image kept (a support too large for the ``fft_padding``, e.g. 17
         at 1.05) is refused. The kernel of the
         former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
-        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
-        the gridding and the FFTs by the exact direct Fourier transform over the
-        unpadded image, w term included: with the phase
-        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
-        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
-        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
-        the measurement equation of ``simulate_processing_set``. Its cost is
-        proportional to the samples times the image pixels (30 to 40 s per
-        residual update of 451,500 samples, four correlations and 160 x 160
-        pixels on one core), so give it several
-        ``processing_function_threads``; its results do not depend on their
-        number. Its ``VISIBILITY_NORMALIZATION`` and
-        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
-        gridders' that sum times the kernel's stencil sums.
+        not ``"prolate_spheroidal"``. The gridder ``"direct_fourier_transform"``
+        uses no kernel: ``gridding_kernel_params`` must then be ``None``.
     primary_beam_params : dict, optional
         The primary beam of the imager, the power pattern that gives the clean
         mask and the primary beam correction: ``telescope`` (``"alma"``,
@@ -1159,6 +1145,26 @@ def image_cube_single_field(
         Runtime checks on newly created data always remain active. For graph nodes
         using an input_params dictionary, its input_checked entry also carries this
         flag. Set it only for an unchanged configuration in the same imaging mode.
+    gridder : str, optional
+        Registry name of the gridder (a key of
+        :data:`~astroviper.processing_functions.imaging.gridders.gridder_registry.GRIDDERS`):
+        ``"anti_alias"`` (the default), convolutional gridding with the
+        anti-aliasing kernel of ``gridding_kernel_params`` (by default the
+        ``least_misfit`` kernel of support 9, oversampling 300 and linear
+        lookup), or ``"direct_fourier_transform"``, which replaces the gridding
+        and the FFTs by the exact direct Fourier transform over the unpadded
+        image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. It uses no
+        kernel and no ``fft_padding``. Its cost is proportional to the samples
+        times the image pixels (30 to 40 s per residual update of 451,500
+        samples, four correlations and 160 x 160 pixels on one core), so give
+        it several ``processing_function_threads``; its results do not depend
+        on their number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        anti-alias gridder's that sum times the kernel's stencil sums.
 
     Returns
     -------
@@ -1180,7 +1186,8 @@ def image_cube_single_field(
           round failed are logged and counted in
           ``n_failed_first_round_chunks``.
         * ``"deconvolution"`` : the per-plane deconvolution
-          :class:`~astroviper.processing_functions.imaging.utils.imaging_dict.ImagingDict`,
+          ``imaging_dict``
+          (:mod:`~astroviper.processing_functions.imaging.utils.imaging_dict`),
           with channels remapped to global channel numbers.
         * ``"image_statistics"`` : ``{image_variable_key: xarray.Dataset}`` of
           NaN-ignoring per-plane statistics of the image-domain variables
@@ -1295,10 +1302,6 @@ def image_cube_single_field(
         # otherwise tear down every node after this task exhausts its retries).
         import pandas as pd
 
-        from astroviper.processing_functions.imaging.utils.imaging_dict import (
-            ImagingDict,
-        )
-
         row = _log_task_io_failure(
             "load", exc, task_id, image_store, data_selection, task_coords
         )
@@ -1312,7 +1315,7 @@ def image_cube_single_field(
         )
         return {
             "timing_node_tasks": pd.DataFrame({k: [v] for k, v in row.items()}),
-            "deconvolution": ImagingDict(),
+            "deconvolution": {},
             "image_statistics": {},
         }
     T_load = time.time() - start
@@ -1453,6 +1456,7 @@ def image_cube_single_field(
             auto_mask_params=auto_mask_params,
             task_id=task_id,
             input_checked=True,
+            gridder=gridder,
         )
 
         start = time.time()

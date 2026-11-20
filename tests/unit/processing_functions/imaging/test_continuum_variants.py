@@ -15,7 +15,6 @@ from astroviper.processing_functions.imaging.image_continuum_single_field import
     model_update_mtmfs_single_field,
     restore_continuum_image,
 )
-from astroviper.processing_functions.imaging.utils import ImagingDict
 from tests.utils.continuum_images import (
     make_continuum_image,
     make_runaway_taylor_image,
@@ -370,7 +369,7 @@ def test_native_mtmfs_receives_taylor_stacks_without_reshaping(monkeypatch, dtyp
     np.testing.assert_array_equal(
         accumulated.SKY_MODEL.isel(taylor_term=1), dtype(22.0)
     )
-    fields = next(iter(statistics.data.values()))
+    fields = next(iter(statistics.values()))
     assert fields["frequency"] == 1.5e9
     assert fields["iter_done"] == [3]
     assert fields["stop_code"].model_update == mtmfs.STOP_MAX_ITER
@@ -553,8 +552,8 @@ def test_native_mtmfs_adapter_covers_all_planes_terms_and_supports(
     )
     np.testing.assert_allclose(image.SKY_MODEL, expected_model, rtol=2e-4, atol=2e-5)
     assert image.SKY_MODEL.dtype == dtype
-    assert len(statistics.data) == 4
-    for key, fields in statistics.data.items():
+    assert len(statistics) == 4
+    for key, fields in statistics.items():
         assert fields["iter_done"] == [1]
         assert fields["masksum"] == [1]
         assert fields["stop_code"].model_update in {
@@ -600,8 +599,8 @@ def test_native_mtmfs_adds_its_components_to_the_model(n_taylor_terms, dtype):
         rtol=0,
         atol=8 * np.finfo(dtype).eps,
     )
-    for key, fields in statistics.data.items():
-        zero_fields = zero_statistics.data[key]
+    for key, fields in statistics.items():
+        zero_fields = zero_statistics[key]
         assert fields["iter_done"] == zero_fields["iter_done"] == [2]
         start = float(previous[key.time, 0, key.pol].sum())
         assert fields["start_model_flux"] == [start]
@@ -659,7 +658,7 @@ def test_native_mtmfs_cleans_the_support_the_stop_test_measures(
     assert len(masks) == 4
     for mask in masks:
         np.testing.assert_array_equal(mask, expected)
-    for fields in (*stop_test.data.values(), *model_update.data.values()):
+    for fields in (*stop_test.values(), *model_update.values()):
         assert fields["masksum"] == [expected.sum()]
 
 
@@ -681,7 +680,7 @@ def test_cube_deconvolvers_clean_the_support_the_stop_test_measures(
 
     def cube_backend(cube, *args, **kwargs):
         masks.append(cube[cube.attrs["data_groups"]["residual"]["mask"]].values)
-        return ImagingDict(), pd.DataFrame({"T_deconvolve": [0.0]})
+        return {}, pd.DataFrame({"T_deconvolve": [0.0]})
 
     monkeypatch.setattr(
         "astroviper.processing_functions.imaging.model_update."
@@ -694,7 +693,7 @@ def test_cube_deconvolvers_clean_the_support_the_stop_test_measures(
     (mask,) = masks
     assert mask.shape == (2, 1, 2, 25, 21)
     np.testing.assert_array_equal(mask, np.broadcast_to(expected, mask.shape))
-    for fields in stop_test.data.values():
+    for fields in stop_test.values():
         assert fields["masksum"] == [expected.sum()]
 
 
@@ -722,7 +721,7 @@ def test_native_mtmfs_divergence_test_stops_a_runaway(
         },
     )
 
-    (fields,) = statistics.data.values()
+    (fields,) = statistics.values()
     assert fields["iter_done"] == [iterations]
     assert fields["stop_code"].model_update == stop_code
     assert fields["peakres"][0] > fields["start_peakres"][0]
@@ -831,7 +830,7 @@ def test_single_term_mtmfs_must_be_resolved_by_public_api(monkeypatch):
             "l",
             "m",
         )
-        return ImagingDict(), pd.DataFrame({"T_deconvolve": [0.0]})
+        return {}, pd.DataFrame({"T_deconvolve": [0.0]})
 
     monkeypatch.setattr(
         "astroviper.processing_functions.imaging.model_update."
@@ -866,7 +865,7 @@ def test_hogbom_model_update_does_not_leak_temporary_mask_metadata(monkeypatch):
         calls.append(hogbom_image)
         hogbom_image["MASK"] = xr.ones_like(hogbom_image.SKY_RESIDUAL)
         hogbom_image.attrs["data_groups"]["residual"]["mask"] = "MASK"
-        return ImagingDict(), pd.DataFrame({"T_deconvolve": [0.0]})
+        return {}, pd.DataFrame({"T_deconvolve": [0.0]})
 
     monkeypatch.setattr(
         "astroviper.processing_functions.imaging.model_update."
@@ -919,7 +918,7 @@ def test_hogbom_model_update_rejects_mixed_image_precision(monkeypatch, dtype):
             )
         )
         hogbom_image.SKY_MODEL.data[...] = value
-        return ImagingDict(), pd.DataFrame({"T_deconvolve": [0.0]})
+        return {}, pd.DataFrame({"T_deconvolve": [0.0]})
 
     monkeypatch.setattr(
         "astroviper.processing_functions.imaging.model_update."
@@ -972,7 +971,7 @@ def test_hogbom_adapter_builds_one_contiguous_boolean_mask_plane(monkeypatch):
         assert not received[..., 0, 0].any()
         assert not received[..., 0, 1].any()
         assert received[..., 1:, :].all()
-        return ImagingDict(), pd.DataFrame({"T_deconvolve": [0.0]})
+        return {}, pd.DataFrame({"T_deconvolve": [0.0]})
 
     monkeypatch.setattr(
         "astroviper.processing_functions.imaging.model_update."
@@ -1007,7 +1006,7 @@ def test_hogbom_adapter_canonicalizes_generated_primary_beam_mask(monkeypatch):
         )
         assert received.dtype == np.bool_
         assert received.values.flags.c_contiguous
-        return ImagingDict(), pd.DataFrame({"T_deconvolve": [0.0]})
+        return {}, pd.DataFrame({"T_deconvolve": [0.0]})
 
     monkeypatch.setattr(
         "astroviper.processing_functions.imaging.model_update."
@@ -1085,7 +1084,7 @@ def test_asp_hands_taylor_term_zero_to_the_cube_asp_kernel(monkeypatch, asp_opti
     np.testing.assert_array_equal(image.SKY_MODEL.values, expected_model)
     description = image.attrs["data_groups"]["model"]["description"]
     assert description.endswith("Continuum model updated by Asp CLEAN.")
-    records = {(key.time, key.pol): fields for key, fields in statistics.data.items()}
+    records = {(key.time, key.pol): fields for key, fields in statistics.items()}
     assert sorted(records) == [(0, 0), (0, 1), (1, 0), (1, 1)]
     for (time, pol), fields in records.items():
         assert fields["iter_done"] == [limits[time, 0, pol]]
@@ -1120,7 +1119,7 @@ def test_asp_cleans_every_plane_of_taylor_term_zero(dtype, asp_options):
     assert image.SKY_MODEL.dims == image.SKY_RESIDUAL.dims
     assert image.SKY_MODEL.dtype == dtype
     model_flux = image.SKY_MODEL.values.sum(axis=(-2, -1))[:, 0]  # (time, pol)
-    records = {(key.time, key.pol): fields for key, fields in statistics.data.items()}
+    records = {(key.time, key.pol): fields for key, fields in statistics.items()}
     assert sorted(records) == [(0, 0), (0, 1), (1, 0), (1, 1)]
     for (time, pol), fields in records.items():
         assert fields["iter_done"] == [200]
@@ -1244,7 +1243,7 @@ def test_asp_divergence_test_stops_a_runaway(
         },
     )
 
-    (fields,) = statistics.data.values()
+    (fields,) = statistics.values()
     assert fields["iter_done"] == [iterations]
     assert fields["stop_code"].model_update == stop_code
     assert abs(fields["peakres"][0]) > abs(fields["start_peakres"][0])
@@ -1266,7 +1265,7 @@ def _clean_faint_source(image, residual_components, scale_significance):
             "asp_scale_significance": scale_significance,
         },
     )
-    (fields,) = statistics.data.values()
+    (fields,) = statistics.values()
     return image.SKY_MODEL.values[0, 0, 0], fields
 
 

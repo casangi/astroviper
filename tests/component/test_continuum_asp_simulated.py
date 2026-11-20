@@ -231,7 +231,7 @@ def test_continuum_asp_recovers_simulated_sources(
         simulated, tmp_path, continuum_mode, OPTIONS[options]
     )
     _, truth = simulated
-    controller = result["controller"]
+    controller = result["cycle_control_state"]
 
     # MVC without a clean mask leaves the significance test no noise to measure.
     assert len(warnings) == int(continuum_mode == "mvc" and options == "asp_options_on")
@@ -239,15 +239,16 @@ def test_continuum_asp_recovers_simulated_sources(
     assert image.sizes["taylor_term"] == 1
     assert image.sizes["frequency"] == 1
     assert list(image.polarization.values) == ["I", "V"]
-    assert controller.cycles_done >= 2
+    assert controller["cycles_done"] >= 2
     # Every model update is booked: the iterations of the per-plane records
     # add up to the controller's total, and every plane has a known stop code.
-    planes = result["deconvolution"].data.values()
-    assert sum(int(np.sum(fields["iter_done"])) for fields in planes) == (
-        controller.total_iter_done
+    planes = result["deconvolution"].values()
+    assert (
+        sum(int(np.sum(fields["iter_done"])) for fields in planes)
+        == controller["total_iter_done"]
     )
-    assert 0 < controller.total_iter_done <= 300 * image.sizes["polarization"]
-    assert set(np.unique(controller.stop_code_model_update)) <= set(
+    assert 0 < controller["total_iter_done"] <= 300 * image.sizes["polarization"]
+    assert set(np.unique(controller["stop_code_model_update"])) <= set(
         MODEL_UPDATE_STOP_DESCRIPTIONS
     )
 
@@ -314,13 +315,14 @@ def test_continuum_asp_with_an_explicit_clean_mask(
         clean_mask=str(mask_file),
     )
     _, truth = simulated
-    controller = result["controller"]
+    controller = result["cycle_control_state"]
 
     assert warnings == []
-    assert controller.cycles_done >= 2
-    planes = result["deconvolution"].data.values()
-    assert sum(int(np.sum(fields["iter_done"])) for fields in planes) == (
-        controller.total_iter_done
+    assert controller["cycles_done"] >= 2
+    planes = result["deconvolution"].values()
+    assert (
+        sum(int(np.sum(fields["iter_done"])) for fields in planes)
+        == controller["total_iter_done"]
     )
     model = image.SKY_MODEL.values[0, 0, 0]  # Stokes I, Taylor term 0
     residual = image.SKY_RESIDUAL.values[0, 0, 0]

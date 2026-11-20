@@ -2,14 +2,14 @@
 
 The image is predicted with the imager's own prediction functions:
 ``"dft"`` with
-:func:`~astroviper.processing_functions.imaging.direct_fourier_transform.predict_dft_visibilities_single_field`
-(the exact measurement equation of the simulator, the w term included when the
-``uvw`` hold it), ``"gridded"`` with the anti-aliasing kernel of
-``gridding_kernel_params``
+:func:`~astroviper.processing_functions.imaging.get_visibility_grid.get_visibility_grid_single_field`
+and the gridder ``"direct_fourier_transform"`` (the exact measurement equation
+of the simulator, the w term included when the ``uvw`` hold it), ``"gridded"``
+with the anti-aliasing kernel of ``gridding_kernel_params``
 (:func:`~astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder.fft_norm_img_xds`
 and
-:func:`~astroviper.processing_functions.imaging.get_visibility_grid.get_visibility_grid_single_field`),
-which is two dimensional: it has no w term.
+:func:`~astroviper.processing_functions.imaging.get_visibility_grid.get_visibility_grid_single_field`
+with the gridder ``"anti_alias"``), which is two dimensional: it has no w term.
 """
 
 from __future__ import annotations
@@ -166,18 +166,20 @@ def sky_image_visibilities(
     )
 
     if predict == "dft":
-        from astroviper.processing_functions.imaging.direct_fourier_transform import (
-            predict_dft_visibilities_single_field,
+        from astroviper.processing_functions.imaging.get_visibility_grid import (
+            get_visibility_grid_single_field,
         )
 
-        predict_dft_visibilities_single_field(
+        get_visibility_grid_single_field(
             ms_xds,
+            None,
             img_xds,
             ms_data_group_in_name="base",
             ms_data_group_out_name="model",
             image_data_group_in_name="model",
             chan_mode="cube",
             processing_function_threads=processing_function_threads,
+            gridder="direct_fourier_transform",
         )
     else:
         from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
@@ -206,7 +208,7 @@ def sky_image_visibilities(
             image_data_variables_keep=["sky"],
             processing_function_threads=processing_function_threads,
             complex_dtype=np.complex128,
-            gridding_kernel=kernel,
+            gcf_xds=kernel,
         )
         get_visibility_grid_single_field(
             ms_xds,
@@ -219,5 +221,6 @@ def sky_image_visibilities(
             chan_mode="cube",
             fft_padding=fft_padding,
             processing_function_threads=processing_function_threads,
+            gridder="anti_alias",
         )
     return np.asarray(ms_xds["VISIBILITY_MODEL"].values, dtype=np.complex128)

@@ -27,9 +27,9 @@ CHECKS = [
 
 @pytest.mark.parametrize("check", CHECKS)
 @pytest.mark.parametrize("kind", ["cube", "continuum"])
-def test_each_validator_reserves_both_multifield_modes(check, kind):
-    with pytest.raises(NotImplementedError, match=f"{kind} multifield"):
-        check({}, mode=ImagingMode(kind, "multifield"))
+def test_each_validator_reserves_both_mosaic_modes(check, kind):
+    with pytest.raises(NotImplementedError, match=f"{kind} mosaic"):
+        check({}, mode=ImagingMode(kind, "mosaic"))
 
 
 @pytest.mark.parametrize(

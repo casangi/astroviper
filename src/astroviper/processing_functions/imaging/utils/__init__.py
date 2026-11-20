@@ -1,15 +1,17 @@
 """Common (non-science) helpers for the imaging processing functions.
 
-Holds the cycle control logic, the :class:`ImagingDict` convergence
+Holds the cycle control logic, the ``imaging_dict`` convergence
 container, and small timing-bookkeeping helpers that are shared across the
 imaging processing functions but are not themselves imaging science kernels.
 """
 
 from astroviper.processing_functions.imaging.utils.cycle_control import (
-    CycleController,
     StopCode,
     build_residual_imaging_dict,
+    check_convergence,
+    check_refreshed_residual_divergence,
     copy_residual_statistics,
+    ensure_planes,
     format_imaging_dict,
     get_iterations_done_from_imaging_dict,
     get_masksum_from_imaging_dict,
@@ -17,11 +19,16 @@ from astroviper.processing_functions.imaging.utils.cycle_control import (
     get_model_flux_from_imaging_dict,
     get_peak_residual_from_imaging_dict,
     get_per_cycle_limits,
-    make_continuum_cycle_controller,
+    make_cycle_control_state,
+    make_cycle_control_state_from_params,
     merge_imaging_dicts,
+    plane_threshold,
     print_imaging_dict,
     record_cycle_time,
+    record_model_update,
     resolve_auto_max_cycles,
+    resolve_max_cycles,
+    update_counts,
     validate_entropy_params,
     validate_max_cycles,
     validate_threshold_tolerance,
@@ -34,11 +41,12 @@ from astroviper.processing_functions.imaging.utils.imaging_dict import (
     FIELD_ACCUM,
     FIELD_SINGLE_VALUE,
     ITERATION_HISTORY_FIELDS,
-    ImagingDict,
     Key,
+    add_to_imaging_dict,
     deconvolution_per_channel,
     imaging_dict_from_dataframe,
     imaging_dict_to_dataframe,
+    select_from_imaging_dict,
 )
 from astroviper.processing_functions.imaging.utils.timing import (
     CONTINUUM_IMAGING_TIMING_PHASES,
@@ -53,7 +61,8 @@ from astroviper.processing_functions.imaging.utils.visibility import (
 )
 
 __all__ = [
-    "ImagingDict",
+    "add_to_imaging_dict",
+    "select_from_imaging_dict",
     "imaging_dict_to_dataframe",
     "imaging_dict_from_dataframe",
     "deconvolution_per_channel",
@@ -61,7 +70,7 @@ __all__ = [
     "FIELD_ACCUM",
     "FIELD_SINGLE_VALUE",
     "ITERATION_HISTORY_FIELDS",
-    "CycleController",
+    "make_cycle_control_state",
     "StopCode",
     "merge_imaging_dicts",
     "build_residual_imaging_dict",
@@ -71,7 +80,14 @@ __all__ = [
     "validate_max_cycles",
     "validate_threshold_tolerance",
     "resolve_auto_max_cycles",
-    "make_continuum_cycle_controller",
+    "make_cycle_control_state_from_params",
+    "check_convergence",
+    "check_refreshed_residual_divergence",
+    "ensure_planes",
+    "plane_threshold",
+    "record_model_update",
+    "resolve_max_cycles",
+    "update_counts",
     "get_per_cycle_limits",
     "get_peak_residual_from_imaging_dict",
     "get_masksum_from_imaging_dict",

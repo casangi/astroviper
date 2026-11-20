@@ -18,6 +18,7 @@ from astroviper.processing_functions.imaging.degrid_visibility_grid import (
     degrid_visibility_grid_single_field,
 )
 from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+    as_gridding_kernel,
     make_gridding_kernel,
 )
 from astroviper.processing_functions.imaging.image_continuum_single_field import (
@@ -103,7 +104,9 @@ def test_psf_taylor_gridding_uses_output_views_and_reuses_order_zero_weights(
 
     add_uv_sampling_grid_continuum_single_field(
         measurement_set,
-        np.ones(400),  # support-7 half kernel table, oversampling 100
+        as_gridding_kernel(
+            np.ones(400)  # support-7 half kernel table, oversampling 100
+        ),
         image,
         n_psf_taylor_terms=3,
         reference_frequency=100.0,
@@ -329,7 +332,7 @@ def test_continuum_prediction_degrids_and_accumulates_each_taylor_plane(monkeypa
     make_visibility_model_continuum_single_field(
         {"partition": ms_xds},
         model_xds,
-        np.ones(351),
+        as_gridding_kernel(np.ones(400)),
         n_taylor_terms=2,
         reference_frequency=1.0e9,
         ms_data_group_in_name="corrected",
@@ -1138,7 +1141,7 @@ def test_mvc_grid_accumulates_child_into_full_image_frequency_axis(
     extension_module.anti_alias_grid = fake_grid
     monkeypatch.setitem(sys.modules, module_name, extension_module)
 
-    add_visibility_grid_mvc_single_field(ms_xds, np.ones(8), image)
+    add_visibility_grid_mvc_single_field(ms_xds, as_gridding_kernel(np.ones(8)), image)
 
     np.testing.assert_array_equal(observed_frequency_map, [1, 3])
     assert image.VISIBILITY.shape[1] == image_frequencies.size
@@ -1203,7 +1206,7 @@ def test_mfs_grid_accumulates_normalization_across_processing_children(monkeypat
     for child_weight in (2.0, 3.0):
         add_visibility_grid_continuum_single_field(
             make_child(child_weight),
-            np.ones(8),
+            as_gridding_kernel(np.ones(8)),
             image,
             n_taylor_terms=1,
             reference_frequency=1.0e9,
@@ -2241,9 +2244,7 @@ def test_prepare_mfs_model_transforms_and_fourier_converts_all_terms(
         image_data_group_out_name="model_uv",
         gridding_kernel_params=gridding_kernel_params,
     )
-    assert fft_options["gridding_kernel"] is make_gridding_kernel(
-        gridding_kernel_params, 1.2
-    )
+    assert fft_options["gcf_xds"] is make_gridding_kernel(gridding_kernel_params, 1.2)
     assert result.VISIBILITY_MODEL.sizes["taylor_term"] == 2
     assert result.VISIBILITY_MODEL.attrs["n_taylor_terms"] == 2
     assert fft_options["image_data_variables_keep"] == []
@@ -2327,9 +2328,7 @@ def test_prepare_mvc_model_evaluates_taylor_terms_and_channel_beams(
         image_data_group_out_name="model_uv",
         gridding_kernel_params=gridding_kernel_params,
     )
-    assert fft_options["gridding_kernel"] is make_gridding_kernel(
-        gridding_kernel_params, 1.2
-    )
+    assert fft_options["gcf_xds"] is make_gridding_kernel(gridding_kernel_params, 1.2)
     repeated = prepare_model_uv_mvc_single_field(
         model,
         channel_pb,
@@ -2409,7 +2408,7 @@ def test_residual_update_wraps_setup_cycle_and_local_mvc_ifft(
     )
 
     def fake_ifft(dataset, image_data_group_out_modified, **kwargs):
-        received["ifft"].append(kwargs["gridding_kernel"])
+        received["ifft"].append(kwargs["gcf_xds"])
         name = next(iter(image_data_group_out_modified.values()))
         dataset[name] = xr.DataArray([0.0], dims=("frequency",))
         return dataset
@@ -2441,7 +2440,9 @@ def test_residual_update_wraps_setup_cycle_and_local_mvc_ifft(
     assert timing.iloc[0].n_taylor_terms == 2
     assert received["setup"] == received["cycle"] == [kernel_params]
     kernel = make_gridding_kernel(kernel_params, 1.2)
-    assert received["ifft"] == ([kernel, kernel] if continuum_mode == "mvc" else [])
+    assert [gcf_xds is kernel for gcf_xds in received["ifft"]] == (
+        [True, True] if continuum_mode == "mvc" else []
+    )
     if continuum_mode == "mvc":
         assert "SKY_RESIDUAL_MVC_CUBE" in result
         assert "POINT_SPREAD_FUNCTION_MVC_CUBE" in result
@@ -2588,7 +2589,9 @@ def test_shared_degridder_registers_output_and_calls_cpp_kernel(monkeypatch):
     )
     degrid_visibility_grid_single_field(
         ms,
-        np.ones(400),  # support-7 half kernel table, oversampling 100
+        as_gridding_kernel(
+            np.ones(400)  # support-7 half kernel table, oversampling 100
+        ),
         geometry,
         np.ones((1, 2, 1, 2, 2), dtype=np.complex64),
         [0, 1],
@@ -2634,7 +2637,9 @@ def test_shared_degridder_allocates_model_from_weights_without_observed_data(
 
     degrid_visibility_grid_single_field(
         ms,
-        np.ones(400),  # support-7 half kernel table, oversampling 100
+        as_gridding_kernel(
+            np.ones(400)  # support-7 half kernel table, oversampling 100
+        ),
         geometry,
         np.ones((1, 2, 1, 2, 2), dtype=np.complex64),
         [0, 1],
@@ -2652,8 +2657,8 @@ def test_continuum_statistics_use_only_taylor_zero_and_preserve_input(with_mask)
         build_continuum_residual_imaging_dict,
     )
     from astroviper.processing_functions.imaging.utils import (
-        CycleController,
         get_per_cycle_limits,
+        make_cycle_control_state,
     )
 
     residual = np.full((2, 3, 2, 3, 4), 1000.0)
@@ -2676,13 +2681,13 @@ def test_continuum_statistics_use_only_taylor_zero_and_preserve_input(with_mask)
     original = image.copy(deep=True)
     params = {"gain": 0.1}
     stats = build_continuum_residual_imaging_dict(image, "residual", params)
-    assert len(stats.data) == 4
-    for key, values in stats.data.items():
+    assert len(stats) == 4
+    for key, values in stats.items():
         assert key.chan == 0
         assert values["peakres"] == [peaks[key.time, key.pol]]
         assert values["masksum"] == [8 if with_mask else 12]
         assert values["max_psf_sidelobe"] == 0.2
-    controller = CycleController(max_iter=10, max_iter_per_cycle=3)
+    controller = make_cycle_control_state(max_iter=10, max_iter_per_cycle=3)
     limits, thresholds = get_per_cycle_limits(controller, stats)
     assert limits.shape == (2, 1, 2)
     np.testing.assert_array_equal(limits, 3)
@@ -2715,7 +2720,7 @@ def test_continuum_statistics_record_taylor_zero_entropy():
     )
 
     disabled = build_continuum_residual_imaging_dict(image, "residual", {"gain": 0.1})
-    for fields in disabled.data.values():
+    for fields in disabled.values():
         assert len(fields["entropy"]) == len(fields["residual_snr"]) == 1
         # the residual statistics are those of Taylor term zero
         assert fields["rms_in_mask"][0] < 100
@@ -2731,8 +2736,8 @@ def test_continuum_statistics_record_taylor_zero_entropy():
             "entropy_flux_bins": 8,
         },
     )
-    quiet = enabled.data[Key(time=0, chan=0, pol=0)]
-    bright = enabled.data[Key(time=0, chan=0, pol=1)]
+    quiet = enabled[Key(time=0, chan=0, pol=0)]
+    bright = enabled[Key(time=0, chan=0, pol=1)]
     assert np.isfinite(quiet["entropy"][0])
     assert quiet["residual_snr"][0] < 6.0
     assert np.isnan(bright["entropy"][0])
@@ -2778,7 +2783,7 @@ def test_refreshed_statistics_respect_clean_support(explicit_mask):
     stats = build_continuum_residual_imaging_dict(
         image, "residual", {"primary_beam_limit": 0.2}
     )
-    fields = next(iter(stats.data.values()))
+    fields = next(iter(stats.values()))
     assert fields["peakres"] == [0.05]
     assert fields["peakres_nomask"] == [10.0]
     assert fields["masksum"] == [2]

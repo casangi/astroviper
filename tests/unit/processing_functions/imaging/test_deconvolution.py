@@ -37,11 +37,15 @@ from astroviper.processing_functions.imaging.utils.cycle_control import (
     IMAGING_CONTINUE,
     MODEL_UPDATE_DIVERGENCE,
     MODEL_UPDATE_MAX_ITER_PER_CYCLE,
-    CycleController,
     StopCode,
+    check_convergence,
+    make_cycle_control_state,
     merge_imaging_dicts,
+    update_counts,
 )
-from astroviper.processing_functions.imaging.utils.imaging_dict import ImagingDict
+from astroviper.processing_functions.imaging.utils.imaging_dict import (
+    select_from_imaging_dict,
+)
 
 try:
     from astroviper.processing_functions.imaging.deconvolvers import (  # noqa: F401
@@ -726,19 +730,19 @@ class TestDeconvolveReportsDivergence:
                 "max_iter_divergence": 5,
             },
         )
-        (entry,) = imaging_dict.data.values()
+        (entry,) = imaging_dict.values()
         assert entry["iter_done"] == [5]
         # placeholder set by the deconvolver ...
         assert entry["stop_code"] == StopCode(IMAGING_CONTINUE, MODEL_UPDATE_DIVERGENCE)
         # ... and kept by the controller, which lets the imaging cycles go on:
         # the next residual update recomputes the true residual.
-        controller = CycleController(max_iter=40, threshold=0.0, gain=0.5)
-        controller.update_counts(imaging_dict)
-        stopcode, _ = controller.check_convergence(imaging_dict, model_update_ran=True)
+        controller = make_cycle_control_state(max_iter=40, threshold=0.0, gain=0.5)
+        update_counts(controller, imaging_dict)
+        stopcode, _ = check_convergence(controller, imaging_dict, model_update_ran=True)
         assert stopcode.imaging == IMAGING_CONTINUE
         assert entry["stop_code"].model_update == MODEL_UPDATE_DIVERGENCE
-        assert controller.stop_code_model_update[0, 0, 0] == MODEL_UPDATE_DIVERGENCE
-        assert controller.max_iter_remaining[0, 0, 0] == 35
+        assert controller["stop_code_model_update"][0, 0, 0] == MODEL_UPDATE_DIVERGENCE
+        assert controller["max_iter_remaining"][0, 0, 0] == 35
 
     def test_healthy_model_update_reports_its_stop_code(self):
         xds = self._xds(sidelobe=0.0)
@@ -746,15 +750,15 @@ class TestDeconvolveReportsDivergence:
             img_xds=xds,
             deconvolve_params={"gain": 0.5, "max_iter": 10, "threshold": 0.0},
         )
-        (entry,) = imaging_dict.data.values()
+        (entry,) = imaging_dict.values()
         assert entry["iter_done"] == [10]
         assert entry["stop_code"] == StopCode(
             IMAGING_CONTINUE, MODEL_UPDATE_MAX_ITER_PER_CYCLE
         )
-        controller = CycleController(max_iter=40, threshold=0.0, gain=0.5)
-        controller.check_convergence(imaging_dict, model_update_ran=True)
+        controller = make_cycle_control_state(max_iter=40, threshold=0.0, gain=0.5)
+        check_convergence(controller, imaging_dict, model_update_ran=True)
         assert entry["stop_code"].model_update == MODEL_UPDATE_MAX_ITER_PER_CYCLE
-        assert controller.stop_code_model_update[0, 0, 0] == (
+        assert controller["stop_code_model_update"][0, 0, 0] == (
             MODEL_UPDATE_MAX_ITER_PER_CYCLE
         )
 
@@ -774,9 +778,9 @@ class TestDeconvolveReportsDivergence:
             img_xds=self._xds(sidelobe=0.0),
             deconvolve_params={"gain": 0.5, "max_iter": 10, "threshold": 0.0},
         )
-        (entry,) = first.data.values()
+        (entry,) = first.values()
         assert entry["model_update_stop_code"] == [MODEL_UPDATE_DIVERGENCE]
-        (entry,) = merge_imaging_dicts([first, second]).data.values()
+        (entry,) = merge_imaging_dicts([first, second]).values()
         assert entry["model_update_stop_code"] == [
             MODEL_UPDATE_DIVERGENCE,
             MODEL_UPDATE_MAX_ITER_PER_CYCLE,
@@ -797,9 +801,9 @@ class TestDeconvolve:
             },
         )
 
-        assert isinstance(imaging_dict, ImagingDict)
-        assert len(imaging_dict.data) == 1  # 1 time * 1 freq * 1 pol
-        entry = list(imaging_dict.data.values())[0]
+        assert isinstance(imaging_dict, dict)
+        assert len(imaging_dict) == 1  # 1 time * 1 freq * 1 pol
+        entry = list(imaging_dict.values())[0]
         for field in (
             "iter_done",
             "max_iter",
@@ -835,9 +839,9 @@ class TestDeconvolve:
                 "threshold": 0.05,
             },
         )
-        assert len(imaging_dict.data) == nt * nf * npol
+        assert len(imaging_dict) == nt * nf * npol
         for p in range(npol):
-            entry = imaging_dict.sel(pol=p)
+            entry = select_from_imaging_dict(imaging_dict, pol=p)
             assert isinstance(entry, dict)
             assert entry["stokes"] == ["I", "Q", "U", "V"][p]
 
@@ -852,8 +856,11 @@ class TestDeconvolve:
                 "threshold": 0.05,
             },
         )
-        assert len(imaging_dict.data) == nt * nf * npol
-        freqs = [float(imaging_dict.sel(chan=c)["frequency"]) for c in range(nf)]
+        assert len(imaging_dict) == nt * nf * npol
+        freqs = [
+            float(select_from_imaging_dict(imaging_dict, chan=c)["frequency"])
+            for c in range(nf)
+        ]
         assert len(set(freqs)) == nf
 
     def test_rejects_psf_pol_mismatch(self):
@@ -947,7 +954,7 @@ class TestDeconvolve:
                 "threshold": 0.001,
             },
         )
-        entry = list(imaging_dict.data.values())[0]
+        entry = list(imaging_dict.values())[0]
 
         # start_peakres must be >= peakres (peak should decrease).
         start = (
@@ -986,7 +993,7 @@ class TestDeconvolve:
         # Source should survive since the pixel is masked out.
         assert xds["RESIDUAL"].values[0, 0, 0, 16, 16] == pytest.approx(1.0, abs=1e-6)
         assert xds["SKY_MODEL"].values[0, 0, 0, 16, 16] == pytest.approx(0.0, abs=1e-6)
-        assert isinstance(imaging_dict, ImagingDict)
+        assert isinstance(imaging_dict, dict)
 
 
 # ---------------------------------------------------------------------------
@@ -1407,7 +1414,7 @@ class TestDeconvolveAsp:
                 "asp_psf_width": 1.0,
             },
         )
-        assert isinstance(imaging_dict, ImagingDict)
+        assert isinstance(imaging_dict, dict)
         assert "SKY_MODEL" in xds.data_vars
         # the point source is cleaned into the model
         assert xds["SKY_MODEL"].values[0, 0, 0, 16, 16] == pytest.approx(1.0, abs=0.1)
@@ -1432,7 +1439,7 @@ class TestDeconvolveAsp:
                 "asp_psf_width": 1.0,
             },
         )
-        assert len(rd.data) == nt * nf * npol
+        assert len(rd) == nt * nf * npol
 
     def test_diverged_model_update_reaches_the_controller(self):
         xds = _make_img_xds(dtype=np.float64)
@@ -1451,7 +1458,7 @@ class TestDeconvolveAsp:
                 **PLAIN_ASP,
             },
         )
-        (entry,) = imaging_dict.data.values()
+        (entry,) = imaging_dict.values()
         assert entry["iter_done"] == [6]
         assert entry["stop_code"] == StopCode(IMAGING_CONTINUE, MODEL_UPDATE_DIVERGENCE)
 
@@ -1579,7 +1586,7 @@ class TestExactPsfSubtraction:
         direct = clean(residual, subtraction_psf, model, dict(EXACT_PARAMS), 1, mask)
         assert np.array_equal(xds["RESIDUAL"].values, residual)
         assert np.array_equal(xds["SKY_MODEL"].values, model)
-        assert [entry["iter_done"] for entry in imaging_dict.data.values()] == [
+        assert [entry["iter_done"] for entry in imaging_dict.values()] == [
             [n] for n in direct["iterations_performed"].reshape(-1).tolist()
         ]
         # the image-sized PSF is left as it was, and the default subtracts it

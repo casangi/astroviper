@@ -154,7 +154,7 @@ def _model_updates(result):
     every model update (the cube's record also holds the stop test that
     ended its loop)."""
     records = {}
-    for key, fields in result["deconvolution"].data.items():
+    for key, fields in result["deconvolution"].items():
         n = len(fields["model_update_stop_code"])
         records[key.time, key.pol] = {
             name: list(fields[name][:n])

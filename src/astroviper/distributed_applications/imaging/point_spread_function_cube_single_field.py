@@ -35,6 +35,7 @@ def point_spread_function_cube_single_field(
     output_image_format: str = "zarr",
     *,
     input_checked=False,
+    gridder: str = "anti_alias",
 ):
     """
     Make the point spread function of a spectral cube, with its beam fit and
@@ -140,20 +141,8 @@ def point_spread_function_cube_single_field(
         the image kept (a support too large for the ``fft_padding``, e.g. 17
         at 1.05) is refused. The kernel of the
         former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
-        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
-        the gridding and the FFTs by the exact direct Fourier transform over the
-        unpadded image, w term included: with the phase
-        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
-        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
-        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
-        the measurement equation of ``simulate_processing_set``. Its cost is
-        proportional to the samples times the image pixels (30 to 40 s per
-        residual update of 451,500 samples, four correlations and 160 x 160
-        pixels on one core), so give it several
-        ``processing_function_threads``; its results do not depend on their
-        number. Its ``VISIBILITY_NORMALIZATION`` and
-        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
-        gridders' that sum times the kernel's stencil sums.
+        not ``"prolate_spheroidal"``. The gridder ``"direct_fourier_transform"``
+        uses no kernel: ``gridding_kernel_params`` must then be ``None``.
     primary_beam_params : dict, optional
         The primary beam of the imager, the power pattern that gives the clean
         mask and the primary beam correction: ``telescope`` (``"alma"``,
@@ -234,6 +223,26 @@ def point_spread_function_cube_single_field(
         Runtime checks on newly created data always remain active. For graph nodes
         using an input_params dictionary, its input_checked entry also carries this
         flag. Set it only for an unchanged configuration in the same imaging mode.
+    gridder : str, optional
+        Registry name of the gridder (a key of
+        :data:`~astroviper.processing_functions.imaging.gridders.gridder_registry.GRIDDERS`):
+        ``"anti_alias"`` (the default), convolutional gridding with the
+        anti-aliasing kernel of ``gridding_kernel_params`` (by default the
+        ``least_misfit`` kernel of support 9, oversampling 300 and linear
+        lookup), or ``"direct_fourier_transform"``, which replaces the gridding
+        and the FFTs by the exact direct Fourier transform over the unpadded
+        image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. It uses no
+        kernel and no ``fft_padding``. Its cost is proportional to the samples
+        times the image pixels (30 to 40 s per residual update of 451,500
+        samples, four correlations and 160 x 160 pixels on one core), so give
+        it several ``processing_function_threads``; its results do not depend
+        on their number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        anti-alias gridder's that sum times the kernel's stencil sums.
 
     Returns
     -------
@@ -275,7 +284,8 @@ def point_spread_function_cube_single_field(
 
         Attributes: ``image_size``, ``cell_size`` (radians), ``fft_padding``,
         ``imaging_weights_params``, ``gridding_kernel_params`` (defaults filled
-        in) and ``psf_fitting_method``.
+        in; ``None`` for a gridder that uses no kernel) and
+        ``psf_fitting_method``.
     """
 
     if not input_checked:
@@ -320,6 +330,9 @@ def point_spread_function_cube_single_field(
     )
     from astroviper.node_tasks.imaging.point_spread_function_cube_single_field import (
         point_spread_function_cube_single_field as point_spread_function_node_task,
+    )
+    from astroviper.processing_functions.imaging.gridders.gridder_registry import (
+        GRIDDERS,
     )
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
         resolve_gridding_kernel_params,
@@ -470,6 +483,7 @@ def point_spread_function_cube_single_field(
     input_params["processing_function_threads"] = processing_function_threads
     input_params["psf_fitting_method"] = psf_fitting_method
     input_params["gridding_kernel_params"] = gridding_kernel_params
+    input_params["gridder"] = gridder
     input_params["primary_beam_params"] = primary_beam_params
     # The point spread function and the weight statistics read only the data
     # group's weight, flag and uvw variables: VISIBILITY is never loaded.
@@ -516,8 +530,10 @@ def point_spread_function_cube_single_field(
         "cell_size": [float(cell) for cell in np.asarray(image_params["cell_size"])],
         "fft_padding": float(image_params["fft_padding"]),
         "imaging_weights_params": dict(imaging_weights_params),
-        "gridding_kernel_params": resolve_gridding_kernel_params(
-            gridding_kernel_params
+        "gridding_kernel_params": (
+            resolve_gridding_kernel_params(gridding_kernel_params)
+            if "anti_alias" in GRIDDERS[gridder].gcf_terms
+            else None
         ),
         "psf_fitting_method": psf_fitting_method,
     }

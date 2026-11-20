@@ -10,10 +10,7 @@ from astroviper.processing_functions.imaging.config_check import (
     CUBE_SINGLE_FIELD,
     check_driver_workflow,
     check_model_update,
-)
-from astroviper.processing_functions.imaging.config_check._gridding import (
-    check_gridding_kernel,
-    check_gridding_kernel_parameters,
+    check_residual_update,
 )
 from astroviper.processing_functions.imaging.config_check.param_check_model_update import (
     check_model_products,
@@ -120,17 +117,26 @@ def test_asp_options_are_not_ignored_by_other_deconvolvers(deconvolver):
 
 @pytest.mark.parametrize("extra", [{"support": 7}, {"oversampling": 100}])
 def test_dft_rejects_irrelevant_kernel_overrides(extra):
-    with pytest.raises(ValueError, match="DFT accepts only"):
-        check_gridding_kernel_parameters({"type": "dft", **extra})
+    with pytest.raises(
+        ValueError,
+        match="gridder='direct_fourier_transform' has no gridding kernel: "
+        "gridding_kernel_params must be None",
+    ):
+        check_residual_update(
+            {"gridder": "direct_fourier_transform", "gridding_kernel_params": extra},
+            mode=CONTINUUM_SINGLE_FIELD,
+        )
 
 
 def test_dft_needs_no_kernel_table_or_fft_design_padding():
-    params = {"type": "dft"}
+    config = {"gridder": "direct_fourier_transform", "gridding_kernel_params": None}
 
-    check_gridding_kernel_parameters(params)
-    check_gridding_kernel(params, fft_padding=None)
+    check_residual_update(config, mode=CONTINUUM_SINGLE_FIELD)
 
-    assert params == {"type": "dft"}
+    assert config == {
+        "gridder": "direct_fourier_transform",
+        "gridding_kernel_params": None,
+    }
 
 
 @pytest.mark.parametrize(
@@ -146,16 +152,34 @@ def test_dft_needs_no_kernel_table_or_fft_design_padding():
 def test_dft_workflow_rejects_uv_grid_dependencies(options, message):
     with pytest.raises(ValueError, match=message):
         check_driver_workflow(
-            {"gridding_kernel_params": {"type": "dft"}, **options},
+            {"gridder": "direct_fourier_transform", **options},
             mode=CONTINUUM_SINGLE_FIELD,
         )
+
+
+@pytest.mark.parametrize(
+    "options",
+    [{"continuum_mode": "mvc"}, {"visibility_memory_mode": "in_memory"}],
+)
+def test_the_anti_alias_gridder_supplies_uv_grids(options):
+    """The workflow rules follow the gridder's roles: one that grids into a
+    visibility role may cache and reduce uv grids."""
+    check_driver_workflow(
+        {"gridder": "anti_alias", **options}, mode=CONTINUUM_SINGLE_FIELD
+    )
+
+
+@pytest.mark.parametrize("mode", [CONTINUUM_SINGLE_FIELD, CUBE_SINGLE_FIELD])
+def test_the_workflow_refuses_a_gridder_that_is_not_a_registry_name(mode):
+    with pytest.raises(ValueError, match="gridder must be one of"):
+        check_driver_workflow({"gridder": "dft"}, mode=mode)
 
 
 @pytest.mark.parametrize("mode", [CONTINUUM_SINGLE_FIELD, CUBE_SINGLE_FIELD])
 def test_dft_accepts_image_products_as_a_numpy_name_array(mode):
     kept = np.asarray(["sky_residual", "point_spread_function"])
     config = {
-        "gridding_kernel_params": {"type": "dft"},
+        "gridder": "direct_fourier_transform",
         "image_data_variables_keep": kept,
     }
 
@@ -172,7 +196,7 @@ def test_cube_dft_refuses_uv_outputs_at_the_shared_workflow_boundary(kept):
     with pytest.raises(ValueError, match="uv grids"):
         check_driver_workflow(
             {
-                "gridding_kernel_params": {"type": "dft"},
+                "gridder": "direct_fourier_transform",
                 "image_data_variables_keep": kept,
             },
             mode=CUBE_SINGLE_FIELD,

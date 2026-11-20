@@ -198,7 +198,7 @@ def test_notebook_report_and_a_failing_report(processing_set, tmp_path, monkeypa
     monkeypatch.setattr(module, "image_cube_single_field_report", failing)
     result = _image(processing_set, str(tmp_path / "again.img.zarr"), report="html")
     assert result["report"] is None  # logged; the run's results are intact
-    assert not result["deconvolution"].data == {}
+    assert not result["deconvolution"] == {}
     assert not os.path.exists(tmp_path / "again_report.html")
 
 
@@ -525,7 +525,6 @@ def test_results_notes_without_statistics_or_record():
         _add_deconvolution,
         _add_image_statistics,
     )
-    from astroviper.processing_functions.imaging.utils import ImagingDict
 
     document = _Document()
     _add_image_statistics(document, {"image_statistics": {}})
@@ -545,7 +544,7 @@ def test_results_notes_without_statistics_or_record():
     )
     return_dict = {
         "image_statistics": {"sky_residual": statistics, "sky_model": statistics},
-        "deconvolution": ImagingDict(),
+        "deconvolution": {},
     }
     document = _Document()
     _add_image_statistics(document, return_dict)

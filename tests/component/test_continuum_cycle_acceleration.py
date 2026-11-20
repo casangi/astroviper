@@ -180,7 +180,7 @@ def run(simulated_store, tmp_path_factory):
         residual = image.SKY_RESIDUAL.isel(time=0, taylor_term=0, polarization=0)
         results[key] = {
             "cycles": result["n_cycles"],
-            "stop_codes": result["controller"].stop_code_imaging.ravel(),
+            "stop_codes": result["cycle_control_state"]["stop_code_imaging"].ravel(),
             "rms": float(
                 np.sqrt(np.mean(residual.values[primary_beam.values >= 0.2] ** 2))
             ),

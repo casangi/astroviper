@@ -69,7 +69,7 @@ estimates. Kernel-design
 preflight reuses the production kernel cache. Direct entry points use
 `input_checked=False`; validated callers pass `True` through the stack. Configuration predicates live in the parameter-check package; legacy helpers
 reuse those predicates. Actual-product, cache-consistency, and native-buffer
-guards remain active even for checked calls. Both multifield modes remain explicitly unsupported.
+guards remain active even for checked calls. Both mosaic modes remain explicitly unsupported.
 
 See [the configuration-check tutorial](docs/processing_functions_tutorials/imaging/demo_config_check.ipynb)
 for valid and invalid examples.

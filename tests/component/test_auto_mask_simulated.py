@@ -217,8 +217,10 @@ def test_continuum_masks_the_sources_by_itself(
     for taylor_term in range(n_taylor_terms):
         np.testing.assert_array_equal(image.MASK.values[0, taylor_term, 0], mask)
     assert not image.MASK.values[0, :, 1].any()
-    assert result["controller"].stop_code_imaging[0, 0, 1] == IMAGING_ZERO_MASK
-    assert result["controller"].cycles_done >= 2
+    assert (
+        result["cycle_control_state"]["stop_code_imaging"][0, 0, 1] == IMAGING_ZERO_MASK
+    )
+    assert result["cycle_control_state"]["cycles_done"] >= 2
 
 
 def test_continuum_mask_stays_inside_primary_beam_limit(tmp_path, simulated):

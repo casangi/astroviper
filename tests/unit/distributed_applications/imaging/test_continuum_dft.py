@@ -1,6 +1,6 @@
 """The direct Fourier transform option of the image_continuum_single_field application.
 
-``gridding_kernel_params={"type": "dft"}`` makes the MFS Taylor residuals, the Taylor
+``gridder="direct_fourier_transform"`` makes the MFS Taylor residuals, the Taylor
 PSFs and the model visibilities of every map task by the exact direct Fourier
 transform; the reduce adds the Taylor images and the append node divides them by the
 sum of the imaging weights. Small simulated processing sets (6 ALMA antennas, 4
@@ -18,7 +18,7 @@ import astroviper.distributed_applications as distributed_applications
 from astroviper.utils.beam_models import airy_disk_model
 from astroviper.utils.telescope_layout import read_telescope_layout
 
-DFT = {"type": "dft"}
+DFT = "direct_fourier_transform"
 PHASE_CENTER = np.array([4.267, np.deg2rad(-23.0)])
 CELL = 0.7 * np.pi / (180 * 3600)
 IMAGE_SIZE = [64, 64]
@@ -116,7 +116,7 @@ def _continuum(ps_store, image_store, image_params, **kwargs):
         "processing_set_data_group_name": "base",
         "single_precision_image": False,
         "n_mapping_parallelism": {"frequency": 1},
-        "gridding_kernel_params": DFT,
+        "gridder": DFT,
         "processing_function_threads": 2,
         "overwrite": True,
         **kwargs,
@@ -173,14 +173,14 @@ def test_mfs_with_the_dft_equals_the_cube_on_one_channel(tmp_path, processing_se
             processing_set_data_group_name="base",
             single_precision_image=False,
             n_mapping_parallelism={"frequency": 1},
-            gridding_kernel_params=DFT,
+            gridder=DFT,
             processing_function_threads=2,
             overwrite=True,
         )
     continuum_store = tmp_path / "continuum.img.zarr"
     _continuum(store, continuum_store, image_params)
     gridder_store = tmp_path / "continuum_gridder.img.zarr"
-    _continuum(store, gridder_store, image_params, gridding_kernel_params=None)
+    _continuum(store, gridder_store, image_params, gridder="anti_alias")
 
     for name in ("POINT_SPREAD_FUNCTION", "SKY_RESIDUAL", "SKY_MODEL"):
         cube = _planes(cube_store, name)
@@ -262,6 +262,54 @@ def test_the_reduce_adds_the_taylor_images_of_the_map_tasks(
     assert np.abs(one["SKY_MODEL"].isel(taylor_term=1).values).max() > 0
 
 
+def test_the_gridder_reaches_the_map_tasks_and_the_append_node(
+    monkeypatch, tmp_path, processing_sets
+):
+    """GraphVIPER hands the map node task only the keys of input_params it
+    declares, and the append node gets a dict of its own: both carry the
+    gridder (without it they would grid and transform with the anti-alias
+    gridder), and the reduce adds what the gridder accumulates."""
+    import importlib
+    import inspect
+
+    from astroviper.node_tasks.imaging.image_continuum_single_field import (
+        _resolve_continuum_append_configuration,
+        residual_update_continuum_single_field,
+    )
+
+    driver = importlib.import_module(
+        "astroviper.distributed_applications.imaging.image_continuum_single_field"
+    )
+
+    class GraphReached(Exception):
+        pass
+
+    def first_graph(**kwargs):
+        raise GraphReached(kwargs)
+
+    monkeypatch.setattr(driver, "compute_continuum_graph", first_graph)
+    store = processing_sets["two_hands"]
+    with pytest.raises(GraphReached) as reached:
+        _continuum(store, tmp_path / "graph.img.zarr", _image_params(store, ["I", "Q"]))
+    graph = reached.value.args[0]
+    assert graph["cycle_input_params"]["gridder"] == DFT
+    assert (
+        "gridder"
+        in inspect.signature(residual_update_continuum_single_field).parameters
+    )
+    assert graph["append_input_params"]["gridder"] == DFT
+    assert (
+        _resolve_continuum_append_configuration(graph["append_input_params"])["gridder"]
+        == DFT
+    )
+    assert graph["reduce_input_params"]["additive_variables"] == (
+        "SKY_RESIDUAL",
+        "VISIBILITY_NORMALIZATION",
+        "POINT_SPREAD_FUNCTION",
+        "UV_SAMPLING_NORMALIZATION",
+    )
+
+
 @pytest.mark.parametrize(
     ("overrides", "match"),
     [
@@ -280,8 +328,8 @@ def test_the_reduce_adds_the_taylor_images_of_the_map_tasks(
         ({"image_data_variables_keep": ["sky_residual", "visibility"]}, "uv grids"),
         ({"image_data_variables_keep": ["uv_sampling"]}, "uv grids"),
         (
-            {"gridding_kernel_params": {"type": "dft", "support": 7}},
-            "DFT accepts only gridding_kernel_params=",
+            {"gridding_kernel_params": {"support": 7}},
+            "gridder='direct_fourier_transform' has no gridding kernel",
         ),
     ],
     ids=["mvc", "in_memory", "in_place", "visibility", "uv_sampling", "support"],

@@ -65,7 +65,7 @@ def _require_gridding_kernel(gridding_kernel, function_name):
     """Refuse a missing gridding kernel: the image correction is its transform."""
     if gridding_kernel is None:
         raise ValueError(
-            f"{function_name} needs gridding_kernel, the GriddingKernel the "
+            f"{function_name} needs gcf_xds, the gcf_xds of the kernel the "
             "visibilities are gridded or degridded with: the image is divided by "
             "its correction, and there is no default kernel "
             "(make_gridding_kernel(gridding_kernel_params, fft_padding) makes it, "
@@ -85,7 +85,7 @@ def ifft_norm_img_xds(
     processing_function_threads=1,
     fft_backend="pyfftw",
     complex_dtype=np.complex128,
-    gridding_kernel=None,
+    gcf_xds=None,
 ):
     """Normalize and inverse-Fourier-transform gridded UV data to sky images.
 
@@ -97,7 +97,7 @@ def ifft_norm_img_xds(
        ``(time, plane, polarization)`` slice so that only one 2-D plane
        is in memory during the transform.
     3. Divides in-place by the gridding kernel's correction function along
-       each image axis (``gridding_kernel``).
+       each image axis (``gcf_xds``).
     4. Crops the zero-padded margins to the requested ``image_size``.
     5. Normalises by the corresponding grid-weight sum, replacing zero weights
        with 1 to avoid division by zero.
@@ -119,8 +119,9 @@ def ifft_norm_img_xds(
 
         ``"image_size"`` : array-like of int, shape (2,)
             Pixel dimensions ``[n_l, n_m]`` of the *unpadded* output image.
-    data_group_in : dict
-        Maps a logical data-variable role to the corresponding variable name
+    image_data_group_in_name : str, optional
+        Name of the input image data group (default ``"single_field"``), which
+        maps a logical data-variable role to the corresponding variable name
         in ``img_xds``.  Supported roles for grids: ``"aperture"``,
         ``"uv_sampling"``, ``"visibility"``.  Also maps normalisation roles to
         their variable names: ``"aperture_normalization"``,
@@ -135,10 +136,16 @@ def ifft_norm_img_xds(
                 "uv_sampling_normalization": "UV_SAMPLING_NORMALIZATION",
             }
 
-    data_group_out : dict
+    image_data_group_out_name : str, optional
+        Name of the output image data group (default ``"single_field"``).
+    image_data_group_out_modified : dict, optional
         Maps a logical output role to the target variable name in ``img_xds``.
         Roles consumed: ``"sky"``, ``"point_spread_function"``,
-        ``"primary_beam"``.
+        ``"primary_beam"``.  Defaults to ``{"sky": "SKY_RESIDUAL",
+        "point_spread_function": "POINT_SPREAD_FUNCTION"}``.
+    overwrite : bool, optional
+        If ``True`` (default), an existing output data group or output data
+        variables are overwritten; if ``False``, they must not exist yet.
     image_data_variables_keep : list of str
         Logical data-variable roles (``"aperture"``, ``"uv_sampling"``,
         ``"visibility"``) whose raw UV grid should be retained in ``img_xds``
@@ -157,10 +164,13 @@ def ifft_norm_img_xds(
         potentially faster transforms when pyfftw is installed; plan caching
         is especially beneficial when the same grid shape is transformed
         repeatedly across imaging cycles.
-    gridding_kernel : GriddingKernel
-        The kernel the grids were made with
-        (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`,
-        from
+    complex_dtype : numpy dtype, optional
+        Complex precision of the inverse FFT (default ``numpy.complex128``).
+        The images are ``float32`` for ``complex64`` and ``float64``
+        otherwise, except a sky kept complex (see Returns), which takes this
+        dtype.
+    gcf_xds : xarray.Dataset
+        The ``gcf_xds`` of the kernel the grids were made with (from
         :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.make_gridding_kernel`,
         or
         :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.as_gridding_kernel`
@@ -179,7 +189,7 @@ def ifft_norm_img_xds(
     Raises
     ------
     ValueError
-        If ``gridding_kernel`` is not given (before ``img_xds`` is changed).
+        If ``gcf_xds`` is not given (before ``img_xds`` is changed).
 
     Notes
     -----
@@ -190,7 +200,7 @@ def ifft_norm_img_xds(
     grid adds one extra 2-D complex plane per iteration for the defensive
     copy, ≈ 1.15 GB for a 12 000 × 12 000 complex128 grid.
     """
-    _require_gridding_kernel(gridding_kernel, "ifft_norm_img_xds")
+    _require_gridding_kernel(gcf_xds, "ifft_norm_img_xds")
     if image_data_group_out_modified is None:
         image_data_group_out_modified = {
             "sky": "SKY_RESIDUAL",
@@ -209,8 +219,12 @@ def ifft_norm_img_xds(
         overwrite=overwrite,
     )
 
-    kernel_image_1D_l = gridding_kernel.correction_1D(img_xds.sizes["u"])
-    kernel_image_1D_m = gridding_kernel.correction_1D(img_xds.sizes["v"])
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        correction_1D,
+    )
+
+    kernel_image_1D_l = correction_1D(gcf_xds, img_xds.sizes["u"])
+    kernel_image_1D_m = correction_1D(gcf_xds, img_xds.sizes["v"])
 
     # The sky in a four-correlation basis is kept complex: a cross hand is not
     # conjugate symmetric on its own, and its real and imaginary parts carry two
@@ -388,7 +402,7 @@ def fft_norm_img_xds(
     fft_backend="pyfftw",
     data_variables_to_process=None,
     complex_dtype=np.complex128,
-    gridding_kernel=None,
+    gcf_xds=None,
     new_polarization_basis=None,
 ):
     """Forward-transform a model sky image into a model UV grid.
@@ -405,18 +419,57 @@ def fft_norm_img_xds(
     (that transform leaves uv grids as they are).
 
     The image is divided by the gridding kernel's correction function before
-    the transform (``gridding_kernel``, the
-    :class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`
-    the model visibilities are degridded with). The kernel is required: without
-    it a ValueError is raised before ``img_xds`` is changed.
+    the transform (``gcf_xds``, the ``gcf_xds`` of the kernel the model
+    visibilities are degridded with). The kernel is required: without it a
+    ValueError is raised before ``img_xds`` is changed.
 
     ``complex_dtype`` sets the precision of the output model UV grid
     (``complex64`` for a single-precision image, ``complex128`` otherwise). The
     model visibilities degridded from this grid stay double precision regardless
     (the degridder widens each grid cell to ``complex128`` for the
     accumulation), so only the image-domain grid is affected here.
+
+    Parameters
+    ----------
+    img_xds : xarray.Dataset
+        Image dataset containing the sky model with dimensions
+        ``(time, frequency, polarization, l, m)``; the model UV grid is added
+        with dimensions ``(time, frequency, polarization, u, v)``.
+    image_params : dict
+        Imaging parameters. Must contain ``fft_padding``.
+    image_data_group_in_name : str, optional
+        Input image data group containing the sky model.
+    image_data_group_out_name : str, optional
+        Output image data group receiving the model UV grid.
+    image_data_group_out_modified : dict, optional
+        Output data-group variable mapping. Defaults to
+        ``{"visibility": "VISIBILITY_MODEL"}``.
+    overwrite : bool, optional
+        Allow overwriting an existing output variable. Buffers with incompatible
+        dimensions, shape or dtype are replaced.
+    image_data_variables_keep : list of str, optional
+        Logical input variables to retain after the FFT.
+    processing_function_threads : int, optional
+        Number of FFT threads.
+    fft_backend : {"scipy", "pyfftw"}, optional
+        FFT backend.
+    data_variables_to_process : list of str, optional
+        Logical variables to transform. Defaults to ``["sky"]``.
+    complex_dtype : numpy dtype, optional
+        Complex precision of the UV grid.
+    gcf_xds : xarray.Dataset
+        The ``gcf_xds`` of the kernel the model visibilities are degridded
+        with (from
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.make_gridding_kernel`,
+        or
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.as_gridding_kernel`
+        for a bare kernel table). Required: there is no default kernel.
+    new_polarization_basis : {"linear", "circular"}, optional
+        The basis whose correlations the Stokes planes of the image are
+        combined into as they are padded; ``None`` (default) transforms the
+        planes as they are.
     """
-    _require_gridding_kernel(gridding_kernel, "fft_norm_img_xds")
+    _require_gridding_kernel(gcf_xds, "fft_norm_img_xds")
     return _fft_norm_image_planes(
         img_xds,
         image_params,
@@ -430,7 +483,7 @@ def fft_norm_img_xds(
         fft_backend=fft_backend,
         data_variables_to_process=data_variables_to_process,
         complex_dtype=complex_dtype,
-        gridding_kernel=gridding_kernel,
+        gcf_xds=gcf_xds,
         new_polarization_basis=new_polarization_basis,
     )
 
@@ -766,7 +819,7 @@ def fft_norm_continuum_img_xds(
     fft_backend="pyfftw",
     data_variables_to_process=None,
     complex_dtype=np.complex128,
-    gridding_kernel=None,
+    gcf_xds=None,
 ):
     """Forward-transform continuum Taylor-model images into Taylor UV grids.
 
@@ -808,10 +861,11 @@ def fft_norm_continuum_img_xds(
         Logical variables to transform. Defaults to ``["sky"]``.
     complex_dtype : numpy dtype, optional
         Complex precision of the UV grid.
-    gridding_kernel : GriddingKernel
-        The gridding kernel whose correction function the image is divided by
-        before the transform, the one the model visibilities are degridded with
-        (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`).
+    gcf_xds : xarray.Dataset
+        The ``gcf_xds`` of the gridding kernel whose correction function the
+        image is divided by before the transform, the one the model visibilities
+        are degridded with (from
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.make_gridding_kernel`).
         Required: there is no default kernel.
 
     Returns
@@ -822,9 +876,9 @@ def fft_norm_continuum_img_xds(
     Raises
     ------
     ValueError
-        If ``gridding_kernel`` is not given (before ``img_xds`` is changed).
+        If ``gcf_xds`` is not given (before ``img_xds`` is changed).
     """
-    _require_gridding_kernel(gridding_kernel, "fft_norm_continuum_img_xds")
+    _require_gridding_kernel(gcf_xds, "fft_norm_continuum_img_xds")
     return _fft_norm_image_planes(
         img_xds,
         image_params,
@@ -838,7 +892,7 @@ def fft_norm_continuum_img_xds(
         fft_backend=fft_backend,
         data_variables_to_process=data_variables_to_process,
         complex_dtype=complex_dtype,
-        gridding_kernel=gridding_kernel,
+        gcf_xds=gcf_xds,
     )
 
 
@@ -856,7 +910,7 @@ def _fft_norm_image_planes(
     fft_backend,
     data_variables_to_process,
     complex_dtype,
-    gridding_kernel,
+    gcf_xds,
     new_polarization_basis=None,
 ):
     """Transform frequency or Taylor planes with shared allocation and FFT rules.
@@ -864,7 +918,7 @@ def _fft_norm_image_planes(
     Output buffers are reused only when dimensions, shape and dtype match.
     Each output plane doubles as its padded FFT workspace; input sky planes
     remain unchanged until optionally removed from the returned dataset. The
-    image is divided by the correction function of ``gridding_kernel`` before
+    image is divided by the correction function of ``gcf_xds`` before
     the transform.
     """
     if image_data_group_out_modified is None:
@@ -886,6 +940,9 @@ def _fft_norm_image_planes(
         overwrite=overwrite,
     )
 
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        correction_1D,
+    )
     from astroviper.processing_functions.imaging.utils.fft_sizing import (
         padded_grid_size,
     )
@@ -1007,8 +1064,8 @@ def _fft_norm_image_planes(
         out_arr = img_xds[out_name].values
         img_xds[out_name].attrs["type"] = data_variable
 
-        kernel_image_1D_l = gridding_kernel.correction_1D(n_uv[0])
-        kernel_image_1D_m = gridding_kernel.correction_1D(n_uv[1])
+        kernel_image_1D_l = correction_1D(gcf_xds, n_uv[0])
+        kernel_image_1D_m = correction_1D(gcf_xds, n_uv[1])
 
         # Work in each output plane: no separate padded workspace or defensive
         # FFT copy. In-place division preserves complex64 even with float64 kernels.

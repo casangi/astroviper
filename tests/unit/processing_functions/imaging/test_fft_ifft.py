@@ -17,6 +17,7 @@ from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder im
 )
 from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
     CASA_GRIDDING_KERNEL_PARAMS,
+    correction_1D,
     make_gridding_kernel,
 )
 
@@ -70,7 +71,7 @@ def test_forward_image_fft_does_not_open_a_matplotlib_window(monkeypatch):
         image,
         {"image_size": [4, 4], "fft_padding": 1.0},
         fft_backend="scipy",
-        gridding_kernel=make_gridding_kernel(CASA_GRIDDING_KERNEL_PARAMS),
+        gcf_xds=make_gridding_kernel(CASA_GRIDDING_KERNEL_PARAMS),
     )
 
     assert result["VISIBILITY_MODEL"].shape == (1, 1, 1, 4, 4)
@@ -172,7 +173,7 @@ class FourCorrelationSkyTest(unittest.TestCase):
                 "point_spread_function": "POINT_SPREAD_FUNCTION",
             },
             fft_backend="scipy",
-            gridding_kernel=make_gridding_kernel(CASA_GRIDDING_KERNEL_PARAMS),
+            gcf_xds=make_gridding_kernel(CASA_GRIDDING_KERNEL_PARAMS),
         )
 
     def test_sky_is_complex_for_four_correlations_only(self):
@@ -351,9 +352,9 @@ def test_rectangular_point_spread_function_and_dirty_image_are_positive(backend)
         image_data_group_in_name="residual",
         image_data_group_out_name="residual",
         fft_backend=backend,
-        gridding_kernel=kernel,
+        gcf_xds=kernel,
     )
-    centre = kernel.correction_1D(n_u)[n_u // 2] * kernel.correction_1D(n_v)[n_v // 2]
+    centre = correction_1D(kernel, n_u)[n_u // 2] * correction_1D(kernel, n_v)[n_v // 2]
     for name in ("POINT_SPREAD_FUNCTION", "SKY_RESIDUAL"):
         image = result[name].values[0, 0]
         assert image.shape == (2, 74, 100)

@@ -46,14 +46,14 @@ def check_model_update(config, *, mode, require_complete=False):
     ValueError
         If the deconvolver, Taylor order, or thresholds are invalid.
     NotImplementedError
-        If multifield imaging is requested.
+        If mosaic imaging is requested.
     """
     # ========================================================================
     # 1. Validation context
     # ========================================================================
 
     # --- Supported imaging mode ---
-    # Reject multifield requests until their model-update path is implemented.
+    # Reject mosaic requests until their model-update path is implemented.
     mode.require_supported()
     require_mapping("config", config)
 

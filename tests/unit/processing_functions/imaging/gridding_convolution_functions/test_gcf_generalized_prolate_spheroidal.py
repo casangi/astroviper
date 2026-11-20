@@ -24,11 +24,14 @@ from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_
 from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
     CORRECTION_FLOOR,
     KERNEL_TYPES,
+    correction,
+    correction_1D,
     kept_half_width,
     make_gridding_kernel,
     resolve_gridding_kernel_params,
 )
 from astroviper.processing_functions.imaging.gridding_convolution_functions.kernel_lookup import (
+    stencil_values,
     table_transform,
 )
 
@@ -158,28 +161,30 @@ class TestKernel:
             fft_padding=2.0,
         )
         c, alpha = SHAPE_TABLE[(9, 2.0)]
-        assert kernel.shape["c"] == c and kernel.shape["alpha"] == alpha
-        assert kernel.shape["fft_padding"] == 2.0
-        assert kernel.table.size == 20 * 5
-        assert kernel.table[0] == 1.0 == kernel.table.max()
-        distance = np.arange(kernel.table.size) / 20
+        table = kernel["ANTI_ALIAS"].values
+        shape = kernel["ANTI_ALIAS"].attrs["shape"]
+        assert shape["c"] == c and shape["alpha"] == alpha
+        assert shape["fft_padding"] == 2.0
+        assert table.size == 20 * 5
+        assert table[0] == 1.0 == table.max()
+        distance = np.arange(table.size) / 20
         np.testing.assert_array_equal(
-            kernel.table,
+            table,
             generalized_prolate_spheroidal_kernel(2.0 * distance / 9, c, alpha),
         )
         # zero from the half width of 4.5 cells on (where alpha > 0) or beyond
         # it, positive and falling within
-        assert np.all(kernel.table[distance > 4.5] == 0.0)
-        inside = kernel.table[distance < 4.5]
+        assert np.all(table[distance > 4.5] == 0.0)
+        inside = table[distance < 4.5]
         assert np.all(inside > 0.0) and np.all(np.diff(inside) < 0.0)
         z = np.linspace(0.0, 1.2, 61)
         np.testing.assert_array_equal(
             generalized_prolate_spheroidal_kernel(-z, c, alpha),
             generalized_prolate_spheroidal_kernel(z, c, alpha),
         )
-        stencil = kernel.stencil_values(np.array([0.0]))[0]
+        stencil = stencil_values(table, 9, 20, "nearest", np.array([0.0]))[0]
         np.testing.assert_array_equal(stencil, stencil[::-1])
-        assert "c=" in repr(kernel) and "alpha=" in repr(kernel)
+        assert "c" in shape and "alpha" in shape
 
     def test_aliasing_at_support_7_padding_1p2(self):
         """The chosen (c, alpha) beat Schwab's kernel (half width 3 cells,
@@ -224,11 +229,12 @@ class TestKernel:
             },
             fft_padding=1.25,
         )
-        assert kernel.table.size == 10 * (support // 2 + 1)
-        assert np.all(np.isfinite(kernel.table)) and kernel.table[0] == 1.0
-        distance = np.arange(kernel.table.size) / 10
-        assert np.all(kernel.table[distance > support / 2] == 0.0)
-        assert np.all(np.isfinite(kernel.correction_1D(64)))
+        table = kernel["ANTI_ALIAS"].values
+        assert table.size == 10 * (support // 2 + 1)
+        assert np.all(np.isfinite(table)) and table[0] == 1.0
+        distance = np.arange(table.size) / 10
+        assert np.all(table[distance > support / 2] == 0.0)
+        assert np.all(np.isfinite(correction_1D(kernel, 64)))
 
     @pytest.mark.parametrize(
         "support, fft_padding, smaller, larger",
@@ -246,16 +252,18 @@ class TestKernel:
             },
             fft_padding=fft_padding,
         )
-        c, alpha = kernel.shape["c"], kernel.shape["alpha"]
+        shape = kernel["ANTI_ALIAS"].attrs["shape"]
+        table = kernel["ANTI_ALIAS"].values
+        c, alpha = shape["c"], shape["alpha"]
         assert round(c, 4) == c and round(alpha, 4) == alpha
         assert (
             0.6 <= c / nominal_bandwidth(support, kept_half_width(fft_padding)) <= 1.4
         )
         assert 0.0 <= alpha <= 3.0
-        assert np.all(np.isfinite(kernel.table)) and kernel.table[0] == 1.0
+        assert np.all(np.isfinite(table)) and table[0] == 1.0
         # the error falls with the padding (down to the floor the quadrature
         # resolves), between those of the neighbouring paddings listed
-        error = kernel.shape["aliasing_error"]
+        error = shape["aliasing_error"]
         for padding, is_smaller in ((smaller, True), (larger, False)):
             if padding is not None:
                 listed = generalized_prolate_spheroidal_parameters(
@@ -274,20 +282,22 @@ class TestKernel:
             fft_padding=1.2,
         )
         x = np.linspace(-0.5, 0.5, 101)
+        table = kernel["ANTI_ALIAS"].values
         np.testing.assert_allclose(
-            kernel.correction(x),
+            correction(kernel, x),
             np.maximum(
-                table_transform(kernel.table, 300, "linear", x)
-                / table_transform(kernel.table, 300, "linear", 0.0),
+                table_transform(table, 300, "linear", x)
+                / table_transform(table, 300, "linear", 0.0),
                 CORRECTION_FLOOR,
             ),
         )
         # the transform of the table applied is close to the continuous one
-        c, alpha = kernel.shape["c"], kernel.shape["alpha"]
+        shape = kernel["ANTI_ALIAS"].attrs["shape"]
+        c, alpha = shape["c"], shape["alpha"]
         kept = x[np.abs(x) <= kept_half_width(1.2)]
         continuous = generalized_prolate_spheroidal_transform(kept, 7, c, alpha)
         continuous /= generalized_prolate_spheroidal_transform(0.0, 7, c, alpha)
-        np.testing.assert_allclose(kernel.correction(kept), continuous, rtol=1e-5)
+        np.testing.assert_allclose(correction(kernel, kept), continuous, rtol=1e-5)
 
     def test_create_table_matches_the_kernel_function(self):
         table = create_generalized_prolate_spheroidal_kernel_1D(8, 5, 9.0, 0.5)

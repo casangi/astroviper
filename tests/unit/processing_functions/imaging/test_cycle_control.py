@@ -2,9 +2,10 @@
 Unit tests for the cycle control module.
 
 Tests cover:
-- ImagingDict core functionality (initialization, add, sel, to_dict, repr)
-- ImagingDict utility functions (merge, extraction)
-- CycleController initialization and parameter validation
+- imaging_dict core functionality (initialization, add_to_imaging_dict,
+  select_from_imaging_dict)
+- imaging_dict utility functions (merge, extraction)
+- Cycle control state initialization and parameter validation
 - Adaptive threshold_per_cycle calculation
 - Convergence checking with all stop codes
 - Count updates and state management
@@ -15,12 +16,13 @@ Tests cover:
 import unittest
 
 import numpy as np
+import pytest
 import xarray as xr
 
 from astroviper.processing_functions.image_analysis.image_statistics import (
     RESIDUAL_STATISTICS,
 )
-from astroviper.processing_functions.imaging.utils.cycle_control import (  # Stop codes; Utility functions; Main class
+from astroviper.processing_functions.imaging.utils.cycle_control import (  # Stop codes; Utility functions; Cycle control functions
     IMAGING_CONTINUE,
     IMAGING_DIVERGENCE,
     IMAGING_MAX_CYCLES,
@@ -31,15 +33,27 @@ from astroviper.processing_functions.imaging.utils.cycle_control import (  # Sto
     MODEL_UPDATE_DIVERGENCE,
     MODEL_UPDATE_MAX_ITER_PER_CYCLE,
     MODEL_UPDATE_THRESHOLD_PER_CYCLE,
-    CycleController,
     StopCode,
     build_residual_imaging_dict,
+    calculate_per_cycle_limits,
+    check_convergence,
+    check_refreshed_residual_divergence,
+    ensure_planes,
     get_iterations_done_from_imaging_dict,
     get_masksum_from_imaging_dict,
     get_max_psf_sidelobe_from_imaging_dict,
     get_model_flux_from_imaging_dict,
     get_peak_residual_from_imaging_dict,
+    get_state,
+    make_cycle_control_state,
     merge_imaging_dicts,
+    per_plane_threshold_per_cycle,
+    plot_convergence_history,
+    record_model_update,
+    reset,
+    reset_stopcode,
+    update_counts,
+    update_parameters,
 )
 from astroviper.processing_functions.imaging.utils.cycle_control_heuristics import (
     THRESHOLD_TOLERANCE,
@@ -49,31 +63,32 @@ from astroviper.processing_functions.imaging.utils.imaging_dict import (
     FIELD_ACCUM,
     FIELD_SINGLE_VALUE,
     ITERATION_HISTORY_FIELDS,
-    ImagingDict,
     Key,
+    add_to_imaging_dict,
+    select_from_imaging_dict,
 )
 
 # =============================================================================
-# ImagingDict Core Functionality Tests
+# imaging_dict Core Functionality Tests
 # =============================================================================
 
 
 class TestImagingDictBasics(unittest.TestCase):
-    """Test ImagingDict initialization, properties, and basic methods."""
+    """Test imaging_dict initialization and layout."""
 
     def test_empty_initialization(self):
-        """Test creating an empty ImagingDict."""
-        rd = ImagingDict()
+        """Test creating an empty imaging_dict."""
+        rd = {}
         self.assertIsNotNone(rd)
-        self.assertEqual(len(rd.data), 0)
-        self.assertIsInstance(rd.data, dict)
+        self.assertEqual(len(rd), 0)
+        self.assertIsInstance(rd, dict)
 
     def test_data_property_getter(self):
-        """Test data property getter returns internal dictionary."""
-        rd = ImagingDict()
-        rd.add({"peakres": 1.0}, time=0, pol=0, chan=0)
+        """Test the imaging_dict is a dictionary keyed by Key."""
+        rd = {}
+        add_to_imaging_dict(rd, {"peakres": 1.0}, time=0, pol=0, chan=0)
 
-        data = rd.data
+        data = rd
         self.assertIsInstance(data, dict)
         self.assertEqual(len(data), 1)
 
@@ -81,81 +96,18 @@ class TestImagingDictBasics(unittest.TestCase):
         key = Key(0, 0, 0)
         self.assertIn(key, data)
 
-    def test_data_property_setter(self):
-        """Test data property setter updates internal dictionary."""
-        rd = ImagingDict()
-
-        # Create new data dict
-        new_data = {Key(0, 0, 0): {"peakres": [2.5], "iter_done": [50]}}
-        rd.data = new_data
-
-        self.assertEqual(len(rd.data), 1)
-        entry = rd.sel(time=0, pol=0, chan=0)
-        self.assertEqual(entry["peakres"], [2.5])
-        self.assertEqual(entry["iter_done"], [50])
-
-    def test_to_dict_method(self):
-        """Test to_dict() returns the internal data dictionary."""
-        rd = ImagingDict()
-        rd.add({"peakres": 1.5, "iter_done": 100}, time=0, pol=0, chan=0)
-        rd.add({"peakres": 1.2, "iter_done": 80}, time=0, pol=0, chan=1)
-
-        result = rd.to_dict()
-
-        # Should return the same object as .data
-        self.assertIs(result, rd.data)
-        self.assertEqual(len(result), 2)
-
-    def test_repr_empty(self):
-        """Test __repr__() for empty ImagingDict."""
-        rd = ImagingDict()
-        repr_str = repr(rd)
-
-        # Empty dict should produce empty string (no entries)
-        self.assertEqual(repr_str, "")
-
-    def test_repr_single_entry(self):
-        """Test __repr__() for single entry."""
-        rd = ImagingDict()
-        rd.add({"peakres": 1.0, "iter_done": 50}, time=0, pol=0, chan=0)
-
-        repr_str = repr(rd)
-
-        # Should contain the key and values
-        self.assertIn("Key(time=0, pol=0, chan=0)", repr_str)
-        self.assertIn("peakres", repr_str)
-        self.assertIn("[1.0]", repr_str)  # FIELD_ACCUM stored as list
-        self.assertIn("iter_done", repr_str)
-        self.assertIn("[50]", repr_str)  # FIELD_ACCUM stored as list
-
-    def test_repr_multiple_entries(self):
-        """Test __repr__() for multiple entries."""
-        rd = ImagingDict()
-        rd.add({"peakres": 1.0}, time=0, pol=0, chan=0)
-        rd.add({"peakres": 0.8}, time=0, pol=0, chan=1)
-        rd.add({"peakres": 0.6}, time=0, pol=1, chan=0)
-
-        repr_str = repr(rd)
-
-        # Should contain all keys
-        self.assertIn("Key(time=0, pol=0, chan=0)", repr_str)
-        self.assertIn("Key(time=0, pol=0, chan=1)", repr_str)
-        self.assertIn("Key(time=0, pol=1, chan=0)", repr_str)
-
-        # Should have multiple lines (newline separated)
-        lines = repr_str.split("\n")
-        self.assertEqual(len(lines), 3)
-
 
 class TestImagingDictAdd(unittest.TestCase):
-    """Test ImagingDict.add() method edge cases and history tracking."""
+    """Test add_to_imaging_dict() edge cases and history tracking."""
 
     def test_add_first_entry_field_accum(self):
         """Test adding first entry with FIELD_ACCUM fields."""
-        rd = ImagingDict()
-        rd.add({"peakres": 1.5, "iter_done": 100}, time=0, pol=0, chan=0)
+        rd = {}
+        add_to_imaging_dict(
+            rd, {"peakres": 1.5, "iter_done": 100}, time=0, pol=0, chan=0
+        )
 
-        entry = rd.sel(time=0, pol=0, chan=0)
+        entry = select_from_imaging_dict(rd, time=0, pol=0, chan=0)
 
         # FIELD_ACCUM fields should be stored as lists
         self.assertEqual(entry["peakres"], [1.5])
@@ -165,10 +117,12 @@ class TestImagingDictAdd(unittest.TestCase):
 
     def test_add_first_entry_field_single_value(self):
         """Test adding first entry with FIELD_SINGLE_VALUE fields."""
-        rd = ImagingDict()
-        rd.add({"max_psf_sidelobe": 0.2, "gain": 0.1}, time=0, pol=0, chan=0)
+        rd = {}
+        add_to_imaging_dict(
+            rd, {"max_psf_sidelobe": 0.2, "gain": 0.1}, time=0, pol=0, chan=0
+        )
 
-        entry = rd.sel(time=0, pol=0, chan=0)
+        entry = select_from_imaging_dict(rd, time=0, pol=0, chan=0)
 
         # FIELD_SINGLE_VALUE fields should be stored as scalars
         self.assertEqual(entry["max_psf_sidelobe"], 0.2)
@@ -178,8 +132,9 @@ class TestImagingDictAdd(unittest.TestCase):
 
     def test_add_first_entry_mixed_fields(self):
         """Test adding first entry with both FIELD_ACCUM and FIELD_SINGLE_VALUE."""
-        rd = ImagingDict()
-        rd.add(
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {
                 "peakres": 1.0,  # FIELD_ACCUM
                 "iter_done": 50,  # FIELD_ACCUM
@@ -191,7 +146,7 @@ class TestImagingDictAdd(unittest.TestCase):
             chan=0,
         )
 
-        entry = rd.sel(time=0, pol=0, chan=0)
+        entry = select_from_imaging_dict(rd, time=0, pol=0, chan=0)
 
         # Check FIELD_ACCUM are lists
         self.assertEqual(entry["peakres"], [1.0])
@@ -203,10 +158,12 @@ class TestImagingDictAdd(unittest.TestCase):
 
     def test_add_unknown_field(self):
         """Test adding a field not in FIELD_ACCUM or FIELD_SINGLE_VALUE."""
-        rd = ImagingDict()
-        rd.add({"custom_field": 42, "peakres": 1.0}, time=0, pol=0, chan=0)
+        rd = {}
+        add_to_imaging_dict(
+            rd, {"custom_field": 42, "peakres": 1.0}, time=0, pol=0, chan=0
+        )
 
-        entry = rd.sel(time=0, pol=0, chan=0)
+        entry = select_from_imaging_dict(rd, time=0, pol=0, chan=0)
 
         # Unknown fields should be treated as FIELD_SINGLE_VALUE (not accumulated)
         self.assertEqual(entry["custom_field"], 42)
@@ -217,26 +174,26 @@ class TestImagingDictAdd(unittest.TestCase):
 
     def test_add_empty_dict(self):
         """Test adding an empty dictionary."""
-        rd = ImagingDict()
-        rd.add({}, time=0, pol=0, chan=0)
+        rd = {}
+        add_to_imaging_dict(rd, {}, time=0, pol=0, chan=0)
 
         # Key should exist but with empty entry
-        entry = rd.sel(time=0, pol=0, chan=0)
+        entry = select_from_imaging_dict(rd, time=0, pol=0, chan=0)
         self.assertIsNotNone(entry)
         self.assertEqual(entry, {})
 
     def test_backward_compat_scalar_to_list(self):
         """Test backward compatibility: scalar converted to list on second add."""
-        rd = ImagingDict()
+        rd = {}
 
         # Manually create a scalar entry (simulating old data format)
         key = Key(0, 0, 0)
-        rd.data[key] = {"peakres": 1.0}  # Scalar instead of list
+        rd[key] = {"peakres": 1.0}  # Scalar instead of list
 
         # Now add new value - should convert to list and append
-        rd.add({"peakres": 0.8}, time=0, pol=0, chan=0)
+        add_to_imaging_dict(rd, {"peakres": 0.8}, time=0, pol=0, chan=0)
 
-        entry = rd.sel(time=0, pol=0, chan=0)
+        entry = select_from_imaging_dict(rd, time=0, pol=0, chan=0)
 
         # Should have converted scalar to list and appended new value
         self.assertEqual(entry["peakres"], [1.0, 0.8])
@@ -244,18 +201,24 @@ class TestImagingDictAdd(unittest.TestCase):
 
     def test_multiple_adds_same_key_accumulate(self):
         """Test multiple adds to same key accumulate FIELD_ACCUM values."""
-        rd = ImagingDict()
+        rd = {}
 
         # First add
-        rd.add({"peakres": 1.0, "iter_done": 100}, time=0, pol=0, chan=0)
+        add_to_imaging_dict(
+            rd, {"peakres": 1.0, "iter_done": 100}, time=0, pol=0, chan=0
+        )
 
         # Second add
-        rd.add({"peakres": 0.8, "iter_done": 80}, time=0, pol=0, chan=0)
+        add_to_imaging_dict(
+            rd, {"peakres": 0.8, "iter_done": 80}, time=0, pol=0, chan=0
+        )
 
         # Third add
-        rd.add({"peakres": 0.6, "iter_done": 60}, time=0, pol=0, chan=0)
+        add_to_imaging_dict(
+            rd, {"peakres": 0.6, "iter_done": 60}, time=0, pol=0, chan=0
+        )
 
-        entry = rd.sel(time=0, pol=0, chan=0)
+        entry = select_from_imaging_dict(rd, time=0, pol=0, chan=0)
 
         # FIELD_ACCUM should accumulate in lists
         self.assertEqual(entry["peakres"], [1.0, 0.8, 0.6])
@@ -263,15 +226,19 @@ class TestImagingDictAdd(unittest.TestCase):
 
     def test_multiple_adds_same_key_replace_single_value(self):
         """Test multiple adds to same key replace FIELD_SINGLE_VALUE values."""
-        rd = ImagingDict()
+        rd = {}
 
         # First add
-        rd.add({"max_psf_sidelobe": 0.2, "threshold": 0.01}, time=0, pol=0, chan=0)
+        add_to_imaging_dict(
+            rd, {"max_psf_sidelobe": 0.2, "threshold": 0.01}, time=0, pol=0, chan=0
+        )
 
         # Second add with different values
-        rd.add({"max_psf_sidelobe": 0.15, "threshold": 0.005}, time=0, pol=0, chan=0)
+        add_to_imaging_dict(
+            rd, {"max_psf_sidelobe": 0.15, "threshold": 0.005}, time=0, pol=0, chan=0
+        )
 
-        entry = rd.sel(time=0, pol=0, chan=0)
+        entry = select_from_imaging_dict(rd, time=0, pol=0, chan=0)
 
         # FIELD_SINGLE_VALUE should be replaced (last value wins)
         self.assertEqual(entry["max_psf_sidelobe"], 0.15)
@@ -279,15 +246,19 @@ class TestImagingDictAdd(unittest.TestCase):
 
     def test_add_partial_fields_to_existing_key(self):
         """Test adding partial fields to an existing key."""
-        rd = ImagingDict()
+        rd = {}
 
         # First add with some fields
-        rd.add({"peakres": 1.0, "iter_done": 100}, time=0, pol=0, chan=0)
+        add_to_imaging_dict(
+            rd, {"peakres": 1.0, "iter_done": 100}, time=0, pol=0, chan=0
+        )
 
         # Second add with different fields
-        rd.add({"masksum": 500, "max_psf_sidelobe": 0.2}, time=0, pol=0, chan=0)
+        add_to_imaging_dict(
+            rd, {"masksum": 500, "max_psf_sidelobe": 0.2}, time=0, pol=0, chan=0
+        )
 
-        entry = rd.sel(time=0, pol=0, chan=0)
+        entry = select_from_imaging_dict(rd, time=0, pol=0, chan=0)
 
         # First fields should still exist
         self.assertEqual(entry["peakres"], [1.0])
@@ -299,30 +270,31 @@ class TestImagingDictAdd(unittest.TestCase):
 
 
 class TestImagingDictSel(unittest.TestCase):
-    """Test ImagingDict.sel() method edge cases and filtering."""
+    """Test select_from_imaging_dict() edge cases and filtering."""
 
     def setUp(self):
-        """Create test ImagingDict with multiple entries."""
-        self.rd = ImagingDict()
-        self.rd.add({"peakres": 1.0}, time=0, pol=0, chan=0)
-        self.rd.add({"peakres": 0.9}, time=0, pol=0, chan=1)
-        self.rd.add({"peakres": 0.8}, time=0, pol=1, chan=0)
-        self.rd.add({"peakres": 0.7}, time=1, pol=0, chan=0)
+        """Create test imaging_dict with multiple entries."""
+        self.rd = {}
+        add_to_imaging_dict(self.rd, {"peakres": 1.0}, time=0, pol=0, chan=0)
+        add_to_imaging_dict(self.rd, {"peakres": 0.9}, time=0, pol=0, chan=1)
+        add_to_imaging_dict(self.rd, {"peakres": 0.8}, time=0, pol=1, chan=0)
+        add_to_imaging_dict(self.rd, {"peakres": 0.7}, time=1, pol=0, chan=0)
 
     def test_sel_no_matches_returns_none(self):
-        """Test sel() returns None when no matches found."""
-        result = self.rd.sel(time=99, pol=0, chan=0)
+        """Test select_from_imaging_dict() returns None when no matches found."""
+        result = select_from_imaging_dict(self.rd, time=99, pol=0, chan=0)
         self.assertIsNone(result)
 
-        result = self.rd.sel(time=0, pol=99, chan=0)
+        result = select_from_imaging_dict(self.rd, time=0, pol=99, chan=0)
         self.assertIsNone(result)
 
-        result = self.rd.sel(time=0, pol=0, chan=99)
+        result = select_from_imaging_dict(self.rd, time=0, pol=0, chan=99)
         self.assertIsNone(result)
 
     def test_sel_single_match_returns_dict(self):
-        """Test sel() returns single dict (not list) when one match."""
-        result = self.rd.sel(time=0, pol=0, chan=0)
+        """Test select_from_imaging_dict() returns single dict (not list) when one
+        match."""
+        result = select_from_imaging_dict(self.rd, time=0, pol=0, chan=0)
 
         # Should return a dict, not a list
         self.assertIsInstance(result, dict)
@@ -330,9 +302,9 @@ class TestImagingDictSel(unittest.TestCase):
         self.assertEqual(result["peakres"], [1.0])
 
     def test_sel_multiple_matches_returns_list(self):
-        """Test sel() returns list when multiple matches."""
+        """Test select_from_imaging_dict() returns list when multiple matches."""
         # Filter by time=0 only (should match 3 entries)
-        result = self.rd.sel(time=0)
+        result = select_from_imaging_dict(self.rd, time=0)
 
         self.assertIsInstance(result, list)
         self.assertEqual(len(result), 3)
@@ -343,58 +315,59 @@ class TestImagingDictSel(unittest.TestCase):
             self.assertIn("peakres", entry)
 
     def test_sel_all_none_returns_all(self):
-        """Test sel() with all None filters returns all entries (or empty list)."""
-        result = self.rd.sel()
+        """Test select_from_imaging_dict() with all None filters returns all entries
+        (or empty list)."""
+        result = select_from_imaging_dict(self.rd)
 
         # With all None, it should return a list of all entries
         self.assertIsInstance(result, list)
         self.assertEqual(len(result), 4)
 
     def test_sel_empty_returndict(self):
-        """Test sel() on empty ImagingDict returns None."""
-        rd_empty = ImagingDict()
-        result = rd_empty.sel(time=0, pol=0, chan=0)
+        """Test select_from_imaging_dict() on empty imaging_dict returns None."""
+        rd_empty = {}
+        result = select_from_imaging_dict(rd_empty, time=0, pol=0, chan=0)
 
         self.assertIsNone(result)
 
     def test_sel_filter_by_time_only(self):
         """Test filtering by time parameter only."""
-        result = self.rd.sel(time=0)
+        result = select_from_imaging_dict(self.rd, time=0)
 
         self.assertIsInstance(result, list)
         self.assertEqual(len(result), 3)  # 3 entries with time=0
 
     def test_sel_filter_by_pol_only(self):
         """Test filtering by pol parameter only."""
-        result = self.rd.sel(pol=0)
+        result = select_from_imaging_dict(self.rd, pol=0)
 
         self.assertIsInstance(result, list)
         self.assertEqual(len(result), 3)  # 3 entries with pol=0
 
     def test_sel_filter_by_chan_only(self):
         """Test filtering by chan parameter only."""
-        result = self.rd.sel(chan=0)
+        result = select_from_imaging_dict(self.rd, chan=0)
 
         self.assertIsInstance(result, list)
         self.assertEqual(len(result), 3)  # 3 entries with chan=0
 
     def test_sel_combined_filters(self):
         """Test filtering with multiple parameters."""
-        result = self.rd.sel(time=0, pol=0)
+        result = select_from_imaging_dict(self.rd, time=0, pol=0)
 
         self.assertIsInstance(result, list)
         self.assertEqual(len(result), 2)  # time=0, pol=0 matches 2 entries
 
     def test_sel_preserves_order(self):
-        """Test sel() preserves insertion order (OrderedDict behavior)."""
-        rd = ImagingDict()
+        """Test select_from_imaging_dict() preserves insertion order."""
+        rd = {}
 
         # Add in specific order
-        rd.add({"peakres": 1.0}, time=0, pol=0, chan=0)
-        rd.add({"peakres": 0.9}, time=0, pol=0, chan=1)
-        rd.add({"peakres": 0.8}, time=0, pol=0, chan=2)
+        add_to_imaging_dict(rd, {"peakres": 1.0}, time=0, pol=0, chan=0)
+        add_to_imaging_dict(rd, {"peakres": 0.9}, time=0, pol=0, chan=1)
+        add_to_imaging_dict(rd, {"peakres": 0.8}, time=0, pol=0, chan=2)
 
-        result = rd.sel(time=0, pol=0)
+        result = select_from_imaging_dict(rd, time=0, pol=0)
 
         # Should return in insertion order
         self.assertEqual(result[0]["peakres"], [1.0])
@@ -402,8 +375,9 @@ class TestImagingDictSel(unittest.TestCase):
         self.assertEqual(result[2]["peakres"], [0.8])
 
     def test_sel_nonexistent_values(self):
-        """Test sel() with values that don't exist in any entry."""
-        result = self.rd.sel(time=999, pol=999, chan=999)
+        """Test select_from_imaging_dict() with values that don't exist in any
+        entry."""
+        result = select_from_imaging_dict(self.rd, time=999, pol=999, chan=999)
         self.assertIsNone(result)
 
 
@@ -449,10 +423,11 @@ class TestImagingDictFieldClassification(unittest.TestCase):
 
     def test_all_field_accum_become_lists(self):
         """Test all FIELD_ACCUM fields are stored as lists."""
-        rd = ImagingDict()
+        rd = {}
 
         # Add all FIELD_ACCUM fields
-        rd.add(
+        add_to_imaging_dict(
+            rd,
             {
                 "peakres": 1.0,
                 "peakres_nomask": 1.1,
@@ -474,7 +449,7 @@ class TestImagingDictFieldClassification(unittest.TestCase):
             chan=0,
         )
 
-        entry = rd.sel(time=0, pol=0, chan=0)
+        entry = select_from_imaging_dict(rd, time=0, pol=0, chan=0)
 
         # All should be lists
         for field in FIELD_ACCUM:
@@ -484,10 +459,11 @@ class TestImagingDictFieldClassification(unittest.TestCase):
 
     def test_all_field_single_value_remain_scalars(self):
         """Test all FIELD_SINGLE_VALUE fields remain scalars."""
-        rd = ImagingDict()
+        rd = {}
 
         # Add all FIELD_SINGLE_VALUE fields
-        rd.add(
+        add_to_imaging_dict(
+            rd,
             {
                 "max_psf_sidelobe": 0.2,
                 "gain": 0.1,
@@ -500,7 +476,7 @@ class TestImagingDictFieldClassification(unittest.TestCase):
             chan=0,
         )
 
-        entry = rd.sel(time=0, pol=0, chan=0)
+        entry = select_from_imaging_dict(rd, time=0, pol=0, chan=0)
 
         # All should be scalars (not lists)
         for field in FIELD_SINGLE_VALUE:
@@ -509,7 +485,7 @@ class TestImagingDictFieldClassification(unittest.TestCase):
 
 
 class TestImagingDictKeyBehavior(unittest.TestCase):
-    """Test Key namedtuple behavior and OrderedDict properties."""
+    """Test Key namedtuple behavior and insertion order."""
 
     def test_key_namedtuple_creation(self):
         """Test Key namedtuple can be created and accessed."""
@@ -544,82 +520,98 @@ class TestImagingDictKeyBehavior(unittest.TestCase):
         self.assertEqual(test_dict[key], "value")
 
     def test_ordered_dict_preserves_insertion_order(self):
-        """Test ImagingDict preserves insertion order."""
-        rd = ImagingDict()
+        """Test imaging_dict preserves insertion order."""
+        rd = {}
 
         # Add keys in specific order
-        rd.add({"peakres": 1.0}, time=2, pol=0, chan=0)
-        rd.add({"peakres": 0.9}, time=0, pol=0, chan=0)
-        rd.add({"peakres": 0.8}, time=1, pol=0, chan=0)
+        add_to_imaging_dict(rd, {"peakres": 1.0}, time=2, pol=0, chan=0)
+        add_to_imaging_dict(rd, {"peakres": 0.9}, time=0, pol=0, chan=0)
+        add_to_imaging_dict(rd, {"peakres": 0.8}, time=1, pol=0, chan=0)
 
         # Verify order is preserved
-        keys = list(rd.data.keys())
+        keys = list(rd.keys())
         self.assertEqual(keys[0].time, 2)
         self.assertEqual(keys[1].time, 0)
         self.assertEqual(keys[2].time, 1)
 
 
 # =============================================================================
-# ImagingDict Utility Function Tests (Merge, Extraction)
+# imaging_dict Utility Function Tests (Merge, Extraction)
 # =============================================================================
 
 
 class TestMergeImagingDicts(unittest.TestCase):
-    """Test merging multiple ImagingDict objects."""
+    """Test merging multiple imaging_dict objects."""
 
     def test_invalid_strategy_rejected_before_inspecting_records(self):
-        left = ImagingDict()
-        left.add({"peakres": 1.0}, time=0, pol=0, chan=0)
-        right = ImagingDict()
-        right.add({"peakres": 0.5}, time=0, pol=0, chan=1)
+        left = {}
+        add_to_imaging_dict(left, {"peakres": 1.0}, time=0, pol=0, chan=0)
+        right = {}
+        add_to_imaging_dict(right, {"peakres": 0.5}, time=0, pol=0, chan=1)
         for records in ([], [left], [left, right]):
             with self.subTest(records=len(records)):
                 with self.assertRaisesRegex(ValueError, "Unknown merge_strategy"):
                     merge_imaging_dicts(records, merge_strategy="invalid")
-        self.assertEqual(left.sel(time=0, pol=0, chan=0)["peakres"], [1.0])
+        self.assertEqual(
+            select_from_imaging_dict(left, time=0, pol=0, chan=0)["peakres"], [1.0]
+        )
 
     def setUp(self):
-        """Create test ImagingDict objects."""
-        self.rd1 = ImagingDict()
-        self.rd1.add({"peakres": 0.5, "iter_done": 100}, time=0, pol=0, chan=0)
-        self.rd1.add({"peakres": 0.4, "iter_done": 90}, time=0, pol=0, chan=1)
+        """Create test imaging_dict objects."""
+        self.rd1 = {}
+        add_to_imaging_dict(
+            self.rd1, {"peakres": 0.5, "iter_done": 100}, time=0, pol=0, chan=0
+        )
+        add_to_imaging_dict(
+            self.rd1, {"peakres": 0.4, "iter_done": 90}, time=0, pol=0, chan=1
+        )
 
-        self.rd2 = ImagingDict()
-        self.rd2.add({"peakres": 0.3, "iter_done": 120}, time=0, pol=0, chan=2)
-        self.rd2.add({"peakres": 0.6, "iter_done": 80}, time=0, pol=0, chan=3)
+        self.rd2 = {}
+        add_to_imaging_dict(
+            self.rd2, {"peakres": 0.3, "iter_done": 120}, time=0, pol=0, chan=2
+        )
+        add_to_imaging_dict(
+            self.rd2, {"peakres": 0.6, "iter_done": 80}, time=0, pol=0, chan=3
+        )
 
-        self.rd3 = ImagingDict()
-        self.rd3.add({"peakres": 0.2, "iter_done": 110}, time=0, pol=1, chan=0)
+        self.rd3 = {}
+        add_to_imaging_dict(
+            self.rd3, {"peakres": 0.2, "iter_done": 110}, time=0, pol=1, chan=0
+        )
 
     def test_merge_non_overlapping_keys(self):
         """Test merging dicts with no overlapping keys."""
         merged = merge_imaging_dicts([self.rd1, self.rd2, self.rd3])
-        self.assertEqual(len(merged.data), 5)
+        self.assertEqual(len(merged), 5)
 
         # Check all entries present
-        self.assertIsNotNone(merged.sel(time=0, pol=0, chan=0))
-        self.assertIsNotNone(merged.sel(time=0, pol=0, chan=1))
-        self.assertIsNotNone(merged.sel(time=0, pol=0, chan=2))
-        self.assertIsNotNone(merged.sel(time=0, pol=0, chan=3))
-        self.assertIsNotNone(merged.sel(time=0, pol=1, chan=0))
+        self.assertIsNotNone(select_from_imaging_dict(merged, time=0, pol=0, chan=0))
+        self.assertIsNotNone(select_from_imaging_dict(merged, time=0, pol=0, chan=1))
+        self.assertIsNotNone(select_from_imaging_dict(merged, time=0, pol=0, chan=2))
+        self.assertIsNotNone(select_from_imaging_dict(merged, time=0, pol=0, chan=3))
+        self.assertIsNotNone(select_from_imaging_dict(merged, time=0, pol=1, chan=0))
 
     def test_merge_strategy_latest(self):
         """Test 'latest' merge strategy overwrites with last value."""
-        rd_conflict = ImagingDict()
-        rd_conflict.add({"peakres": 0.9, "iter_done": 50}, time=0, pol=0, chan=0)
+        rd_conflict = {}
+        add_to_imaging_dict(
+            rd_conflict, {"peakres": 0.9, "iter_done": 50}, time=0, pol=0, chan=0
+        )
 
         merged = merge_imaging_dicts([self.rd1, rd_conflict], merge_strategy="latest")
 
         # Should use value from rd_conflict (last in list)
         # Note: fields are stored as lists even for single values (history tracking)
-        entry = merged.sel(time=0, pol=0, chan=0)
+        entry = select_from_imaging_dict(merged, time=0, pol=0, chan=0)
         self.assertEqual(entry["peakres"], [0.9])  # Now a list
         self.assertEqual(entry["iter_done"], [50])  # Now a list
 
     def test_merge_strategy_error_raises_on_conflict(self):
         """Test 'error' merge strategy raises on overlapping keys."""
-        rd_conflict = ImagingDict()
-        rd_conflict.add({"peakres": 0.9, "iter_done": 50}, time=0, pol=0, chan=0)
+        rd_conflict = {}
+        add_to_imaging_dict(
+            rd_conflict, {"peakres": 0.9, "iter_done": 50}, time=0, pol=0, chan=0
+        )
 
         with self.assertRaises(ValueError) as context:
             merge_imaging_dicts([self.rd1, rd_conflict], merge_strategy="error")
@@ -628,12 +620,12 @@ class TestMergeImagingDicts(unittest.TestCase):
 
     def test_merge_strategy_update(self):
         """Test 'update' merge strategy merges dict values."""
-        rd_partial = ImagingDict()
-        rd_partial.add({"new_field": 123}, time=0, pol=0, chan=0)
+        rd_partial = {}
+        add_to_imaging_dict(rd_partial, {"new_field": 123}, time=0, pol=0, chan=0)
 
         merged = merge_imaging_dicts([self.rd1, rd_partial], merge_strategy="update")
 
-        entry = merged.sel(time=0, pol=0, chan=0)
+        entry = select_from_imaging_dict(merged, time=0, pol=0, chan=0)
         # Should have both original and new fields
         # History-tracked fields (FIELD_ACCUM) are stored as lists
         self.assertEqual(entry["peakres"], [0.5])  # Now a list
@@ -644,29 +636,31 @@ class TestMergeImagingDicts(unittest.TestCase):
     def test_merge_strategy_update_concatenates_history(self):
         """Test 'update' merge strategy concatenates FIELD_ACCUM history lists."""
         # Create a second dict with same key but new values
-        rd_second_cycle = ImagingDict()
-        rd_second_cycle.add({"peakres": 0.3, "iter_done": 50}, time=0, pol=0, chan=0)
+        rd_second_cycle = {}
+        add_to_imaging_dict(
+            rd_second_cycle, {"peakres": 0.3, "iter_done": 50}, time=0, pol=0, chan=0
+        )
 
         # Merge with update strategy
         merged = merge_imaging_dicts(
             [self.rd1, rd_second_cycle], merge_strategy="update"
         )
 
-        entry = merged.sel(time=0, pol=0, chan=0)
+        entry = select_from_imaging_dict(merged, time=0, pol=0, chan=0)
         # FIELD_ACCUM fields should be concatenated
         self.assertEqual(entry["peakres"], [0.5, 0.3])  # Concatenated history
         self.assertEqual(entry["iter_done"], [100, 50])  # Concatenated history
 
     def test_merge_empty_list(self):
-        """Test merging empty list returns empty ImagingDict."""
+        """Test merging empty list returns empty imaging_dict."""
         merged = merge_imaging_dicts([])
-        self.assertEqual(len(merged.data), 0)
+        self.assertEqual(len(merged), 0)
 
     def test_merge_invalid_strategy(self):
         """Test invalid merge strategy raises error."""
         # Create conflicting dicts to trigger the merge strategy check
-        rd_conflict = ImagingDict()
-        rd_conflict.add({"peakres": 0.9}, time=0, pol=0, chan=0)
+        rd_conflict = {}
+        add_to_imaging_dict(rd_conflict, {"peakres": 0.9}, time=0, pol=0, chan=0)
 
         with self.assertRaises(ValueError) as context:
             merge_imaging_dicts([self.rd1, rd_conflict], merge_strategy="invalid")
@@ -675,14 +669,15 @@ class TestMergeImagingDicts(unittest.TestCase):
 
 
 class TestImagingDictUtilities(unittest.TestCase):
-    """Test ImagingDict extraction utility functions."""
+    """Test imaging_dict extraction utility functions."""
 
     def setUp(self):
-        """Create test ImagingDict with realistic deconvolution data."""
-        self.rd = ImagingDict()
+        """Create test imaging_dict with realistic deconvolution data."""
+        self.rd = {}
 
         # Add entries for multiple planes
-        self.rd.add(
+        add_to_imaging_dict(
+            self.rd,
             {
                 "peakres": 1.0,
                 "peakres_nomask": 1.2,
@@ -695,7 +690,8 @@ class TestImagingDictUtilities(unittest.TestCase):
             chan=0,
         )
 
-        self.rd.add(
+        add_to_imaging_dict(
+            self.rd,
             {
                 "peakres": 0.8,
                 "peakres_nomask": 0.9,
@@ -708,7 +704,8 @@ class TestImagingDictUtilities(unittest.TestCase):
             chan=1,
         )
 
-        self.rd.add(
+        add_to_imaging_dict(
+            self.rd,
             {
                 "peakres": 0.5,
                 "peakres_nomask": 0.6,
@@ -790,9 +787,11 @@ class TestImagingDictUtilities(unittest.TestCase):
         self.assertEqual(max_sidelobe, 0.15)
 
     def test_get_max_psf_sidelobe_default(self):
-        """Test default PSF sidelobe when not in ImagingDict."""
-        rd_empty = ImagingDict()
-        rd_empty.add({"peakres": 1.0, "iter_done": 50}, time=0, pol=0, chan=0)
+        """Test default PSF sidelobe when not in imaging_dict."""
+        rd_empty = {}
+        add_to_imaging_dict(
+            rd_empty, {"peakres": 1.0, "iter_done": 50}, time=0, pol=0, chan=0
+        )
 
         max_sidelobe = get_max_psf_sidelobe_from_imaging_dict(rd_empty)
 
@@ -800,52 +799,52 @@ class TestImagingDictUtilities(unittest.TestCase):
         self.assertEqual(max_sidelobe, 0.2)
 
     def test_get_peak_residual_empty_returndict(self):
-        """Test getting peak residual from empty ImagingDict."""
-        rd_empty = ImagingDict()
+        """Test getting peak residual from empty imaging_dict."""
+        rd_empty = {}
         peak = get_peak_residual_from_imaging_dict(rd_empty)
 
         self.assertEqual(peak, 0.0)
 
     def test_get_masksum_empty_returndict(self):
-        """Test getting masksum from empty ImagingDict."""
-        rd_empty = ImagingDict()
+        """Test getting masksum from empty imaging_dict."""
+        rd_empty = {}
         masksum = get_masksum_from_imaging_dict(rd_empty)
 
         self.assertEqual(masksum, 0.0)
 
 
 class TestCycleControllerInitialization(unittest.TestCase):
-    """Test CycleController initialization and default values."""
+    """Test cycle control state initialization and default values."""
 
     def test_default_initialization(self):
         """Test controller with all default parameters."""
-        controller = CycleController()
+        controller = make_cycle_control_state()
 
-        # max_iter is a per-plane array allocated lazily; _max_iter holds the
-        # scalar per-plane budget until the first ImagingDict is seen.
-        self.assertIsNone(controller.max_iter_remaining)
-        self.assertEqual(controller._max_iter, 1000)
-        self.assertEqual(controller.max_cycles, -1)
-        self.assertEqual(controller.threshold, 0.0)
-        self.assertEqual(controller.gain, 0.1)
-        self.assertEqual(controller.psf_sidelobe_factor, 1.0)
-        self.assertEqual(controller.min_psf_fraction, 0.05)
-        self.assertEqual(controller.max_psf_fraction, 0.8)
-        self.assertEqual(controller.max_iter_per_cycle, -1)
-        self.assertEqual(controller.threshold_sigma, 0.0)
+        # max_iter_remaining is a per-plane array allocated lazily; max_iter
+        # holds the scalar per-plane budget.
+        self.assertIsNone(controller["max_iter_remaining"])
+        self.assertEqual(controller["max_iter"], 1000)
+        self.assertEqual(controller["max_cycles"], -1)
+        self.assertEqual(controller["threshold"], 0.0)
+        self.assertEqual(controller["gain"], 0.1)
+        self.assertEqual(controller["psf_sidelobe_factor"], 1.0)
+        self.assertEqual(controller["min_psf_fraction"], 0.05)
+        self.assertEqual(controller["max_psf_fraction"], 0.8)
+        self.assertEqual(controller["max_iter_per_cycle"], -1)
+        self.assertEqual(controller["threshold_sigma"], 0.0)
 
         # Tracking state
-        self.assertEqual(controller.cycles_done, 0)
-        self.assertEqual(controller.total_iter_done, 0)
+        self.assertEqual(controller["cycles_done"], 0)
+        self.assertEqual(controller["total_iter_done"], 0)
 
         # Convergence state
-        self.assertEqual(controller.stopcode.imaging, IMAGING_CONTINUE)
-        self.assertEqual(controller.stopcode.model_update, MODEL_UPDATE_CONTINUE)
-        self.assertIn("Continue", controller.stopdescription)
+        self.assertEqual(controller["stopcode"].imaging, IMAGING_CONTINUE)
+        self.assertEqual(controller["stopcode"].model_update, MODEL_UPDATE_CONTINUE)
+        self.assertIn("Continue", controller["stopdescription"])
 
     def test_custom_initialization(self):
         """Test controller with custom parameters."""
-        controller = CycleController(
+        controller = make_cycle_control_state(
             max_iter=500,
             max_cycles=10,
             threshold=0.01,
@@ -857,24 +856,24 @@ class TestCycleControllerInitialization(unittest.TestCase):
             threshold_sigma=5.0,
         )
 
-        self.assertEqual(controller._max_iter, 500)
-        self.assertIsNone(controller.max_iter_remaining)
-        self.assertEqual(controller.max_cycles, 10)
-        self.assertEqual(controller.threshold, 0.01)
-        self.assertEqual(controller.gain, 0.2)
-        self.assertEqual(controller.psf_sidelobe_factor, 1.5)
-        self.assertEqual(controller.min_psf_fraction, 0.1)
-        self.assertEqual(controller.max_psf_fraction, 0.9)
-        self.assertEqual(controller.max_iter_per_cycle, 100)
-        self.assertEqual(controller.threshold_sigma, 5.0)
+        self.assertEqual(controller["max_iter"], 500)
+        self.assertIsNone(controller["max_iter_remaining"])
+        self.assertEqual(controller["max_cycles"], 10)
+        self.assertEqual(controller["threshold"], 0.01)
+        self.assertEqual(controller["gain"], 0.2)
+        self.assertEqual(controller["psf_sidelobe_factor"], 1.5)
+        self.assertEqual(controller["min_psf_fraction"], 0.1)
+        self.assertEqual(controller["max_psf_fraction"], 0.9)
+        self.assertEqual(controller["max_iter_per_cycle"], 100)
+        self.assertEqual(controller["threshold_sigma"], 5.0)
 
 
 class TestCalculatePerCycleLimits(unittest.TestCase):
     """Test adaptive threshold_per_cycle calculation."""
 
     def setUp(self):
-        """Create controller and test ImagingDict."""
-        self.controller = CycleController(
+        """Create controller and test imaging_dict."""
+        self.controller = make_cycle_control_state(
             max_iter=1000,
             psf_sidelobe_factor=1.5,
             min_psf_fraction=0.05,
@@ -883,16 +882,17 @@ class TestCalculatePerCycleLimits(unittest.TestCase):
 
     def test_basic_threshold_per_cycle_calculation(self):
         """Test basic adaptive threshold calculation."""
-        rd = ImagingDict()
-        rd.add(
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {"peakres": 1.0, "max_psf_sidelobe": 0.2},
             time=0,
             pol=0,
             chan=0,
         )
 
-        max_iter_per_cycle, threshold_per_cycle = (
-            self.controller.calculate_per_cycle_limits(rd)
+        max_iter_per_cycle, threshold_per_cycle = calculate_per_cycle_limits(
+            self.controller, rd
         )
 
         # Expected: psf_fraction = 1.5 × 0.2 = 0.3
@@ -902,17 +902,18 @@ class TestCalculatePerCycleLimits(unittest.TestCase):
 
     def test_threshold_per_cycle_clamping_min(self):
         """Test threshold_per_cycle clamping to min_psf_fraction."""
-        rd = ImagingDict()
+        rd = {}
         # Very small PSF sidelobe
-        rd.add(
+        add_to_imaging_dict(
+            rd,
             {"peakres": 1.0, "max_psf_sidelobe": 0.01},
             time=0,
             pol=0,
             chan=0,
         )
 
-        max_iter_per_cycle, threshold_per_cycle = (
-            self.controller.calculate_per_cycle_limits(rd)
+        max_iter_per_cycle, threshold_per_cycle = calculate_per_cycle_limits(
+            self.controller, rd
         )
 
         # psf_fraction = 1.5 × 0.01 = 0.015
@@ -922,17 +923,18 @@ class TestCalculatePerCycleLimits(unittest.TestCase):
 
     def test_threshold_per_cycle_clamping_max(self):
         """Test threshold_per_cycle clamping to max_psf_fraction."""
-        rd = ImagingDict()
+        rd = {}
         # Very large PSF sidelobe
-        rd.add(
+        add_to_imaging_dict(
+            rd,
             {"peakres": 1.0, "max_psf_sidelobe": 0.9},
             time=0,
             pol=0,
             chan=0,
         )
 
-        max_iter_per_cycle, threshold_per_cycle = (
-            self.controller.calculate_per_cycle_limits(rd)
+        max_iter_per_cycle, threshold_per_cycle = calculate_per_cycle_limits(
+            self.controller, rd
         )
 
         # psf_fraction = 1.5 × 0.9 = 1.35
@@ -942,22 +944,23 @@ class TestCalculatePerCycleLimits(unittest.TestCase):
 
     def test_threshold_per_cycle_respects_global_threshold(self):
         """Test threshold_per_cycle respects global threshold as minimum."""
-        controller = CycleController(
+        controller = make_cycle_control_state(
             max_iter=1000,
             threshold=0.5,  # High global threshold
             psf_sidelobe_factor=1.0,
         )
 
-        rd = ImagingDict()
-        rd.add(
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {"peakres": 1.0, "max_psf_sidelobe": 0.2},
             time=0,
             pol=0,
             chan=0,
         )
 
-        max_iter_per_cycle, threshold_per_cycle = controller.calculate_per_cycle_limits(
-            rd
+        max_iter_per_cycle, threshold_per_cycle = calculate_per_cycle_limits(
+            controller, rd
         )
 
         # psf_fraction = 1.0 × 0.2 = 0.2
@@ -967,21 +970,22 @@ class TestCalculatePerCycleLimits(unittest.TestCase):
 
     def test_max_iter_per_cycle_cap_applied(self):
         """Test max_iter_per_cycle cap is applied."""
-        controller = CycleController(
+        controller = make_cycle_control_state(
             max_iter=1000,
             max_iter_per_cycle=100,  # Cap at 100 per cycle
         )
 
-        rd = ImagingDict()
-        rd.add(
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {"peakres": 1.0, "max_psf_sidelobe": 0.2},
             time=0,
             pol=0,
             chan=0,
         )
 
-        max_iter_per_cycle_updated, threshold_per_cycle = (
-            controller.calculate_per_cycle_limits(rd)
+        max_iter_per_cycle_updated, threshold_per_cycle = calculate_per_cycle_limits(
+            controller, rd
         )
 
         # Should use min(100, 1000) = 100
@@ -989,38 +993,40 @@ class TestCalculatePerCycleLimits(unittest.TestCase):
 
     def test_max_iter_per_cycle_respects_remaining_iterations(self):
         """Test max_iter_per_cycle respects remaining max_iter."""
-        controller = CycleController(
+        controller = make_cycle_control_state(
             max_iter=50,  # Only 50 iterations left
             max_iter_per_cycle=100,
         )
 
-        rd = ImagingDict()
-        rd.add(
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {"peakres": 1.0, "max_psf_sidelobe": 0.2},
             time=0,
             pol=0,
             chan=0,
         )
 
-        max_iter_per_cycle_updated, threshold_per_cycle = (
-            controller.calculate_per_cycle_limits(rd)
+        max_iter_per_cycle_updated, threshold_per_cycle = calculate_per_cycle_limits(
+            controller, rd
         )
 
         # Should use min(100, 50) = 50
         self.assertEqual(max_iter_per_cycle_updated, 50)
 
     def test_default_psf_sidelobe_used(self):
-        """Test default PSF sidelobe when not in ImagingDict."""
-        rd = ImagingDict()
-        rd.add(
+        """Test default PSF sidelobe when not in imaging_dict."""
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {"peakres": 1.0},  # No max_psf_sidelobe
             time=0,
             pol=0,
             chan=0,
         )
 
-        max_iter_per_cycle, threshold_per_cycle = (
-            self.controller.calculate_per_cycle_limits(rd)
+        max_iter_per_cycle, threshold_per_cycle = calculate_per_cycle_limits(
+            self.controller, rd
         )
 
         # Should use default 0.2
@@ -1030,7 +1036,7 @@ class TestCalculatePerCycleLimits(unittest.TestCase):
 
 
 class TestBuildResidualImagingDict(unittest.TestCase):
-    """Test seeding of the first-model-update ImagingDict from the residual image."""
+    """Test seeding of the first-model-update imaging_dict from the residual image."""
 
     def _make_img_xds(self, residual_peak, real_sidelobe):
         residual = np.zeros((1, 1, 1, 4, 4))
@@ -1063,10 +1069,10 @@ class TestBuildResidualImagingDict(unittest.TestCase):
         key = Key(time=0, chan=0, pol=0)
         skipped = build_residual_imaging_dict(
             img_xds, "residual", {"gain": 0.1, "max_cycles": 0}
-        ).data[key]
+        )[key]
         measured = build_residual_imaging_dict(
             img_xds, "residual", {"gain": 0.1, "max_cycles": 1}
-        ).data[key]
+        )[key]
         for field in ("peakres", "peakres_nomask", "masksum", "max_psf_sidelobe"):
             self.assertEqual(skipped[field], measured[field])
         for field in ("entropy", "residual_snr", *RESIDUAL_STATISTICS):
@@ -1079,7 +1085,7 @@ class TestBuildResidualImagingDict(unittest.TestCase):
         rd = build_residual_imaging_dict(
             img_xds, "residual", {"gain": 0.1, "max_psf_fraction": 0.9}
         )
-        entry = rd.data[Key(time=0, chan=0, pol=0)]
+        entry = rd[Key(time=0, chan=0, pol=0)]
         self.assertEqual(entry["max_psf_sidelobe"], real_sidelobe)
 
     def test_threshold_per_cycle_uses_measured_sidelobe_not_max_psf_fraction(self):
@@ -1097,7 +1103,7 @@ class TestBuildResidualImagingDict(unittest.TestCase):
                 "max_psf_fraction": max_psf_fraction,
             },
         )
-        controller = CycleController(
+        controller = make_cycle_control_state(
             max_iter=100,
             psf_sidelobe_factor=psf_sidelobe_factor,
             min_psf_fraction=0.05,
@@ -1105,7 +1111,7 @@ class TestBuildResidualImagingDict(unittest.TestCase):
             threshold=0.0,
         )
 
-        _, threshold_per_cycle = controller.calculate_per_cycle_limits(rd)
+        _, threshold_per_cycle = calculate_per_cycle_limits(controller, rd)
 
         self.assertAlmostEqual(
             threshold_per_cycle, real_sidelobe * psf_sidelobe_factor * residual_peak
@@ -1118,20 +1124,21 @@ class TestCheckConvergence(unittest.TestCase):
 
     def test_continue_when_not_converged(self):
         """Test continuing when no stopping criteria met."""
-        controller = CycleController(
+        controller = make_cycle_control_state(
             max_iter=1000,
             threshold=0.01,
         )
 
-        rd = ImagingDict()
-        rd.add(
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {"peakres": 0.5, "masksum": 100},
             time=0,
             pol=0,
             chan=0,
         )
 
-        stopcode, desc = controller.check_convergence(rd)
+        stopcode, desc = check_convergence(controller, rd)
 
         self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
         self.assertEqual(stopcode.model_update, MODEL_UPDATE_CONTINUE)
@@ -1139,9 +1146,10 @@ class TestCheckConvergence(unittest.TestCase):
 
     def test_preserves_model_update_stop_code(self):
         """A post-model-update check keeps the deconvolver's reason per plane."""
-        controller = CycleController(max_iter=1000, threshold=0.01)
-        rd = ImagingDict()
-        rd.add(
+        controller = make_cycle_control_state(max_iter=1000, threshold=0.01)
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {
                 "peakres": 0.5,
                 "masksum": 100,
@@ -1155,18 +1163,18 @@ class TestCheckConvergence(unittest.TestCase):
             chan=0,
         )
 
-        stopcode, desc = controller.check_convergence(rd, model_update_ran=True)
+        stopcode, desc = check_convergence(controller, rd, model_update_ran=True)
 
         self.assertEqual(
             stopcode,
             StopCode(imaging=IMAGING_CONTINUE, model_update=MODEL_UPDATE_CONTINUE),
         )
         self.assertEqual(
-            controller.stop_code_model_update[0, 0, 0],
+            controller["stop_code_model_update"][0, 0, 0],
             MODEL_UPDATE_MAX_ITER_PER_CYCLE,
         )
         self.assertEqual(
-            rd.sel(time=0, pol=0, chan=0)["stop_code"],
+            select_from_imaging_dict(rd, time=0, pol=0, chan=0)["stop_code"],
             StopCode(
                 imaging=IMAGING_CONTINUE,
                 model_update=MODEL_UPDATE_MAX_ITER_PER_CYCLE,
@@ -1176,30 +1184,32 @@ class TestCheckConvergence(unittest.TestCase):
 
     def test_scalar_stop_code_is_not_treated_as_a_model_update_code(self):
         """Only the typed StopCode contract can report a model-update reason."""
-        controller = CycleController(max_iter=1000, threshold=0.01)
-        rd = ImagingDict()
-        rd.add(
+        controller = make_cycle_control_state(max_iter=1000, threshold=0.01)
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {"peakres": 0.5, "masksum": 100, "iter_done": 1, "stop_code": 4},
             time=0,
             pol=0,
             chan=0,
         )
 
-        controller.check_convergence(rd, model_update_ran=True)
+        check_convergence(controller, rd, model_update_ran=True)
 
         self.assertEqual(
-            controller.stop_code_model_update[0, 0, 0], MODEL_UPDATE_CONTINUE
+            controller["stop_code_model_update"][0, 0, 0], MODEL_UPDATE_CONTINUE
         )
         self.assertEqual(
-            rd.sel(time=0, pol=0, chan=0)["stop_code"],
+            select_from_imaging_dict(rd, time=0, pol=0, chan=0)["stop_code"],
             StopCode(IMAGING_CONTINUE, MODEL_UPDATE_CONTINUE),
         )
 
     def test_fresh_residual_check_keeps_model_update_stop_code(self):
         """A later residual-only check keeps the code until the next model update."""
-        controller = CycleController(max_iter=1000, threshold=0.01)
-        rd = ImagingDict()
-        rd.add(
+        controller = make_cycle_control_state(max_iter=1000, threshold=0.01)
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {
                 "peakres": 0.5,
                 "masksum": 100,
@@ -1212,28 +1222,29 @@ class TestCheckConvergence(unittest.TestCase):
             pol=0,
             chan=0,
         )
-        controller.check_convergence(rd, model_update_ran=True)
+        check_convergence(controller, rd, model_update_ran=True)
 
-        stopcode, desc = controller.check_convergence(rd, model_update_ran=False)
+        stopcode, desc = check_convergence(controller, rd, model_update_ran=False)
 
         self.assertEqual(
             stopcode,
             StopCode(imaging=IMAGING_CONTINUE, model_update=MODEL_UPDATE_CONTINUE),
         )
         self.assertEqual(
-            controller.stop_code_model_update[0, 0, 0],
+            controller["stop_code_model_update"][0, 0, 0],
             MODEL_UPDATE_THRESHOLD_PER_CYCLE,
         )
         self.assertEqual(desc, "Continue imaging cycles")
 
     def test_aggregates_mixed_model_update_stop_codes(self):
         """Mixed plane results remain exact per plane and aggregate safely."""
-        controller = CycleController(max_iter=1000, threshold=0.01)
-        rd = ImagingDict()
+        controller = make_cycle_control_state(max_iter=1000, threshold=0.01)
+        rd = {}
         for pol, model_update in enumerate(
             (MODEL_UPDATE_THRESHOLD_PER_CYCLE, MODEL_UPDATE_DIVERGENCE)
         ):
-            rd.add(
+            add_to_imaging_dict(
+                rd,
                 {
                     "peakres": 0.5,
                     "masksum": 100,
@@ -1247,27 +1258,28 @@ class TestCheckConvergence(unittest.TestCase):
                 chan=0,
             )
 
-        stopcode, desc = controller.check_convergence(rd, model_update_ran=True)
+        stopcode, desc = check_convergence(controller, rd, model_update_ran=True)
 
         self.assertEqual(
             stopcode,
             StopCode(imaging=IMAGING_CONTINUE, model_update=MODEL_UPDATE_CONTINUE),
         )
         np.testing.assert_array_equal(
-            controller.stop_code_model_update[0, 0],
+            controller["stop_code_model_update"][0, 0],
             [MODEL_UPDATE_THRESHOLD_PER_CYCLE, MODEL_UPDATE_DIVERGENCE],
         )
         self.assertEqual(desc, "Continue imaging cycles")
         self.assertEqual(
-            [entry["stop_code"].model_update for entry in rd.data.values()],
+            [entry["stop_code"].model_update for entry in rd.values()],
             [MODEL_UPDATE_THRESHOLD_PER_CYCLE, MODEL_UPDATE_DIVERGENCE],
         )
 
     def test_rejects_unknown_model_update_stop_code(self):
         """Do not silently propagate an undocumented native return code."""
-        controller = CycleController(max_iter=1000)
-        rd = ImagingDict()
-        rd.add(
+        controller = make_cycle_control_state(max_iter=1000)
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {
                 "peakres": 0.5,
                 "masksum": 100,
@@ -1279,194 +1291,203 @@ class TestCheckConvergence(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "Unknown model-update stop code 99"):
-            controller.check_convergence(rd, model_update_ran=True)
+            check_convergence(controller, rd, model_update_ran=True)
 
     def test_stop_on_zero_mask(self):
         """Test stopping when mask is zero (priority 1)."""
-        controller = CycleController(max_iter=1000)
+        controller = make_cycle_control_state(max_iter=1000)
 
-        rd = ImagingDict()
-        rd.add(
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {"peakres": 0.5, "masksum": 0},  # Zero mask!
             time=0,
             pol=0,
             chan=0,
         )
 
-        stopcode, desc = controller.check_convergence(rd)
+        stopcode, desc = check_convergence(controller, rd)
 
         self.assertEqual(stopcode.imaging, IMAGING_ZERO_MASK)
         self.assertIn("Zero mask", desc)
 
     def test_stop_on_iteration_limit(self):
         """Test stopping when max_iter exhausted (priority 2)."""
-        controller = CycleController(max_iter=0)  # No iterations left
+        controller = make_cycle_control_state(max_iter=0)  # No iterations left
 
-        rd = ImagingDict()
-        rd.add(
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {"peakres": 0.5, "masksum": 100},
             time=0,
             pol=0,
             chan=0,
         )
 
-        stopcode, desc = controller.check_convergence(rd)
+        stopcode, desc = check_convergence(controller, rd)
 
         self.assertEqual(stopcode.imaging, IMAGING_MAX_ITER)
         self.assertIn("max_iter", desc)
 
     def test_stop_on_threshold(self):
         """Test stopping when threshold reached (priority 3)."""
-        controller = CycleController(
+        controller = make_cycle_control_state(
             max_iter=1000,
             threshold=0.5,  # Set threshold
         )
 
-        rd = ImagingDict()
-        rd.add(
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {"peakres": 0.3, "masksum": 100},  # Below threshold
             time=0,
             pol=0,
             chan=0,
         )
 
-        stopcode, desc = controller.check_convergence(rd)
+        stopcode, desc = check_convergence(controller, rd)
 
         self.assertEqual(stopcode.imaging, IMAGING_THRESHOLD)
         self.assertIn("threshold", desc)
 
     def test_threshold_exactly_at_limit(self):
         """Test stopping when peak residual exactly equals threshold."""
-        controller = CycleController(
+        controller = make_cycle_control_state(
             max_iter=1000,
             threshold=0.5,
         )
 
-        rd = ImagingDict()
-        rd.add(
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {"peakres": 0.5, "masksum": 100},  # Exactly at threshold
             time=0,
             pol=0,
             chan=0,
         )
 
-        stopcode, desc = controller.check_convergence(rd)
+        stopcode, desc = check_convergence(controller, rd)
 
         self.assertEqual(stopcode.imaging, IMAGING_THRESHOLD)
 
     def test_stop_on_max_cycles(self):
         """Test stopping when max_cycles exhausted (priority 4)."""
-        controller = CycleController(
+        controller = make_cycle_control_state(
             max_iter=1000,
             max_cycles=0,  # No imaging cycles left
             threshold=0.0,
         )
 
-        rd = ImagingDict()
-        rd.add(
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {"peakres": 0.5, "masksum": 100},
             time=0,
             pol=0,
             chan=0,
         )
 
-        stopcode, desc = controller.check_convergence(rd)
+        stopcode, desc = check_convergence(controller, rd)
 
         self.assertEqual(stopcode.imaging, IMAGING_MAX_CYCLES)
         self.assertIn("max_cycles", desc)
 
     def test_priority_zero_mask_over_others(self):
         """Test zero mask has highest priority."""
-        controller = CycleController(
+        controller = make_cycle_control_state(
             max_iter=0,  # Also at iteration limit
             max_cycles=0,  # Also at imaging cycle limit
             threshold=1.0,  # Also below threshold
         )
 
-        rd = ImagingDict()
-        rd.add(
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {"peakres": 0.5, "masksum": 0},  # Zero mask
             time=0,
             pol=0,
             chan=0,
         )
 
-        stopcode, desc = controller.check_convergence(rd)
+        stopcode, desc = check_convergence(controller, rd)
 
         # Zero mask should win
         self.assertEqual(stopcode.imaging, IMAGING_ZERO_MASK)
 
     def test_priority_iter_limit_over_threshold(self):
         """Test iteration limit has priority over threshold."""
-        controller = CycleController(
+        controller = make_cycle_control_state(
             max_iter=0,  # At iteration limit
             threshold=1.0,  # Also below threshold
         )
 
-        rd = ImagingDict()
-        rd.add(
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {"peakres": 0.5, "masksum": 100},
             time=0,
             pol=0,
             chan=0,
         )
 
-        stopcode, desc = controller.check_convergence(rd)
+        stopcode, desc = check_convergence(controller, rd)
 
         # Iteration limit should win
         self.assertEqual(stopcode.imaging, IMAGING_MAX_ITER)
 
     def test_max_cycles_unlimited_never_stops(self):
         """Test max_cycles=-1 (unlimited) never triggers cycle limit."""
-        controller = CycleController(
+        controller = make_cycle_control_state(
             max_iter=1000,
             max_cycles=-1,  # Unlimited
         )
 
-        rd = ImagingDict()
-        rd.add(
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {"peakres": 0.5, "masksum": 100},
             time=0,
             pol=0,
             chan=0,
         )
 
-        stopcode, desc = controller.check_convergence(rd)
+        stopcode, desc = check_convergence(controller, rd)
 
         self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
 
     def test_threshold_zero_never_stops(self):
         """Test threshold=0 (disabled) never triggers threshold stop."""
-        controller = CycleController(
+        controller = make_cycle_control_state(
             max_iter=1000,
             threshold=0.0,  # Disabled
         )
 
-        rd = ImagingDict()
-        rd.add(
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {"peakres": 0.001, "masksum": 100},  # Very low residual
             time=0,
             pol=0,
             chan=0,
         )
 
-        stopcode, desc = controller.check_convergence(rd)
+        stopcode, desc = check_convergence(controller, rd)
 
         # Should not stop on threshold
         self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
 
     def test_stopcode_state_updated(self):
         """Test controller's internal stopcode is updated."""
-        controller = CycleController(max_iter=0)
+        controller = make_cycle_control_state(max_iter=0)
 
-        rd = ImagingDict()
-        rd.add({"peakres": 0.5, "masksum": 100}, time=0, pol=0, chan=0)
+        rd = {}
+        add_to_imaging_dict(rd, {"peakres": 0.5, "masksum": 100}, time=0, pol=0, chan=0)
 
-        stopcode, desc = controller.check_convergence(rd)
+        stopcode, desc = check_convergence(controller, rd)
 
         # Internal state should match returned values
-        self.assertEqual(controller.stopcode.imaging, stopcode.imaging)
-        self.assertEqual(controller.stopdescription, desc)
+        self.assertEqual(controller["stopcode"].imaging, stopcode.imaging)
+        self.assertEqual(controller["stopdescription"], desc)
 
 
 class TestUpdateCounts(unittest.TestCase):
@@ -1474,130 +1495,130 @@ class TestUpdateCounts(unittest.TestCase):
 
     def test_basic_count_update(self):
         """Test basic count decrementing."""
-        controller = CycleController(max_iter=1000, max_cycles=5)
+        controller = make_cycle_control_state(max_iter=1000, max_cycles=5)
 
-        rd = ImagingDict()
-        rd.add({"iter_done": 100}, time=0, pol=0, chan=0)
+        rd = {}
+        add_to_imaging_dict(rd, {"iter_done": 100}, time=0, pol=0, chan=0)
 
-        controller.update_counts(rd)
+        update_counts(controller, rd)
 
         # max_iter: 1000 - 100 = 900 (per-plane, plane (0,0,0))
         # max_cycles: 5 - 1 = 4
         # cycles_done: 0 + 1 = 1
         # total_iter_done: 0 + 100 = 100
-        self.assertEqual(controller.max_iter_remaining[0, 0, 0], 900)
-        self.assertEqual(controller.max_cycles, 4)
-        self.assertEqual(controller.cycles_done, 1)
-        self.assertEqual(controller.total_iter_done, 100)
+        self.assertEqual(controller["max_iter_remaining"][0, 0, 0], 900)
+        self.assertEqual(controller["max_cycles"], 4)
+        self.assertEqual(controller["cycles_done"], 1)
+        self.assertEqual(controller["total_iter_done"], 100)
 
     def test_multiple_updates(self):
         """Test multiple count updates accumulate correctly."""
-        controller = CycleController(max_iter=1000, max_cycles=5)
+        controller = make_cycle_control_state(max_iter=1000, max_cycles=5)
 
-        rd1 = ImagingDict()
-        rd1.add({"iter_done": 100}, time=0, pol=0, chan=0)
+        rd1 = {}
+        add_to_imaging_dict(rd1, {"iter_done": 100}, time=0, pol=0, chan=0)
 
-        rd2 = ImagingDict()
-        rd2.add({"iter_done": 150}, time=0, pol=0, chan=0)
+        rd2 = {}
+        add_to_imaging_dict(rd2, {"iter_done": 150}, time=0, pol=0, chan=0)
 
-        controller.update_counts(rd1)
-        controller.update_counts(rd2)
+        update_counts(controller, rd1)
+        update_counts(controller, rd2)
 
         self.assertEqual(
-            controller.max_iter_remaining[0, 0, 0], 750
+            controller["max_iter_remaining"][0, 0, 0], 750
         )  # 1000 - 100 - 150
-        self.assertEqual(controller.max_cycles, 3)  # 5 - 1 - 1
-        self.assertEqual(controller.cycles_done, 2)
-        self.assertEqual(controller.total_iter_done, 250)  # 100 + 150
+        self.assertEqual(controller["max_cycles"], 3)  # 5 - 1 - 1
+        self.assertEqual(controller["cycles_done"], 2)
+        self.assertEqual(controller["total_iter_done"], 250)  # 100 + 150
 
     def test_max_iter_floor_at_zero(self):
         """Test max_iter doesn't go negative."""
-        controller = CycleController(max_iter=50)
+        controller = make_cycle_control_state(max_iter=50)
 
-        rd = ImagingDict()
-        rd.add({"iter_done": 100}, time=0, pol=0, chan=0)
+        rd = {}
+        add_to_imaging_dict(rd, {"iter_done": 100}, time=0, pol=0, chan=0)
 
-        controller.update_counts(rd)
+        update_counts(controller, rd)
 
         # Should floor at 0, not go negative
-        self.assertEqual(controller.max_iter_remaining[0, 0, 0], 0)
+        self.assertEqual(controller["max_iter_remaining"][0, 0, 0], 0)
 
     def test_max_cycles_floor_at_zero(self):
         """Test max_cycles doesn't go negative."""
-        controller = CycleController(max_cycles=1)
+        controller = make_cycle_control_state(max_cycles=1)
 
-        rd1 = ImagingDict()
-        rd1.add({"iter_done": 50}, time=0, pol=0, chan=0)
+        rd1 = {}
+        add_to_imaging_dict(rd1, {"iter_done": 50}, time=0, pol=0, chan=0)
 
-        rd2 = ImagingDict()
-        rd2.add({"iter_done": 50}, time=0, pol=0, chan=0)
+        rd2 = {}
+        add_to_imaging_dict(rd2, {"iter_done": 50}, time=0, pol=0, chan=0)
 
-        controller.update_counts(rd1)
-        controller.update_counts(rd2)
+        update_counts(controller, rd1)
+        update_counts(controller, rd2)
 
         # Should floor at 0, not go negative
-        self.assertEqual(controller.max_cycles, 0)
+        self.assertEqual(controller["max_cycles"], 0)
 
     def test_max_cycles_unlimited_never_decrements(self):
         """Test max_cycles=-1 (unlimited) never decrements."""
-        controller = CycleController(max_iter=1000, max_cycles=-1)
+        controller = make_cycle_control_state(max_iter=1000, max_cycles=-1)
 
-        rd = ImagingDict()
-        rd.add({"iter_done": 100}, time=0, pol=0, chan=0)
+        rd = {}
+        add_to_imaging_dict(rd, {"iter_done": 100}, time=0, pol=0, chan=0)
 
-        controller.update_counts(rd)
+        update_counts(controller, rd)
 
         # max_cycles should stay -1
-        self.assertEqual(controller.max_cycles, -1)
-        self.assertEqual(controller.cycles_done, 1)
+        self.assertEqual(controller["max_cycles"], -1)
+        self.assertEqual(controller["cycles_done"], 1)
 
     def test_update_with_multiple_planes(self):
         """Test update sums iterations across multiple planes."""
-        controller = CycleController(max_iter=1000)
+        controller = make_cycle_control_state(max_iter=1000)
 
-        rd = ImagingDict()
-        rd.add({"iter_done": 50}, time=0, pol=0, chan=0)
-        rd.add({"iter_done": 30}, time=0, pol=0, chan=1)
-        rd.add({"iter_done": 20}, time=0, pol=1, chan=0)
+        rd = {}
+        add_to_imaging_dict(rd, {"iter_done": 50}, time=0, pol=0, chan=0)
+        add_to_imaging_dict(rd, {"iter_done": 30}, time=0, pol=0, chan=1)
+        add_to_imaging_dict(rd, {"iter_done": 20}, time=0, pol=1, chan=0)
 
-        controller.update_counts(rd)
+        update_counts(controller, rd)
 
         # Each plane's remaining max_iter is decremented independently by its own
         # iter_done. Arrays are indexed (time, chan, pol).
         self.assertEqual(
-            controller.max_iter_remaining[0, 0, 0], 950
+            controller["max_iter_remaining"][0, 0, 0], 950
         )  # Key(0,0,0): 1000-50
         self.assertEqual(
-            controller.max_iter_remaining[0, 1, 0], 970
+            controller["max_iter_remaining"][0, 1, 0], 970
         )  # Key(0,0,1): 1000-30
         self.assertEqual(
-            controller.max_iter_remaining[0, 0, 1], 980
+            controller["max_iter_remaining"][0, 0, 1], 980
         )  # Key(0,1,0): 1000-20
         # total_iter_done sums across planes: 50 + 30 + 20 = 100
-        self.assertEqual(controller.total_iter_done, 100)
-        self.assertEqual(controller.cycles_done, 1)
+        self.assertEqual(controller["total_iter_done"], 100)
+        self.assertEqual(controller["cycles_done"], 1)
 
     def test_no_update_when_converged(self):
         """Test update_counts does nothing when already converged."""
-        controller = CycleController(max_iter=1000, max_cycles=5)
+        controller = make_cycle_control_state(max_iter=1000, max_cycles=5)
 
         # Set converged state
-        controller.stopcode = StopCode(
+        controller["stopcode"] = StopCode(
             imaging=IMAGING_THRESHOLD, model_update=MODEL_UPDATE_CONTINUE
         )
 
-        rd = ImagingDict()
-        rd.add({"iter_done": 100}, time=0, pol=0, chan=0)
+        rd = {}
+        add_to_imaging_dict(rd, {"iter_done": 100}, time=0, pol=0, chan=0)
 
-        controller.update_counts(rd)
+        update_counts(controller, rd)
 
         # Counts should not change (update_counts returns early when converged,
         # so the per-plane array is never even allocated).
-        self.assertIsNone(controller.max_iter_remaining)
-        self.assertEqual(controller._max_iter, 1000)
-        self.assertEqual(controller.max_cycles, 5)
-        self.assertEqual(controller.cycles_done, 0)
-        self.assertEqual(controller.total_iter_done, 0)
+        self.assertIsNone(controller["max_iter_remaining"])
+        self.assertEqual(controller["max_iter"], 1000)
+        self.assertEqual(controller["max_cycles"], 5)
+        self.assertEqual(controller["cycles_done"], 0)
+        self.assertEqual(controller["total_iter_done"], 0)
 
 
 class TestUpdateParameters(unittest.TestCase):
@@ -1605,150 +1626,151 @@ class TestUpdateParameters(unittest.TestCase):
 
     def test_update_max_iter(self):
         """Test updating max_iter parameter."""
-        controller = CycleController(max_iter=1000)
+        controller = make_cycle_control_state(max_iter=1000)
 
-        code, msg = controller.update_parameters(max_iter=500)
+        code, msg = update_parameters(controller, max_iter=500)
 
         self.assertEqual(code, 0)
         self.assertEqual(msg, "")
         # max_iter sets the per-plane budget; with no array allocated yet this is
-        # reflected in _max_iter.
-        self.assertEqual(controller._max_iter, 500)
+        # reflected in the "max_iter" of the state.
+        self.assertEqual(controller["max_iter"], 500)
 
     def test_update_max_iter_per_cycle(self):
         """Test updating max_iter_per_cycle parameter."""
-        controller = CycleController(max_iter_per_cycle=-1)
+        controller = make_cycle_control_state(max_iter_per_cycle=-1)
 
-        code, msg = controller.update_parameters(max_iter_per_cycle=100)
+        code, msg = update_parameters(controller, max_iter_per_cycle=100)
 
         self.assertEqual(code, 0)
-        self.assertEqual(controller.max_iter_per_cycle, 100)
+        self.assertEqual(controller["max_iter_per_cycle"], 100)
 
     def test_update_max_cycles(self):
         """Test updating max_cycles parameter."""
-        controller = CycleController(max_cycles=-1)
+        controller = make_cycle_control_state(max_cycles=-1)
 
-        code, msg = controller.update_parameters(max_cycles=10)
+        code, msg = update_parameters(controller, max_cycles=10)
 
         self.assertEqual(code, 0)
-        self.assertEqual(controller.max_cycles, 10)
+        self.assertEqual(controller["max_cycles"], 10)
 
     def test_update_threshold_numeric(self):
         """Test updating threshold with numeric value."""
-        controller = CycleController(threshold=0.0)
+        controller = make_cycle_control_state(threshold=0.0)
 
-        code, msg = controller.update_parameters(threshold=0.5)
+        code, msg = update_parameters(controller, threshold=0.5)
 
         self.assertEqual(code, 0)
-        self.assertEqual(controller.threshold, 0.5)
+        self.assertEqual(controller["threshold"], 0.5)
 
     def test_update_threshold_string_jy(self):
         """Test updating threshold with Jy string."""
-        controller = CycleController()
+        controller = make_cycle_control_state()
 
-        code, msg = controller.update_parameters(threshold="0.5Jy")
+        code, msg = update_parameters(controller, threshold="0.5Jy")
 
         self.assertEqual(code, 0)
-        self.assertEqual(controller.threshold, 0.5)
+        self.assertEqual(controller["threshold"], 0.5)
 
     def test_update_threshold_string_mjy(self):
         """Test updating threshold with mJy string."""
-        controller = CycleController()
+        controller = make_cycle_control_state()
 
-        code, msg = controller.update_parameters(threshold="10mJy")
+        code, msg = update_parameters(controller, threshold="10mJy")
 
         self.assertEqual(code, 0)
-        self.assertAlmostEqual(controller.threshold, 0.01)
+        self.assertAlmostEqual(controller["threshold"], 0.01)
 
     def test_update_threshold_string_ujy(self):
         """Test updating threshold with uJy string."""
-        controller = CycleController()
+        controller = make_cycle_control_state()
 
-        code, msg = controller.update_parameters(threshold="100uJy")
+        code, msg = update_parameters(controller, threshold="100uJy")
 
         self.assertEqual(code, 0)
-        self.assertAlmostEqual(controller.threshold, 0.0001)
+        self.assertAlmostEqual(controller["threshold"], 0.0001)
 
     def test_update_cyclefactor(self):
         """Test updating psf_sidelobe_factor parameter."""
-        controller = CycleController(psf_sidelobe_factor=1.0)
+        controller = make_cycle_control_state(psf_sidelobe_factor=1.0)
 
-        code, msg = controller.update_parameters(psf_sidelobe_factor=1.5)
+        code, msg = update_parameters(controller, psf_sidelobe_factor=1.5)
 
         self.assertEqual(code, 0)
-        self.assertEqual(controller.psf_sidelobe_factor, 1.5)
+        self.assertEqual(controller["psf_sidelobe_factor"], 1.5)
 
     def test_update_multiple_parameters(self):
         """Test updating multiple parameters at once."""
-        controller = CycleController()
+        controller = make_cycle_control_state()
 
-        code, msg = controller.update_parameters(
+        code, msg = update_parameters(
+            controller,
             max_iter=500,
             threshold="5mJy",
             psf_sidelobe_factor=1.5,
         )
 
         self.assertEqual(code, 0)
-        self.assertEqual(controller._max_iter, 500)
-        self.assertAlmostEqual(controller.threshold, 0.005)
-        self.assertEqual(controller.psf_sidelobe_factor, 1.5)
+        self.assertEqual(controller["max_iter"], 500)
+        self.assertAlmostEqual(controller["threshold"], 0.005)
+        self.assertEqual(controller["psf_sidelobe_factor"], 1.5)
 
     def test_reject_negative_max_iter(self):
         """Test rejecting max_iter < -1."""
-        controller = CycleController()
+        controller = make_cycle_control_state()
 
-        code, msg = controller.update_parameters(max_iter=-2)
+        code, msg = update_parameters(controller, max_iter=-2)
 
         self.assertEqual(code, -1)
         self.assertIn("max_iter must be >= -1", msg)
-        self.assertEqual(controller._max_iter, 1000)  # Unchanged
+        self.assertEqual(controller["max_iter"], 1000)  # Unchanged
 
     def test_reject_negative_threshold_numeric(self):
         """Test rejecting negative numeric threshold."""
-        controller = CycleController()
+        controller = make_cycle_control_state()
 
-        code, msg = controller.update_parameters(threshold=-0.5)
+        code, msg = update_parameters(controller, threshold=-0.5)
 
         self.assertEqual(code, -1)
         self.assertIn("threshold must be >= 0", msg)
 
     def test_reject_negative_threshold_string(self):
         """Test rejecting negative threshold string (Bug #1 fix)."""
-        controller = CycleController()
+        controller = make_cycle_control_state()
 
-        code, msg = controller.update_parameters(threshold="-10mJy")
+        code, msg = update_parameters(controller, threshold="-10mJy")
 
         self.assertEqual(code, -1)
         self.assertIn("threshold must be >= 0", msg)
 
     def test_reject_zero_cyclefactor(self):
         """Test rejecting psf_sidelobe_factor <= 0."""
-        controller = CycleController()
+        controller = make_cycle_control_state()
 
-        code, msg = controller.update_parameters(psf_sidelobe_factor=0)
+        code, msg = update_parameters(controller, psf_sidelobe_factor=0)
 
         self.assertEqual(code, -1)
         self.assertIn("psf_sidelobe_factor must be > 0", msg)
 
-        code, msg = controller.update_parameters(psf_sidelobe_factor=-1.0)
+        code, msg = update_parameters(controller, psf_sidelobe_factor=-1.0)
 
         self.assertEqual(code, -1)
         self.assertIn("psf_sidelobe_factor must be > 0", msg)
 
     def test_reject_invalid_threshold_string(self):
         """Test rejecting threshold string with unknown units."""
-        controller = CycleController()
+        controller = make_cycle_control_state()
 
-        code, msg = controller.update_parameters(threshold="10kJy")
+        code, msg = update_parameters(controller, threshold="10kJy")
 
         self.assertEqual(code, -1)
         self.assertIn("number with units", msg)
 
     def test_reject_non_numeric_max_iter(self):
         """Test rejecting non-numeric max_iter."""
-        controller = CycleController()
+        controller = make_cycle_control_state()
 
-        code, msg = controller.update_parameters(max_iter="abc")
+        code, msg = update_parameters(controller, max_iter="abc")
 
         self.assertEqual(code, -1)
         self.assertIn("integer", msg)
@@ -1759,52 +1781,52 @@ class TestResetMethods(unittest.TestCase):
 
     def test_reset(self):
         """Test full reset restores initial state."""
-        controller = CycleController(max_iter=1000, max_cycles=5)
+        controller = make_cycle_control_state(max_iter=1000, max_cycles=5)
 
         # Simulate some work
-        rd = ImagingDict()
-        rd.add({"iter_done": 300}, time=0, pol=0, chan=0)
-        controller.update_counts(rd)
+        rd = {}
+        add_to_imaging_dict(rd, {"iter_done": 300}, time=0, pol=0, chan=0)
+        update_counts(controller, rd)
 
         # Modify stopcode
-        controller.stopcode = StopCode(
+        controller["stopcode"] = StopCode(
             imaging=IMAGING_THRESHOLD, model_update=MODEL_UPDATE_CONTINUE
         )
 
         # Reset
-        controller.reset()
+        reset(controller)
 
         # Should restore to initial state (per-plane array reset to the budget)
-        self.assertEqual(controller.max_iter_remaining[0, 0, 0], 1000)
-        self.assertEqual(controller.cycles_done, 0)
-        self.assertEqual(controller.total_iter_done, 0)
-        self.assertEqual(controller.stopcode.imaging, IMAGING_CONTINUE)
-        self.assertEqual(controller.stopcode.model_update, MODEL_UPDATE_CONTINUE)
+        self.assertEqual(controller["max_iter_remaining"][0, 0, 0], 1000)
+        self.assertEqual(controller["cycles_done"], 0)
+        self.assertEqual(controller["total_iter_done"], 0)
+        self.assertEqual(controller["stopcode"].imaging, IMAGING_CONTINUE)
+        self.assertEqual(controller["stopcode"].model_update, MODEL_UPDATE_CONTINUE)
 
     def test_reset_stopcode_only(self):
         """Test reset_stopcode only resets convergence state."""
-        controller = CycleController(max_iter=1000)
+        controller = make_cycle_control_state(max_iter=1000)
 
         # Simulate some work
-        rd = ImagingDict()
-        rd.add({"iter_done": 300}, time=0, pol=0, chan=0)
-        controller.update_counts(rd)
+        rd = {}
+        add_to_imaging_dict(rd, {"iter_done": 300}, time=0, pol=0, chan=0)
+        update_counts(controller, rd)
 
         # Set converged
-        controller.stopcode = StopCode(
+        controller["stopcode"] = StopCode(
             imaging=IMAGING_THRESHOLD, model_update=MODEL_UPDATE_CONTINUE
         )
 
         # Reset only stopcode
-        controller.reset_stopcode()
+        reset_stopcode(controller)
 
         # Stopcode should be reset
-        self.assertEqual(controller.stopcode.imaging, IMAGING_CONTINUE)
-        self.assertEqual(controller.stopcode.model_update, MODEL_UPDATE_CONTINUE)
+        self.assertEqual(controller["stopcode"].imaging, IMAGING_CONTINUE)
+        self.assertEqual(controller["stopcode"].model_update, MODEL_UPDATE_CONTINUE)
 
         # But counts should remain
-        self.assertEqual(controller.max_iter_remaining[0, 0, 0], 700)
-        self.assertEqual(controller.cycles_done, 1)
+        self.assertEqual(controller["max_iter_remaining"][0, 0, 0], 700)
+        self.assertEqual(controller["cycles_done"], 1)
 
 
 class TestGetState(unittest.TestCase):
@@ -1812,7 +1834,7 @@ class TestGetState(unittest.TestCase):
 
     def test_get_state(self):
         """Test getting controller state as dictionary."""
-        controller = CycleController(
+        controller = make_cycle_control_state(
             max_iter=1000,
             max_cycles=5,
             threshold=0.01,
@@ -1820,11 +1842,11 @@ class TestGetState(unittest.TestCase):
         )
 
         # Simulate some work
-        rd = ImagingDict()
-        rd.add({"iter_done": 200}, time=0, pol=0, chan=0)
-        controller.update_counts(rd)
+        rd = {}
+        add_to_imaging_dict(rd, {"iter_done": 200}, time=0, pol=0, chan=0)
+        update_counts(controller, rd)
 
-        state = controller.get_state()
+        state = get_state(controller)
 
         # Check all fields present. max_iter is serialized per-plane (nested list).
         self.assertEqual(state["max_iter_remaining"][0][0][0], 800)
@@ -1846,7 +1868,7 @@ class TestFullImagingCycleWorkflow(unittest.TestCase):
 
     def test_basic_convergence_workflow(self):
         """Test basic imaging cycle workflow until convergence."""
-        controller = CycleController(
+        controller = make_cycle_control_state(
             max_iter=300,
             max_cycles=5,
             threshold=0.1,
@@ -1860,9 +1882,10 @@ class TestFullImagingCycleWorkflow(unittest.TestCase):
         for cycle, (residual, iters) in enumerate(
             zip(residuals, iterations_per_cycle, strict=False)
         ):
-            # Create ImagingDict for this cycle
-            rd = ImagingDict()
-            rd.add(
+            # Create imaging_dict for this cycle
+            rd = {}
+            add_to_imaging_dict(
+                rd,
                 {
                     "peakres": residual,
                     "masksum": 100,
@@ -1875,15 +1898,15 @@ class TestFullImagingCycleWorkflow(unittest.TestCase):
             )
 
             # Calculate per cycle limits
-            max_iter_per_cycle, threshold_per_cycle = (
-                controller.calculate_per_cycle_limits(rd)
+            max_iter_per_cycle, threshold_per_cycle = calculate_per_cycle_limits(
+                controller, rd
             )
 
             # Update counts
-            controller.update_counts(rd)
+            update_counts(controller, rd)
 
             # Check convergence
-            stopcode, desc = controller.check_convergence(rd)
+            stopcode, desc = check_convergence(controller, rd)
 
             if stopcode.imaging != IMAGING_CONTINUE:
                 # Should converge on cycle 3 (index 2)
@@ -1892,21 +1915,22 @@ class TestFullImagingCycleWorkflow(unittest.TestCase):
                 break
 
         # Verify final state
-        self.assertEqual(controller.cycles_done, 3)
-        self.assertEqual(controller.total_iter_done, 250)
-        self.assertEqual(controller.max_iter_remaining[0, 0, 0], 50)  # 300 - 250
+        self.assertEqual(controller["cycles_done"], 3)
+        self.assertEqual(controller["total_iter_done"], 250)
+        self.assertEqual(controller["max_iter_remaining"][0, 0, 0], 50)  # 300 - 250
 
     def test_iteration_limit_workflow(self):
         """Test workflow stopping at iteration limit."""
-        controller = CycleController(
+        controller = make_cycle_control_state(
             max_iter=250,  # Limited iterations
             threshold=0.01,  # Low threshold (hard to reach)
         )
 
         # Simulate imaging cycles
         for cycle in range(5):
-            rd = ImagingDict()
-            rd.add(
+            rd = {}
+            add_to_imaging_dict(
+                rd,
                 {
                     "peakres": 0.5,  # Stays high
                     "masksum": 100,
@@ -1918,8 +1942,8 @@ class TestFullImagingCycleWorkflow(unittest.TestCase):
                 chan=0,
             )
 
-            controller.update_counts(rd)
-            stopcode, desc = controller.check_convergence(rd)
+            update_counts(controller, rd)
+            stopcode, desc = check_convergence(controller, rd)
 
             if stopcode.imaging != IMAGING_CONTINUE:
                 # Should stop after cycle 3 (3 × 100 = 300 > 250)
@@ -1930,7 +1954,7 @@ class TestFullImagingCycleWorkflow(unittest.TestCase):
 
     def test_max_cycles_workflow(self):
         """Test workflow stopping at imaging cycle limit."""
-        controller = CycleController(
+        controller = make_cycle_control_state(
             max_iter=1000,
             max_cycles=3,  # Limited imaging cycles
             threshold=0.01,
@@ -1938,8 +1962,9 @@ class TestFullImagingCycleWorkflow(unittest.TestCase):
 
         # Simulate imaging cycles
         for cycle in range(5):
-            rd = ImagingDict()
-            rd.add(
+            rd = {}
+            add_to_imaging_dict(
+                rd,
                 {
                     "peakres": 0.5,  # Stays high
                     "masksum": 100,
@@ -1953,8 +1978,8 @@ class TestFullImagingCycleWorkflow(unittest.TestCase):
 
             # Check convergence first, then update counts
             # After 3 updates, max_cycles will be 0, triggering stop
-            controller.update_counts(rd)
-            stopcode, desc = controller.check_convergence(rd)
+            update_counts(controller, rd)
+            stopcode, desc = check_convergence(controller, rd)
 
             if stopcode.imaging != IMAGING_CONTINUE:
                 # Should stop when max_cycles reaches 0 after 3 cycles
@@ -1964,11 +1989,11 @@ class TestFullImagingCycleWorkflow(unittest.TestCase):
                 self.assertEqual(stopcode.imaging, IMAGING_MAX_CYCLES)
                 break
 
-        self.assertEqual(controller.cycles_done, 3)
+        self.assertEqual(controller["cycles_done"], 3)
 
     def test_zero_mask_workflow(self):
         """Test workflow stopping when mask becomes zero."""
-        controller = CycleController(
+        controller = make_cycle_control_state(
             max_iter=1000,
             threshold=0.1,
         )
@@ -1977,8 +2002,9 @@ class TestFullImagingCycleWorkflow(unittest.TestCase):
         masksums = [100, 50, 0]  # Mask disappears
 
         for cycle, masksum in enumerate(masksums):
-            rd = ImagingDict()
-            rd.add(
+            rd = {}
+            add_to_imaging_dict(
+                rd,
                 {
                     "peakres": 0.5,
                     "masksum": masksum,
@@ -1990,8 +2016,8 @@ class TestFullImagingCycleWorkflow(unittest.TestCase):
                 chan=0,
             )
 
-            controller.update_counts(rd)
-            stopcode, desc = controller.check_convergence(rd)
+            update_counts(controller, rd)
+            stopcode, desc = check_convergence(controller, rd)
 
             if stopcode.imaging != IMAGING_CONTINUE:
                 # Should stop when mask becomes zero
@@ -2001,14 +2027,15 @@ class TestFullImagingCycleWorkflow(unittest.TestCase):
 
     def test_interactive_continue_workflow(self):
         """Test interactive workflow: stop, update params, continue."""
-        controller = CycleController(
+        controller = make_cycle_control_state(
             max_iter=100,
             threshold=0.5,
         )
 
         # First phase: run until iteration limit
-        rd1 = ImagingDict()
-        rd1.add(
+        rd1 = {}
+        add_to_imaging_dict(
+            rd1,
             {
                 "peakres": 0.8,
                 "masksum": 100,
@@ -2020,21 +2047,22 @@ class TestFullImagingCycleWorkflow(unittest.TestCase):
             chan=0,
         )
 
-        controller.update_counts(rd1)
-        stopcode, desc = controller.check_convergence(rd1)
+        update_counts(controller, rd1)
+        stopcode, desc = check_convergence(controller, rd1)
 
         self.assertEqual(stopcode.imaging, IMAGING_MAX_ITER)
 
         # User decides to continue with more iterations
-        code, msg = controller.update_parameters(max_iter=200)
+        code, msg = update_parameters(controller, max_iter=200)
         self.assertEqual(code, 0)
 
         # Reset stopcode to continue
-        controller.reset_stopcode()
+        reset_stopcode(controller)
 
         # Second phase: run more cycles
-        rd2 = ImagingDict()
-        rd2.add(
+        rd2 = {}
+        add_to_imaging_dict(
+            rd2,
             {
                 "peakres": 0.3,  # Below threshold now
                 "masksum": 100,
@@ -2046,12 +2074,12 @@ class TestFullImagingCycleWorkflow(unittest.TestCase):
             chan=0,
         )
 
-        controller.update_counts(rd2)
-        stopcode, desc = controller.check_convergence(rd2)
+        update_counts(controller, rd2)
+        stopcode, desc = check_convergence(controller, rd2)
 
         self.assertEqual(stopcode.imaging, IMAGING_THRESHOLD)
-        self.assertEqual(controller.cycles_done, 2)
-        self.assertEqual(controller.total_iter_done, 200)
+        self.assertEqual(controller["cycles_done"], 2)
+        self.assertEqual(controller["total_iter_done"], 200)
 
 
 class TestMultiPlaneWorkflows(unittest.TestCase):
@@ -2059,14 +2087,15 @@ class TestMultiPlaneWorkflows(unittest.TestCase):
 
     def test_merge_and_converge_multi_channel(self):
         """Test merging results from multiple channels."""
-        controller = CycleController(
+        controller = make_cycle_control_state(
             max_iter=300,
             threshold=0.1,
         )
 
         # Simulate 3 workers processing different channels
-        rd1 = ImagingDict()
-        rd1.add(
+        rd1 = {}
+        add_to_imaging_dict(
+            rd1,
             {
                 "peakres": 0.5,
                 "masksum": 100,
@@ -2078,8 +2107,9 @@ class TestMultiPlaneWorkflows(unittest.TestCase):
             chan=0,
         )
 
-        rd2 = ImagingDict()
-        rd2.add(
+        rd2 = {}
+        add_to_imaging_dict(
+            rd2,
             {
                 "peakres": 0.8,  # Highest residual
                 "masksum": 80,
@@ -2091,8 +2121,9 @@ class TestMultiPlaneWorkflows(unittest.TestCase):
             chan=1,
         )
 
-        rd3 = ImagingDict()
-        rd3.add(
+        rd3 = {}
+        add_to_imaging_dict(
+            rd3,
             {
                 "peakres": 0.3,
                 "masksum": 120,
@@ -2117,18 +2148,24 @@ class TestMultiPlaneWorkflows(unittest.TestCase):
         self.assertEqual(max_sidelobe, 0.25)  # Max sidelobe
 
         # Check global convergence
-        controller.update_counts(merged)
-        stopcode, desc = controller.check_convergence(merged)
+        update_counts(controller, merged)
+        stopcode, desc = check_convergence(controller, merged)
 
         # Should not converge: every plane's own peak (0.5, 0.8, 0.3) is above
         # the threshold 0.1, so all planes stay active and the aggregate is
         # CONTINUE.
         self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
         # Each channel's remaining max_iter is decremented by its own iter_done.
-        self.assertEqual(controller.max_iter_remaining[0, 0, 0], 250)  # chan0: 300-50
-        self.assertEqual(controller.max_iter_remaining[0, 1, 0], 240)  # chan1: 300-60
-        self.assertEqual(controller.max_iter_remaining[0, 2, 0], 260)  # chan2: 300-40
-        self.assertEqual(controller.total_iter_done, 150)  # 50 + 60 + 40
+        self.assertEqual(
+            controller["max_iter_remaining"][0, 0, 0], 250
+        )  # chan0: 300-50
+        self.assertEqual(
+            controller["max_iter_remaining"][0, 1, 0], 240
+        )  # chan1: 300-60
+        self.assertEqual(
+            controller["max_iter_remaining"][0, 2, 0], 260
+        )  # chan2: 300-40
+        self.assertEqual(controller["total_iter_done"], 150)  # 50 + 60 + 40
 
     def test_partial_zero_mask_handling(self):
         """Test per-plane handling when some planes have zero mask.
@@ -2137,11 +2174,12 @@ class TestMultiPlaneWorkflows(unittest.TestCase):
         ZERO_MASK while the valid plane stops on its own threshold; the
         aggregate reports that all planes have stopped.
         """
-        controller = CycleController(threshold=0.5)
+        controller = make_cycle_control_state(threshold=0.5)
 
         # Chan 0: zero mask, Chan 1: valid
-        rd = ImagingDict()
-        rd.add(
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {
                 "peakres": 1.0,
                 "masksum": 0,  # Zero mask
@@ -2151,7 +2189,8 @@ class TestMultiPlaneWorkflows(unittest.TestCase):
             pol=0,
             chan=0,
         )
-        rd.add(
+        add_to_imaging_dict(
+            rd,
             {
                 "peakres": 0.3,
                 "masksum": 100,  # Valid mask
@@ -2172,12 +2211,12 @@ class TestMultiPlaneWorkflows(unittest.TestCase):
 
         # Each plane stops for its own reason: chan 0 (zero mask) -> ZERO_MASK,
         # chan 1 (peak 0.3 <= threshold 0.5) -> THRESHOLD.
-        stopcode, desc = controller.check_convergence(rd)
+        stopcode, desc = check_convergence(controller, rd)
         self.assertEqual(
-            controller.stop_code_imaging[0, 0, 0], IMAGING_ZERO_MASK
+            controller["stop_code_imaging"][0, 0, 0], IMAGING_ZERO_MASK
         )  # chan 0
         self.assertEqual(
-            controller.stop_code_imaging[0, 1, 0], IMAGING_THRESHOLD
+            controller["stop_code_imaging"][0, 1, 0], IMAGING_THRESHOLD
         )  # chan 1
         # Both planes have stopped, so the aggregate is non-CONTINUE.
         self.assertNotEqual(stopcode.imaging, IMAGING_CONTINUE)
@@ -2189,12 +2228,13 @@ class TestMultiPlaneWorkflows(unittest.TestCase):
 
 
 class TestImagingDictKeyValidation(unittest.TestCase):
-    """Test key validation in ImagingDict utility functions."""
+    """Test key validation in imaging_dict utility functions."""
 
     def setUp(self):
-        """Create test ImagingDict with known keys."""
-        self.rd = ImagingDict()
-        self.rd.add(
+        """Create test imaging_dict with known keys."""
+        self.rd = {}
+        add_to_imaging_dict(
+            self.rd,
             {
                 "peakres": 1.0,
                 "masksum": 100,
@@ -2206,7 +2246,8 @@ class TestImagingDictKeyValidation(unittest.TestCase):
             pol=0,
             chan=0,
         )
-        self.rd.add(
+        add_to_imaging_dict(
+            self.rd,
             {
                 "peakres": 0.8,
                 "masksum": 80,
@@ -2262,15 +2303,15 @@ class TestImagingDictKeyValidation(unittest.TestCase):
         self.assertEqual(result, 1.0)
 
     def test_get_peak_residual_empty_returndict_with_filter(self):
-        """Test KeyError on empty ImagingDict with explicit filter."""
-        rd_empty = ImagingDict()
+        """Test KeyError on empty imaging_dict with explicit filter."""
+        rd_empty = {}
         with self.assertRaises(KeyError) as context:
             get_peak_residual_from_imaging_dict(rd_empty, time=0, pol=0, chan=0)
         self.assertIn("empty", str(context.exception))
 
     def test_get_peak_residual_empty_returndict_no_filter(self):
-        """Test no error on empty ImagingDict without filters."""
-        rd_empty = ImagingDict()
+        """Test no error on empty imaging_dict without filters."""
+        rd_empty = {}
         result = get_peak_residual_from_imaging_dict(rd_empty)  # All None
         self.assertEqual(result, 0.0)  # Default value
 
@@ -2361,12 +2402,13 @@ class TestNoProgressStop(unittest.TestCase):
 
     @staticmethod
     def _model_update(iter_done, peakres=(0.5, 0.0), stop_codes=(None, None)):
-        """ImagingDict of one model update for two planes (pol 0 and pol 1)."""
-        rd = ImagingDict()
+        """imaging_dict of one model update for two planes (pol 0 and pol 1)."""
+        rd = {}
         for pol, (iters, peak, code) in enumerate(
             zip(iter_done, peakres, stop_codes, strict=True)
         ):
-            rd.add(
+            add_to_imaging_dict(
+                rd,
                 {
                     "peakres": peak,
                     "masksum": 100,
@@ -2381,12 +2423,12 @@ class TestNoProgressStop(unittest.TestCase):
 
     def _controller(self, **kwargs):
         from astroviper.processing_functions.imaging.utils.cycle_control import (
-            CycleController,
+            make_cycle_control_state,
         )
 
         params = dict(max_iter=100, max_cycles=-1, threshold=0.0)
         params.update(kwargs)
-        return CycleController(**params)
+        return make_cycle_control_state(**params)
 
     def test_two_model_updates_without_iterations_stop_the_plane(self):
         from astroviper.processing_functions.imaging.utils.cycle_control import (
@@ -2397,19 +2439,19 @@ class TestNoProgressStop(unittest.TestCase):
 
         controller = self._controller()
         first = self._model_update(iter_done=(10, 0))
-        controller.update_counts(first)
-        stopcode, _ = controller.check_convergence(first, model_update_ran=True)
+        update_counts(controller, first)
+        stopcode, _ = check_convergence(controller, first, model_update_ran=True)
         self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
-        self.assertEqual(controller.stop_code_imaging[0, 0, 1], IMAGING_CONTINUE)
+        self.assertEqual(controller["stop_code_imaging"][0, 0, 1], IMAGING_CONTINUE)
 
         second = self._model_update(iter_done=(10, 0))
-        controller.update_counts(second)
-        stopcode, _ = controller.check_convergence(second, model_update_ran=True)
+        update_counts(controller, second)
+        stopcode, _ = check_convergence(controller, second, model_update_ran=True)
         # pol 0 still cleans, so the imaging cycles go on ...
         self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
         # ... but pol 1 is stopped.
-        self.assertEqual(controller.stop_code_imaging[0, 0, 1], IMAGING_NO_PROGRESS)
-        entry = second.data[list(second.data)[1]]
+        self.assertEqual(controller["stop_code_imaging"][0, 0, 1], IMAGING_NO_PROGRESS)
+        entry = second[list(second)[1]]
         self.assertEqual(entry["stop_code"].imaging, IMAGING_NO_PROGRESS)
         self.assertEqual(
             entry["stop_description"], IMAGING_STOP_DESCRIPTIONS[IMAGING_NO_PROGRESS]
@@ -2425,13 +2467,13 @@ class TestNoProgressStop(unittest.TestCase):
         controller = self._controller(max_iter=20)
         for iters in ((10, 0), (10, 0)):
             rd = self._model_update(iter_done=iters)
-            controller.update_counts(rd)
-            stopcode, description = controller.check_convergence(
-                rd, model_update_ran=True
+            update_counts(controller, rd)
+            stopcode, description = check_convergence(
+                controller, rd, model_update_ran=True
             )
         self.assertNotEqual(stopcode.imaging, 0)
-        self.assertEqual(controller.stop_code_imaging[0, 0, 0], IMAGING_MAX_ITER)
-        self.assertEqual(controller.stop_code_imaging[0, 0, 1], IMAGING_NO_PROGRESS)
+        self.assertEqual(controller["stop_code_imaging"][0, 0, 0], IMAGING_MAX_ITER)
+        self.assertEqual(controller["stop_code_imaging"][0, 0, 1], IMAGING_NO_PROGRESS)
         self.assertEqual(description, "All planes stopped (mixed reasons)")
 
     def test_one_model_update_without_iterations_is_tolerated(self):
@@ -2442,11 +2484,11 @@ class TestNoProgressStop(unittest.TestCase):
         controller = self._controller()
         for iters in ((10, 0), (10, 7), (10, 0), (10, 3)):
             rd = self._model_update(iter_done=iters)
-            controller.update_counts(rd)
-            stopcode, _ = controller.check_convergence(rd, model_update_ran=True)
+            update_counts(controller, rd)
+            stopcode, _ = check_convergence(controller, rd, model_update_ran=True)
             self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
-            self.assertEqual(controller.stop_code_imaging[0, 0, 1], IMAGING_CONTINUE)
-        self.assertEqual(controller.zero_iter_model_updates[0, 0, 1], 0)
+            self.assertEqual(controller["stop_code_imaging"][0, 0, 1], IMAGING_CONTINUE)
+        self.assertEqual(controller["zero_iter_model_updates"][0, 0, 1], 0)
 
     def test_checks_without_a_model_update_do_not_count(self):
         from astroviper.processing_functions.imaging.utils.cycle_control import (
@@ -2457,9 +2499,9 @@ class TestNoProgressStop(unittest.TestCase):
         # The residual-only check of every imaging cycle carries iter_done = 0.
         for _ in range(5):
             rd = self._model_update(iter_done=(0, 0))
-            stopcode, _ = controller.check_convergence(rd)
+            stopcode, _ = check_convergence(controller, rd)
             self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
-        self.assertEqual(int(controller.zero_iter_model_updates.sum()), 0)
+        self.assertEqual(int(controller["zero_iter_model_updates"].sum()), 0)
 
     def test_other_stop_codes_take_precedence(self):
         from astroviper.processing_functions.imaging.utils.cycle_control import (
@@ -2470,20 +2512,20 @@ class TestNoProgressStop(unittest.TestCase):
         controller = self._controller(threshold=0.1, max_cycles=2)
         for _ in range(2):
             rd = self._model_update(iter_done=(0, 0), peakres=(0.5, 0.05))
-            controller.update_counts(rd)
-            controller.check_convergence(rd, model_update_ran=True)
+            update_counts(controller, rd)
+            check_convergence(controller, rd, model_update_ran=True)
         # pol 1 is below the threshold; pol 0 has used up max_cycles.
-        self.assertEqual(controller.stop_code_imaging[0, 0, 1], IMAGING_THRESHOLD)
-        self.assertEqual(controller.stop_code_imaging[0, 0, 0], IMAGING_MAX_CYCLES)
+        self.assertEqual(controller["stop_code_imaging"][0, 0, 1], IMAGING_THRESHOLD)
+        self.assertEqual(controller["stop_code_imaging"][0, 0, 0], IMAGING_MAX_CYCLES)
 
     def test_reset_clears_the_count(self):
         controller = self._controller()
         for _ in range(2):
             rd = self._model_update(iter_done=(0, 0))
-            controller.check_convergence(rd, model_update_ran=True)
-        self.assertEqual(int(controller.zero_iter_model_updates.max()), 2)
-        controller.reset()
-        self.assertEqual(int(controller.zero_iter_model_updates.max()), 0)
+            check_convergence(controller, rd, model_update_ran=True)
+        self.assertEqual(int(controller["zero_iter_model_updates"].max()), 2)
+        reset(controller)
+        self.assertEqual(int(controller["zero_iter_model_updates"].max()), 0)
 
     def test_model_update_divergence_code_is_kept(self):
         from astroviper.processing_functions.imaging.utils.cycle_control import (
@@ -2498,16 +2540,16 @@ class TestNoProgressStop(unittest.TestCase):
             iter_done=(40, 12),
             stop_codes=(StopCode(IMAGING_CONTINUE, MODEL_UPDATE_DIVERGENCE), None),
         )
-        controller.update_counts(rd)
-        stopcode, _ = controller.check_convergence(rd, model_update_ran=True)
+        update_counts(controller, rd)
+        stopcode, _ = check_convergence(controller, rd, model_update_ran=True)
         # A diverged model update does not end the imaging cycles.
         self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
         self.assertEqual(stopcode.model_update, MODEL_UPDATE_CONTINUE)
-        entries = list(rd.data.values())
+        entries = list(rd.values())
         self.assertEqual(entries[0]["stop_code"].model_update, MODEL_UPDATE_DIVERGENCE)
         self.assertEqual(entries[1]["stop_code"].model_update, MODEL_UPDATE_CONTINUE)
         self.assertEqual(
-            controller.stop_code_model_update[0, 0, 0], MODEL_UPDATE_DIVERGENCE
+            controller["stop_code_model_update"][0, 0, 0], MODEL_UPDATE_DIVERGENCE
         )
 
 
@@ -2522,12 +2564,12 @@ class TestModelUpdateStopCode(unittest.TestCase):
     @staticmethod
     def _controller(**kwargs):
         from astroviper.processing_functions.imaging.utils.cycle_control import (
-            CycleController,
+            make_cycle_control_state,
         )
 
         params = dict(max_iter=1000, max_cycles=-1, threshold=0.0)
         params.update(kwargs)
-        return CycleController(**params)
+        return make_cycle_control_state(**params)
 
     def _run(self, controller, codes, iter_done=(10, 10)):
         """One model update of the two planes, ending with ``codes``."""
@@ -2539,8 +2581,8 @@ class TestModelUpdateStopCode(unittest.TestCase):
             iter_done=iter_done,
             stop_codes=tuple(StopCode(IMAGING_CONTINUE, code) for code in codes),
         )
-        controller.update_counts(rd)
-        stopcode, _ = controller.check_convergence(rd, model_update_ran=True)
+        update_counts(controller, rd)
+        stopcode, _ = check_convergence(controller, rd, model_update_ran=True)
         return stopcode, rd
 
     def test_every_code_reaches_the_controller(self):
@@ -2559,10 +2601,10 @@ class TestModelUpdateStopCode(unittest.TestCase):
             stopcode, rd = self._run(controller, codes)
             self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
             self.assertEqual(
-                controller.stop_code_model_update[0, 0].tolist(), list(codes)
+                controller["stop_code_model_update"][0, 0].tolist(), list(codes)
             )
             self.assertEqual(
-                [e["stop_code"].model_update for e in rd.data.values()], list(codes)
+                [e["stop_code"].model_update for e in rd.values()], list(codes)
             )
 
     def test_a_check_on_the_residual_keeps_the_code(self):
@@ -2576,10 +2618,10 @@ class TestModelUpdateStopCode(unittest.TestCase):
         self._run(controller, codes)
         # the residual of the next residual update carries no stop code
         residual = self._model_update(iter_done=(0, 0))
-        controller.check_convergence(residual)
-        self.assertEqual(controller.stop_code_model_update[0, 0].tolist(), codes)
+        check_convergence(controller, residual)
+        self.assertEqual(controller["stop_code_model_update"][0, 0].tolist(), codes)
         self.assertEqual(
-            [e["stop_code"].model_update for e in residual.data.values()], codes
+            [e["stop_code"].model_update for e in residual.values()], codes
         )
 
     def test_a_model_update_that_did_not_run_keeps_the_code(self):
@@ -2596,10 +2638,10 @@ class TestModelUpdateStopCode(unittest.TestCase):
         _, rd = self._run(
             controller, (MODEL_UPDATE_CONTINUE, MODEL_UPDATE_CONTINUE), (0, 0)
         )
-        self.assertEqual(controller.stop_code_model_update[0, 0].tolist(), codes)
-        self.assertEqual([e["stop_code"].model_update for e in rd.data.values()], codes)
+        self.assertEqual(controller["stop_code_model_update"][0, 0].tolist(), codes)
+        self.assertEqual([e["stop_code"].model_update for e in rd.values()], codes)
         # nor does it count for, or break, a run of diverged model updates
-        self.assertEqual(controller.diverged_model_updates[0, 0].tolist(), [0, 1])
+        self.assertEqual(controller["diverged_model_updates"][0, 0].tolist(), [0, 1])
 
     def test_repeated_divergence_stops_the_plane(self):
         from astroviper.processing_functions.imaging.utils.cycle_control import (
@@ -2614,22 +2656,22 @@ class TestModelUpdateStopCode(unittest.TestCase):
         controller = self._controller(max_cycles_divergence=2)
         self._run(controller, diverged)
         self.assertEqual(
-            controller.stop_code_imaging[0, 0].tolist(),
+            controller["stop_code_imaging"][0, 0].tolist(),
             [IMAGING_CONTINUE, IMAGING_CONTINUE],
         )
         stopcode, rd = self._run(controller, diverged)
         # pol 1 carries on, so the imaging cycles go on
         self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
         self.assertEqual(
-            controller.stop_code_imaging[0, 0].tolist(),
+            controller["stop_code_imaging"][0, 0].tolist(),
             [IMAGING_DIVERGENCE, IMAGING_CONTINUE],
         )
-        entry = rd.data[list(rd.data)[0]]
+        entry = rd[list(rd)[0]]
         self.assertEqual(
             entry["stop_description"], IMAGING_STOP_DESCRIPTIONS[IMAGING_DIVERGENCE]
         )
         # the plane gets no more iterations ...
-        for fields in rd.data.values():
+        for fields in rd.values():
             fields["max_psf_sidelobe"] = 0.2
         limits, _ = get_per_cycle_limits(controller, rd)
         self.assertEqual(limits[0, 0].tolist(), [0, 980])
@@ -2639,7 +2681,7 @@ class TestModelUpdateStopCode(unittest.TestCase):
             (MODEL_UPDATE_CONTINUE, MODEL_UPDATE_MAX_ITER_PER_CYCLE),
             (0, 10),
         )
-        self.assertEqual(controller.stop_code_imaging[0, 0, 0], IMAGING_DIVERGENCE)
+        self.assertEqual(controller["stop_code_imaging"][0, 0, 0], IMAGING_DIVERGENCE)
 
     def test_the_divergence_must_be_in_a_row(self):
         from astroviper.processing_functions.imaging.utils.cycle_control import (
@@ -2657,8 +2699,8 @@ class TestModelUpdateStopCode(unittest.TestCase):
                 controller, (first, MODEL_UPDATE_MAX_ITER_PER_CYCLE)
             )
             self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
-        self.assertEqual(controller.stop_code_imaging[0, 0, 0], IMAGING_CONTINUE)
-        self.assertEqual(controller.diverged_model_updates[0, 0, 0], 1)
+        self.assertEqual(controller["stop_code_imaging"][0, 0, 0], IMAGING_CONTINUE)
+        self.assertEqual(controller["diverged_model_updates"][0, 0, 0], 1)
 
     def test_off_by_default(self):
         from astroviper.processing_functions.imaging.utils.cycle_control import (
@@ -2671,8 +2713,8 @@ class TestModelUpdateStopCode(unittest.TestCase):
                 controller, (MODEL_UPDATE_DIVERGENCE, MODEL_UPDATE_DIVERGENCE)
             )
             self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
-        self.assertEqual(controller.max_cycles_divergence, -1)
-        self.assertFalse(controller.divergence_stopped.any())
+        self.assertEqual(controller["max_cycles_divergence"], -1)
+        self.assertFalse(controller["divergence_stopped"].any())
 
     def test_invalid_values_are_refused(self):
         for value in (0, -2, 1.5, True, "2"):
@@ -2689,11 +2731,11 @@ class TestModelUpdateStopCode(unittest.TestCase):
         self._run(
             controller, (MODEL_UPDATE_DIVERGENCE, MODEL_UPDATE_MAX_ITER_PER_CYCLE)
         )
-        self.assertTrue(controller.divergence_stopped[0, 0, 0])
-        controller.reset()
-        self.assertFalse(controller.divergence_stopped.any())
-        self.assertEqual(int(controller.diverged_model_updates.max()), 0)
-        self.assertEqual(controller.get_state()["max_cycles_divergence"], 1)
+        self.assertTrue(controller["divergence_stopped"][0, 0, 0])
+        reset(controller)
+        self.assertFalse(controller["divergence_stopped"].any())
+        self.assertEqual(int(controller["diverged_model_updates"].max()), 0)
+        self.assertEqual(get_state(controller)["max_cycles_divergence"], 1)
 
 
 class TestRefreshedResidualDivergence(unittest.TestCase):
@@ -2701,11 +2743,10 @@ class TestRefreshedResidualDivergence(unittest.TestCase):
 
     @staticmethod
     def _residual(*peaks):
-        from astroviper.processing_functions.imaging.utils import ImagingDict
-
-        residual = ImagingDict()
+        residual = {}
         for pol, peak in enumerate(peaks):
-            residual.add(
+            add_to_imaging_dict(
+                residual,
                 {"peakres": peak, "masksum": 16, "iter_done": 0},
                 time=0,
                 chan=0,
@@ -2715,67 +2756,63 @@ class TestRefreshedResidualDivergence(unittest.TestCase):
 
     @staticmethod
     def _controller():
-        return CycleController(max_iter=100, max_cycles=-1, threshold=0.0)
+        return make_cycle_control_state(max_iter=100, max_cycles=-1, threshold=0.0)
 
     def test_threefold_rise_is_strict_and_per_plane(self):
         controller = self._controller()
-        controller.ensure_planes(1, 1, 2)
+        ensure_planes(controller, 1, 1, 2)
         # Cube and MFS controllers pay no storage cost unless the MVC check is
         # explicitly invoked.
-        self.assertIsNone(controller.previous_refreshed_peak_residual)
+        self.assertIsNone(controller["previous_refreshed_peak_residual"])
         self.assertEqual(
-            controller.check_refreshed_residual_divergence(self._residual(1.0, 2.0)),
+            check_refreshed_residual_divergence(controller, self._residual(1.0, 2.0)),
             [],
         )
         # Exactly threefold is permitted; only a larger rise is a runaway.
         self.assertEqual(
-            controller.check_refreshed_residual_divergence(self._residual(3.0, 2.5)),
+            check_refreshed_residual_divergence(controller, self._residual(3.0, 2.5)),
             [],
         )
-        stopped = controller.check_refreshed_residual_divergence(
-            self._residual(9.1, 2.0)
+        stopped = check_refreshed_residual_divergence(
+            controller, self._residual(9.1, 2.0)
         )
         self.assertEqual(stopped, [((0, 0, 0), 3.0, 9.1)])
 
-        stopcode, _ = controller.check_convergence(self._residual(9.1, 2.0))
+        stopcode, _ = check_convergence(controller, self._residual(9.1, 2.0))
         self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
         self.assertEqual(
-            controller.stop_code_imaging[0, 0].tolist(),
+            controller["stop_code_imaging"][0, 0].tolist(),
             [IMAGING_DIVERGENCE, IMAGING_CONTINUE],
         )
 
     def test_empty_statistics_do_not_allocate_state(self):
-        from astroviper.processing_functions.imaging.utils import ImagingDict
-
         controller = self._controller()
-        self.assertEqual(
-            controller.check_refreshed_residual_divergence(ImagingDict()), []
-        )
-        self.assertIsNone(controller.previous_refreshed_peak_residual)
+        self.assertEqual(check_refreshed_residual_divergence(controller, {}), [])
+        self.assertIsNone(controller["previous_refreshed_peak_residual"])
 
     def test_stop_is_final_and_reset_clears_the_baseline(self):
         controller = self._controller()
-        controller.check_refreshed_residual_divergence(self._residual(1.0))
-        controller.check_refreshed_residual_divergence(self._residual(4.0))
-        self.assertTrue(controller.refreshed_residual_divergence_stopped[0, 0, 0])
+        check_refreshed_residual_divergence(controller, self._residual(1.0))
+        check_refreshed_residual_divergence(controller, self._residual(4.0))
+        self.assertTrue(controller["refreshed_residual_divergence_stopped"][0, 0, 0])
 
         # Later measurements update the diagnostic peak but cannot revoke or
         # duplicate the final divergence stop.
         self.assertEqual(
-            controller.check_refreshed_residual_divergence(self._residual(0.1)),
+            check_refreshed_residual_divergence(controller, self._residual(0.1)),
             [],
         )
-        controller.reset()
-        self.assertFalse(controller.divergence_stopped.any())
-        self.assertFalse(controller.refreshed_residual_divergence_stopped.any())
-        self.assertTrue(np.isnan(controller.previous_refreshed_peak_residual).all())
+        reset(controller)
+        self.assertFalse(controller["divergence_stopped"].any())
+        self.assertFalse(controller["refreshed_residual_divergence_stopped"].any())
+        self.assertTrue(np.isnan(controller["previous_refreshed_peak_residual"]).all())
 
     def test_invalid_growth_factors_are_refused(self):
         controller = self._controller()
         for factor in (1.0, 0.0, np.inf, np.nan, True, "3"):
             with self.assertRaises(ValueError):
-                controller.check_refreshed_residual_divergence(
-                    self._residual(1.0), factor=factor
+                check_refreshed_residual_divergence(
+                    controller, self._residual(1.0), factor=factor
                 )
 
 
@@ -2788,7 +2825,7 @@ class TestRecordModelUpdate(unittest.TestCase):
 
     @staticmethod
     def _controller():
-        return CycleController(
+        return make_cycle_control_state(
             max_iter=100, max_cycles=-1, threshold=0.0, max_cycles_divergence=2
         )
 
@@ -2803,21 +2840,21 @@ class TestRecordModelUpdate(unittest.TestCase):
         controller = self._controller()
         for _ in range(2):
             rd = self._model_update(iter_done=(10, 0), stop_codes=(diverged, None))
-            controller.update_counts(rd)
-            controller.record_model_update(rd)
-        self.assertEqual(controller.zero_iter_model_updates[0, 0].tolist(), [0, 2])
+            update_counts(controller, rd)
+            record_model_update(controller, rd)
+        self.assertEqual(controller["zero_iter_model_updates"][0, 0].tolist(), [0, 2])
         self.assertEqual(
-            controller.stop_code_model_update[0, 0].tolist(),
+            controller["stop_code_model_update"][0, 0].tolist(),
             [MODEL_UPDATE_DIVERGENCE, MODEL_UPDATE_CONTINUE],
         )
-        self.assertEqual(controller.divergence_stopped[0, 0].tolist(), [True, False])
-        self.assertEqual(controller.stop_code_imaging[0, 0].tolist(), [0, 0])
-        self.assertEqual(controller.stopcode, StopCode(0, MODEL_UPDATE_CONTINUE))
-        self.assertEqual(list(rd.data.values())[0]["stop_code"], diverged)
+        self.assertEqual(controller["divergence_stopped"][0, 0].tolist(), [True, False])
+        self.assertEqual(controller["stop_code_imaging"][0, 0].tolist(), [0, 0])
+        self.assertEqual(controller["stopcode"], StopCode(0, MODEL_UPDATE_CONTINUE))
+        self.assertEqual(list(rd.values())[0]["stop_code"], diverged)
         # the stop test on the residual of the next residual update decides
-        stopcode, _ = controller.check_convergence(self._model_update((0, 0)))
+        stopcode, _ = check_convergence(controller, self._model_update((0, 0)))
         self.assertEqual(
-            controller.stop_code_imaging[0, 0].tolist(),
+            controller["stop_code_imaging"][0, 0].tolist(),
             [IMAGING_DIVERGENCE, IMAGING_NO_PROGRESS],
         )
         self.assertEqual(stopcode.imaging, IMAGING_DIVERGENCE)
@@ -2859,21 +2896,25 @@ class TestRecordModelUpdate(unittest.TestCase):
         for iter_done, codes, expected in sequence:
             stop_codes = tuple(StopCode(IMAGING_CONTINUE, code) for code in codes)
             rd = self._model_update(iter_done, stop_codes=stop_codes)
-            controller.update_counts(rd)
-            stopcode, _ = controller.check_convergence(rd, model_update_ran=True)
+            update_counts(controller, rd)
+            stopcode, _ = check_convergence(controller, rd, model_update_ran=True)
             remaining, zero_iter, mu_code, diverged, stopped, imaging = expected
-            self.assertEqual(controller.max_iter_remaining[0, 0].tolist(), remaining)
+            self.assertEqual(controller["max_iter_remaining"][0, 0].tolist(), remaining)
             self.assertEqual(
-                controller.zero_iter_model_updates[0, 0].tolist(), zero_iter
+                controller["zero_iter_model_updates"][0, 0].tolist(), zero_iter
             )
-            self.assertEqual(controller.stop_code_model_update[0, 0].tolist(), mu_code)
-            self.assertEqual(controller.diverged_model_updates[0, 0].tolist(), diverged)
             self.assertEqual(
-                controller.divergence_stopped[0, 0].tolist(), [bool(stopped), False]
+                controller["stop_code_model_update"][0, 0].tolist(), mu_code
             )
-            self.assertEqual(controller.stop_code_imaging[0, 0].tolist(), imaging)
             self.assertEqual(
-                [fields["stop_code"] for fields in rd.data.values()],
+                controller["diverged_model_updates"][0, 0].tolist(), diverged
+            )
+            self.assertEqual(
+                controller["divergence_stopped"][0, 0].tolist(), [bool(stopped), False]
+            )
+            self.assertEqual(controller["stop_code_imaging"][0, 0].tolist(), imaging)
+            self.assertEqual(
+                [fields["stop_code"] for fields in rd.values()],
                 [StopCode(i, m) for i, m in zip(imaging, mu_code, strict=True)],
             )
         # every plane has stopped, for different reasons: the largest code
@@ -2883,31 +2924,39 @@ class TestRecordModelUpdate(unittest.TestCase):
 class TestPerPlaneStateGrowth(unittest.TestCase):
     def test_arrays_grow_when_a_larger_plane_index_appears(self):
         from astroviper.processing_functions.imaging.utils.cycle_control import (
-            CycleController,
+            make_cycle_control_state,
         )
 
-        controller = CycleController(max_iter=100)
-        small = ImagingDict()
-        small.add(
-            {"peakres": 1.0, "masksum": 10, "iter_done": 30}, time=0, pol=0, chan=0
+        controller = make_cycle_control_state(max_iter=100)
+        small = {}
+        add_to_imaging_dict(
+            small,
+            {"peakres": 1.0, "masksum": 10, "iter_done": 30},
+            time=0,
+            pol=0,
+            chan=0,
         )
-        controller.update_counts(small)
-        self.assertEqual(controller.max_iter_remaining.shape, (1, 1, 1))
-        large = ImagingDict()
-        large.add(
-            {"peakres": 1.0, "masksum": 10, "iter_done": 5}, time=0, pol=1, chan=2
+        update_counts(controller, small)
+        self.assertEqual(controller["max_iter_remaining"].shape, (1, 1, 1))
+        large = {}
+        add_to_imaging_dict(
+            large,
+            {"peakres": 1.0, "masksum": 10, "iter_done": 5},
+            time=0,
+            pol=1,
+            chan=2,
         )
-        controller.check_convergence(large, model_update_ran=True)
-        self.assertEqual(controller.max_iter_remaining.shape, (1, 3, 2))
-        self.assertEqual(controller.zero_iter_model_updates.shape, (1, 3, 2))
+        check_convergence(controller, large, model_update_ran=True)
+        self.assertEqual(controller["max_iter_remaining"].shape, (1, 3, 2))
+        self.assertEqual(controller["zero_iter_model_updates"].shape, (1, 3, 2))
         # existing values kept, new planes start at the full budget
-        self.assertEqual(controller.max_iter_remaining[0, 0, 0], 70)
-        self.assertEqual(controller.max_iter_remaining[0, 2, 1], 100)
+        self.assertEqual(controller["max_iter_remaining"][0, 0, 0], 70)
+        self.assertEqual(controller["max_iter_remaining"][0, 2, 1], 100)
         # the state of the entropy stop grows with them
-        self.assertEqual(controller.max_entropy.shape, (1, 3, 2))
-        self.assertEqual(controller.entropy_stopped.shape, (1, 3, 2))
-        self.assertTrue(np.isnan(controller.max_entropy).all())
-        self.assertFalse(controller.entropy_stopped.any())
+        self.assertEqual(controller["max_entropy"].shape, (1, 3, 2))
+        self.assertEqual(controller["entropy_stopped"].shape, (1, 3, 2))
+        self.assertTrue(np.isnan(controller["max_entropy"]).all())
+        self.assertFalse(controller["entropy_stopped"].any())
 
 
 class TestEntropyStop(unittest.TestCase):
@@ -2918,10 +2967,11 @@ class TestEntropyStop(unittest.TestCase):
 
     @staticmethod
     def _residual(entropy, snr=(3.0, 3.0), peakres=(0.5, 0.4)):
-        """ImagingDict of the residual of one residual update, two planes."""
-        rd = ImagingDict()
+        """imaging_dict of the residual of one residual update, two planes."""
+        rd = {}
         for pol in range(2):
-            rd.add(
+            add_to_imaging_dict(
+                rd,
                 {
                     "peakres": peakres[pol],
                     "masksum": 100,
@@ -2937,9 +2987,10 @@ class TestEntropyStop(unittest.TestCase):
 
     @staticmethod
     def _model_update(iter_done):
-        rd = ImagingDict()
+        rd = {}
         for pol, iters in enumerate(iter_done):
-            rd.add(
+            add_to_imaging_dict(
+                rd,
                 {"peakres": 0.3, "masksum": 100, "iter_done": iters},
                 time=0,
                 pol=pol,
@@ -2950,12 +3001,12 @@ class TestEntropyStop(unittest.TestCase):
     @staticmethod
     def _controller(**kwargs):
         from astroviper.processing_functions.imaging.utils.cycle_control import (
-            CycleController,
+            make_cycle_control_state,
         )
 
         params = dict(max_iter=1000, max_cycles=-1, threshold=0.0, entropy_stop=True)
         params.update(kwargs)
-        return CycleController(**params)
+        return make_cycle_control_state(**params)
 
     def _cycle(self, controller, entropy, iter_done=(50, 50), **residual):
         """One imaging cycle; returns the stop code after the residual update
@@ -2965,14 +3016,14 @@ class TestEntropyStop(unittest.TestCase):
         )
 
         rd = self._residual(entropy, **residual)
-        stopcode, _ = controller.check_convergence(rd)
+        stopcode, _ = check_convergence(controller, rd)
         if stopcode.imaging != IMAGING_CONTINUE:
             return stopcode, None, rd
-        budget = controller.max_iter_remaining.copy()
-        budget[controller.entropy_stopped] = 0
+        budget = controller["max_iter_remaining"].copy()
+        budget[controller["entropy_stopped"]] = 0
         update = self._model_update(np.minimum(iter_done, budget[0, 0]).tolist())
-        controller.update_counts(update)
-        controller.check_convergence(update, model_update_ran=True)
+        update_counts(controller, update)
+        check_convergence(controller, update, model_update_ran=True)
         return stopcode, budget, update
 
     def test_a_fall_of_the_entropy_stops_the_plane(self):
@@ -2987,14 +3038,14 @@ class TestEntropyStop(unittest.TestCase):
         self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
         stopcode, _, _ = self._cycle(controller, (7.52, 7.45))
         self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
-        np.testing.assert_allclose(controller.max_entropy[0, 0], [7.52, 7.45])
+        np.testing.assert_allclose(controller["max_entropy"][0, 0], [7.52, 7.45])
         # pol 0 falls, pol 1 still rises: the channel cycles on for pol 1
         stopcode, budget, update = self._cycle(controller, (7.51, 7.46))
         self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
-        self.assertEqual(controller.stop_code_imaging[0, 0, 0], IMAGING_ENTROPY)
-        self.assertEqual(controller.stop_code_imaging[0, 0, 1], IMAGING_CONTINUE)
+        self.assertEqual(controller["stop_code_imaging"][0, 0, 0], IMAGING_ENTROPY)
+        self.assertEqual(controller["stop_code_imaging"][0, 0, 1], IMAGING_CONTINUE)
         self.assertEqual(budget[0, 0].tolist(), [0, 900])
-        entries = list(update.data.values())
+        entries = list(update.values())
         self.assertEqual(entries[0]["stop_code"].imaging, IMAGING_ENTROPY)
         self.assertEqual(
             entries[0]["stop_description"], IMAGING_STOP_DESCRIPTIONS[IMAGING_ENTROPY]
@@ -3003,8 +3054,8 @@ class TestEntropyStop(unittest.TestCase):
         # pol 1 falls too: all planes have stopped
         stopcode, _, rd = self._cycle(controller, (7.51, 7.44))
         self.assertEqual(stopcode.imaging, IMAGING_ENTROPY)
-        self.assertEqual(controller.stop_code_imaging[0, 0].tolist(), [10, 10])
-        self.assertEqual([e["stop_code"].imaging for e in rd.data.values()], [10, 10])
+        self.assertEqual(controller["stop_code_imaging"][0, 0].tolist(), [10, 10])
+        self.assertEqual([e["stop_code"].imaging for e in rd.values()], [10, 10])
 
     def test_the_stop_is_final(self):
         from astroviper.processing_functions.imaging.utils.cycle_control import (
@@ -3014,16 +3065,16 @@ class TestEntropyStop(unittest.TestCase):
         controller = self._controller()
         self._cycle(controller, (7.50, 7.40))
         self._cycle(controller, (7.49, 7.45))
-        self.assertTrue(controller.entropy_stopped[0, 0, 0])
+        self.assertTrue(controller["entropy_stopped"][0, 0, 0])
         # a higher entropy later on does not revive the plane, and model
         # updates without iterations do not change its stop code
         for entropy in ((7.60, 7.46), (7.70, 7.47), (7.80, 7.48)):
             _, budget, _ = self._cycle(controller, entropy)
             self.assertEqual(budget[0, 0, 0], 0)
-            self.assertEqual(controller.stop_code_imaging[0, 0, 0], IMAGING_ENTROPY)
-        self.assertEqual(controller.max_entropy[0, 0, 0], 7.50)
+            self.assertEqual(controller["stop_code_imaging"][0, 0, 0], IMAGING_ENTROPY)
+        self.assertEqual(controller["max_entropy"][0, 0, 0], 7.50)
         # the plane spent 50 iterations, in the one model update it took part in
-        self.assertEqual(controller.max_iter_remaining[0, 0, 0], 950)
+        self.assertEqual(controller["max_iter_remaining"][0, 0, 0], 950)
 
     def test_entropy_that_is_not_a_number_is_skipped(self):
         # image_residual_entropy returns no number while the peak of the
@@ -3036,14 +3087,14 @@ class TestEntropyStop(unittest.TestCase):
         for entropy in ((np.nan, 7.2), (np.nan, 7.3), (7.5, 7.4), (7.6, 7.5)):
             stopcode, _, _ = self._cycle(controller, entropy)
             self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
-        np.testing.assert_allclose(controller.max_entropy[0, 0], [7.6, 7.5])
-        self.assertFalse(controller.entropy_stopped.any())
+        np.testing.assert_allclose(controller["max_entropy"][0, 0], [7.6, 7.5])
+        self.assertFalse(controller["entropy_stopped"].any())
 
     def test_equal_entropy_does_not_stop(self):
         controller = self._controller()
         for _ in range(3):
             self._cycle(controller, (7.5, 7.5))
-        self.assertFalse(controller.entropy_stopped.any())
+        self.assertFalse(controller["entropy_stopped"].any())
 
     def test_off_by_default(self):
         from astroviper.processing_functions.imaging.utils.cycle_control import (
@@ -3054,13 +3105,13 @@ class TestEntropyStop(unittest.TestCase):
         for entropy in ((7.5, 7.5), (7.4, 7.4), (7.3, 7.3)):
             stopcode, budget, _ = self._cycle(controller, entropy)
             self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
-        self.assertFalse(controller.entropy_stopped.any())
-        self.assertTrue(np.isnan(controller.max_entropy).all())
+        self.assertFalse(controller["entropy_stopped"].any())
+        self.assertTrue(np.isnan(controller["max_entropy"]).all())
         from astroviper.processing_functions.imaging.utils.cycle_control import (
-            CycleController,
+            make_cycle_control_state,
         )
 
-        self.assertFalse(CycleController().entropy_stop)
+        self.assertFalse(make_cycle_control_state()["entropy_stop"])
 
     def test_threshold_and_iteration_limit_come_first(self):
         from astroviper.processing_functions.imaging.utils.cycle_control import (
@@ -3073,10 +3124,10 @@ class TestEntropyStop(unittest.TestCase):
         self._cycle(controller, (7.5, 7.5), iter_done=(100, 10))
         # pol 0 has spent its budget, pol 1 is below the threshold; both fall
         rd = self._residual((7.4, 7.4), peakres=(0.5, 0.4))
-        controller.check_convergence(rd)
-        self.assertEqual(controller.stop_code_imaging[0, 0, 0], IMAGING_MAX_ITER)
-        self.assertEqual(controller.stop_code_imaging[0, 0, 1], IMAGING_THRESHOLD)
-        self.assertTrue(controller.entropy_stopped.all())
+        check_convergence(controller, rd)
+        self.assertEqual(controller["stop_code_imaging"][0, 0, 0], IMAGING_MAX_ITER)
+        self.assertEqual(controller["stop_code_imaging"][0, 0, 1], IMAGING_THRESHOLD)
+        self.assertTrue(controller["entropy_stopped"].all())
         self.assertNotEqual(IMAGING_ENTROPY, IMAGING_MAX_ITER)
 
     def test_entropy_comes_before_the_cycle_limit(self):
@@ -3089,29 +3140,31 @@ class TestEntropyStop(unittest.TestCase):
         self._cycle(controller, (7.5, 7.4))
         self._cycle(controller, (7.4, 7.5))  # the last cycle allowed
         rd = self._residual((7.4, 7.6))
-        stopcode, _ = controller.check_convergence(rd)
-        self.assertEqual(controller.stop_code_imaging[0, 0, 0], IMAGING_ENTROPY)
-        self.assertEqual(controller.stop_code_imaging[0, 0, 1], IMAGING_MAX_CYCLES)
+        stopcode, _ = check_convergence(controller, rd)
+        self.assertEqual(controller["stop_code_imaging"][0, 0, 0], IMAGING_ENTROPY)
+        self.assertEqual(controller["stop_code_imaging"][0, 0, 1], IMAGING_MAX_CYCLES)
         self.assertEqual(stopcode.imaging, IMAGING_ENTROPY)  # highest of the two
 
     def test_reset_clears_the_state(self):
         controller = self._controller()
         self._cycle(controller, (7.5, 7.4))
         self._cycle(controller, (7.4, 7.5))
-        self.assertTrue(controller.entropy_stopped[0, 0, 0])
-        controller.reset_stopcode()
-        self.assertFalse(controller.entropy_stopped.any())
-        self.assertTrue(np.isnan(controller.max_entropy).all())
+        self.assertTrue(controller["entropy_stopped"][0, 0, 0])
+        reset_stopcode(controller)
+        self.assertFalse(controller["entropy_stopped"].any())
+        self.assertTrue(np.isnan(controller["max_entropy"]).all())
         self._cycle(controller, (7.5, 7.4))
         self._cycle(controller, (7.4, 7.5))
-        controller.reset()
-        self.assertFalse(controller.entropy_stopped.any())
-        self.assertTrue(np.isnan(controller.max_entropy).all())
+        reset(controller)
+        self.assertFalse(controller["entropy_stopped"].any())
+        self.assertTrue(np.isnan(controller["max_entropy"]).all())
 
     def test_state_lists_the_parameters(self):
-        state = self._controller(
-            entropy_max_snr=5.0, entropy_spatial_bins=9, entropy_flux_bins=20
-        ).get_state()
+        state = get_state(
+            self._controller(
+                entropy_max_snr=5.0, entropy_spatial_bins=9, entropy_flux_bins=20
+            )
+        )
         self.assertIs(state["entropy_stop"], True)
         self.assertEqual(state["entropy_max_snr"], 5.0)
         self.assertEqual(state["entropy_spatial_bins"], 9)
@@ -3125,12 +3178,12 @@ class TestEntropyStop(unittest.TestCase):
         controller = self._controller(max_iter_per_cycle=200)
         self._cycle(controller, (7.5, 7.4))
         _, _, update = self._cycle(controller, (7.4, 7.5))
-        for fields in update.data.values():
+        for fields in update.values():
             fields["max_psf_sidelobe"] = 0.2
         max_iter_per_cycle_updated, _ = get_per_cycle_limits(controller, update)
         self.assertEqual(max_iter_per_cycle_updated[0, 0].tolist(), [0, 200])
         # the budget of the controller is not touched
-        self.assertEqual(controller.max_iter_remaining[0, 0].tolist(), [950, 900])
+        self.assertEqual(controller["max_iter_remaining"][0, 0].tolist(), [950, 900])
 
 
 class TestEntropyParameters(unittest.TestCase):
@@ -3161,7 +3214,7 @@ class TestEntropyParameters(unittest.TestCase):
 
     def test_wrong_values_are_refused(self):
         from astroviper.processing_functions.imaging.utils.cycle_control import (
-            CycleController,
+            make_cycle_control_state,
             validate_entropy_params,
         )
 
@@ -3175,7 +3228,7 @@ class TestEntropyParameters(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, key):
                     validate_entropy_params({key: value})
                 with self.assertRaisesRegex(ValueError, key):
-                    CycleController(**{key: value})
+                    make_cycle_control_state(**{key: value})
 
 
 class TestResidualEntropyInImagingDict(unittest.TestCase):
@@ -3212,10 +3265,10 @@ class TestResidualEntropyInImagingDict(unittest.TestCase):
         on = build_residual_imaging_dict(
             img_xds, "residual", {"gain": 0.1, "entropy_stop": True}
         )
-        for key, fields in off.data.items():
-            np.testing.assert_equal(fields["entropy"], on.data[key]["entropy"])
-        self.assertEqual(len(on.data), 4)
-        for key, fields in on.data.items():
+        for key, fields in off.items():
+            np.testing.assert_equal(fields["entropy"], on[key]["entropy"])
+        self.assertEqual(len(on), 4)
+        for key, fields in on.items():
             self.assertEqual(len(fields["entropy"]), 1)
             self.assertEqual(len(fields["residual_snr"]), 1)
             if (key.chan, key.pol) == (1, 1):
@@ -3242,15 +3295,15 @@ class TestResidualEntropyInImagingDict(unittest.TestCase):
             img_xds, "residual", {"gain": 0.1, "entropy_stop": True}
         )
         key = Key(time=0, chan=0, pol=0)
-        self.assertLess(coarse.data[key]["entropy"][0], 2.5)
-        self.assertGreater(fine.data[key]["entropy"][0], 7.0)
+        self.assertLess(coarse[key]["entropy"][0], 2.5)
+        self.assertGreater(fine[key]["entropy"][0], 7.0)
         # a lower limit on the ratio of peak to RMS leaves the noise planes out
         strict = build_residual_imaging_dict(
             img_xds,
             "residual",
             {"gain": 0.1, "entropy_stop": True, "entropy_max_snr": 2.0},
         )
-        self.assertTrue(np.isnan(strict.data[key]["entropy"][0]))
+        self.assertTrue(np.isnan(strict[key]["entropy"][0]))
 
     def test_wrong_parameter_is_refused(self):
         with self.assertRaisesRegex(ValueError, "entropy_stop"):
@@ -3268,9 +3321,10 @@ class TestResidualEntropyInImagingDict(unittest.TestCase):
         residual = build_residual_imaging_dict(
             img_xds, "residual", {"gain": 0.1, "entropy_stop": True}
         )
-        update = ImagingDict()
-        for key in residual.data:
-            update.add(
+        update = {}
+        for key in residual:
+            add_to_imaging_dict(
+                update,
                 {"peakres": 0.1, "masksum": 10, "iter_done": 5},
                 time=key.time,
                 pol=key.pol,
@@ -3278,19 +3332,15 @@ class TestResidualEntropyInImagingDict(unittest.TestCase):
             )
         copy_residual_statistics(update, residual)
         key = Key(time=0, chan=0, pol=1)
-        self.assertEqual(update.data[key]["entropy"], residual.data[key]["entropy"])
-        self.assertEqual(
-            update.data[key]["residual_snr"], residual.data[key]["residual_snr"]
-        )
+        self.assertEqual(update[key]["entropy"], residual[key]["entropy"])
+        self.assertEqual(update[key]["residual_snr"], residual[key]["residual_snr"])
         # the statistics of the residual the model update started from
         for field in RESIDUAL_STATISTICS:
-            self.assertEqual(
-                update.data[key][f"start_{field}"], residual.data[key][field]
-            )
+            self.assertEqual(update[key][f"start_{field}"], residual[key][field])
         # one value per imaging cycle in the merged record
         merged = merge_imaging_dicts([update, update])
-        self.assertEqual(len(merged.data[key]["entropy"]), 2)
-        self.assertEqual(len(merged.data[key]["start_rms_in_mask"]), 2)
+        self.assertEqual(len(merged[key]["entropy"]), 2)
+        self.assertEqual(len(merged[key]["start_rms_in_mask"]), 2)
 
     def test_residual_statistics_of_every_plane(self):
         from astroviper.processing_functions.image_analysis.image_statistics import (
@@ -3299,11 +3349,11 @@ class TestResidualEntropyInImagingDict(unittest.TestCase):
 
         img_xds = self._img_xds()
         record = build_residual_imaging_dict(img_xds, "residual", {"gain": 0.1})
-        for key, fields in record.data.items():
+        for key, fields in record.items():
             plane = img_xds["SKY_RESIDUAL"].values[key.time, key.chan, key.pol]
             for field, value in plane_residual_statistics(plane).items():
                 np.testing.assert_equal(fields[field], [value])
-        self.assertEqual(record.data[Key(time=0, chan=1, pol=1)]["max_in_mask"], [50.0])
+        self.assertEqual(record[Key(time=0, chan=1, pol=1)]["max_in_mask"], [50.0])
 
     def test_record_cycle_time(self):
         from astroviper.processing_functions.imaging.utils.cycle_control import (
@@ -3312,7 +3362,7 @@ class TestResidualEntropyInImagingDict(unittest.TestCase):
 
         record = build_residual_imaging_dict(self._img_xds(), "residual", {"gain": 0.1})
         record_cycle_time(record, "t_residual_update", 1.5)
-        for fields in record.data.values():
+        for fields in record.values():
             self.assertEqual(fields["t_residual_update"], [1.5])
 
 
@@ -3325,9 +3375,10 @@ class TestPerStokesThreshold(unittest.TestCase):
 
     @staticmethod
     def _planes(peaks):
-        rd = ImagingDict()
+        rd = {}
         for pol, peak in enumerate(peaks):
-            rd.add(
+            add_to_imaging_dict(
+                rd,
                 {"peakres": peak, "masksum": 100, "max_psf_sidelobe": 0.2},
                 time=0,
                 pol=pol,
@@ -3336,37 +3387,41 @@ class TestPerStokesThreshold(unittest.TestCase):
         return rd
 
     def test_each_plane_stops_at_its_own_threshold(self):
-        controller = CycleController(max_iter=1000, threshold=[1e-3, 1e-4])
-        controller.check_convergence(self._planes([5e-4, 5e-4]))
-        self.assertEqual(controller.stop_code_imaging[0, 0, 0], IMAGING_THRESHOLD)
-        self.assertEqual(controller.stop_code_imaging[0, 0, 1], IMAGING_CONTINUE)
+        controller = make_cycle_control_state(max_iter=1000, threshold=[1e-3, 1e-4])
+        check_convergence(controller, self._planes([5e-4, 5e-4]))
+        self.assertEqual(controller["stop_code_imaging"][0, 0, 0], IMAGING_THRESHOLD)
+        self.assertEqual(controller["stop_code_imaging"][0, 0, 1], IMAGING_CONTINUE)
 
     def test_threshold_per_cycle_is_floored_per_plane(self):
-        controller = CycleController(
+        controller = make_cycle_control_state(
             max_iter=1000, threshold=[1e-3, 1e-4], psf_sidelobe_factor=1.0
         )
-        controller.ensure_planes(1, 1, 2)
-        per_plane = controller.per_plane_threshold_per_cycle(self._planes([2e-3, 2e-3]))
+        ensure_planes(controller, 1, 1, 2)
+        per_plane = per_plane_threshold_per_cycle(
+            controller, self._planes([2e-3, 2e-3])
+        )
         np.testing.assert_allclose(per_plane[0, 0], [1e-3, 0.2 * 2e-3])
 
     def test_one_value_applies_to_every_plane(self):
-        controller = CycleController(max_iter=1000, threshold=1e-3)
-        controller.check_convergence(self._planes([5e-4, 2e-3]))
-        self.assertEqual(controller.stop_code_imaging[0, 0, 0], IMAGING_THRESHOLD)
-        self.assertEqual(controller.stop_code_imaging[0, 0, 1], IMAGING_CONTINUE)
+        controller = make_cycle_control_state(max_iter=1000, threshold=1e-3)
+        check_convergence(controller, self._planes([5e-4, 2e-3]))
+        self.assertEqual(controller["stop_code_imaging"][0, 0, 0], IMAGING_THRESHOLD)
+        self.assertEqual(controller["stop_code_imaging"][0, 0, 1], IMAGING_CONTINUE)
 
     def test_one_value_per_plane_is_required(self):
-        controller = CycleController(max_iter=1000, threshold=[1e-3, 1e-4, 1e-5])
+        controller = make_cycle_control_state(
+            max_iter=1000, threshold=[1e-3, 1e-4, 1e-5]
+        )
         with self.assertRaisesRegex(ValueError, "polarization planes"):
-            controller.ensure_planes(1, 1, 2)
+            ensure_planes(controller, 1, 1, 2)
 
     def test_negative_value_is_refused(self):
         with self.assertRaisesRegex(ValueError, "threshold"):
-            CycleController(max_iter=1000, threshold=[1e-3, -1e-4])
+            make_cycle_control_state(max_iter=1000, threshold=[1e-3, -1e-4])
 
     def test_state_lists_the_thresholds(self):
-        controller = CycleController(max_iter=1000, threshold=[1e-3, 1e-4])
-        self.assertEqual(controller.get_state()["threshold"], [1e-3, 1e-4])
+        controller = make_cycle_control_state(max_iter=1000, threshold=[1e-3, 1e-4])
+        self.assertEqual(get_state(controller)["threshold"], [1e-3, 1e-4])
 
 
 class TestThresholdTolerance(unittest.TestCase):
@@ -3390,10 +3445,11 @@ class TestThresholdTolerance(unittest.TestCase):
 
     @staticmethod
     def _record(peaks, npol):
-        rd = ImagingDict()
+        rd = {}
         for chan, peak in enumerate(peaks):
             for pol in range(npol):
-                rd.add(
+                add_to_imaging_dict(
+                    rd,
                     {"peakres": float(peak), "masksum": 100, "max_psf_sidelobe": 0.2},
                     time=0,
                     pol=pol,
@@ -3402,9 +3458,11 @@ class TestThresholdTolerance(unittest.TestCase):
         return rd
 
     def _codes(self, threshold, peaks, **kwargs):
-        controller = CycleController(max_iter=1000, threshold=threshold, **kwargs)
-        controller.check_convergence(self._record(peaks, np.size(threshold)))
-        return controller.stop_code_imaging[0]
+        controller = make_cycle_control_state(
+            max_iter=1000, threshold=threshold, **kwargs
+        )
+        check_convergence(controller, self._record(peaks, np.size(threshold)))
+        return controller["stop_code_imaging"][0]
 
     def test_zero_reproduces_the_threshold_stop(self):
         """``0`` gives the stop codes of ``peak <= threshold``."""
@@ -3436,7 +3494,9 @@ class TestThresholdTolerance(unittest.TestCase):
         )
 
     def test_default_is_the_heuristic(self):
-        self.assertEqual(CycleController().threshold_tolerance, THRESHOLD_TOLERANCE)
+        self.assertEqual(
+            make_cycle_control_state()["threshold_tolerance"], THRESHOLD_TOLERANCE
+        )
         threshold = 1e-3
         limit = threshold * (1 + THRESHOLD_TOLERANCE)
         peaks = [1.01 * threshold, np.nextafter(limit, np.inf)]
@@ -3456,11 +3516,11 @@ class TestThresholdTolerance(unittest.TestCase):
         rd = self._record([1.01e-3, 2e-3, 1.0], 1)
         per_plane = []
         for tau in (0.0, 0.02):
-            controller = CycleController(
+            controller = make_cycle_control_state(
                 max_iter=1000, threshold=1e-3, threshold_tolerance=tau
             )
-            controller.ensure_planes(1, 3, 1)
-            per_plane.append(controller.per_plane_threshold_per_cycle(rd))
+            ensure_planes(controller, 1, 3, 1)
+            per_plane.append(per_plane_threshold_per_cycle(controller, rd))
         np.testing.assert_array_equal(per_plane[0], per_plane[1])
 
     def test_a_stopped_plane_gets_no_iterations(self):
@@ -3473,9 +3533,10 @@ class TestThresholdTolerance(unittest.TestCase):
         )
 
         threshold = 1e-3
-        rd = ImagingDict()
+        rd = {}
         for pol, peak in enumerate((1.01 * threshold, 5 * threshold, 0.5 * threshold)):
-            rd.add(
+            add_to_imaging_dict(
+                rd,
                 {"peakres": peak, "masksum": 100, "max_psf_sidelobe": 0.2},
                 time=0,
                 pol=pol,
@@ -3489,12 +3550,12 @@ class TestThresholdTolerance(unittest.TestCase):
                 [0, 800, 0],
             ),
         ):
-            controller = CycleController(
+            controller = make_cycle_control_state(
                 max_iter=800, threshold=[threshold] * 3, threshold_tolerance=tau
             )
-            stopcode, _ = controller.check_convergence(rd)
+            stopcode, _ = check_convergence(controller, rd)
             self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
-            self.assertEqual(controller.stop_code_imaging[0, 0].tolist(), codes)
+            self.assertEqual(controller["stop_code_imaging"][0, 0].tolist(), codes)
             max_iter_per_cycle_updated, threshold_per_cycle = get_per_cycle_limits(
                 controller, rd
             )
@@ -3505,12 +3566,51 @@ class TestThresholdTolerance(unittest.TestCase):
     def test_invalid_values_are_refused(self):
         for value in (-0.01, -1, np.nan, np.inf, True, "0.02", None):
             with self.assertRaisesRegex(ValueError, "threshold_tolerance"):
-                CycleController(threshold=1e-3, threshold_tolerance=value)
+                make_cycle_control_state(threshold=1e-3, threshold_tolerance=value)
 
     def test_state_lists_the_tolerance(self):
         self.assertEqual(
-            CycleController().get_state()["threshold_tolerance"], THRESHOLD_TOLERANCE
+            get_state(make_cycle_control_state())["threshold_tolerance"],
+            THRESHOLD_TOLERANCE,
         )
-        controller = CycleController(threshold_tolerance=np.float32(0.25))
-        self.assertEqual(controller.get_state()["threshold_tolerance"], 0.25)
-        self.assertIs(type(controller.threshold_tolerance), float)
+        controller = make_cycle_control_state(threshold_tolerance=np.float32(0.25))
+        self.assertEqual(get_state(controller)["threshold_tolerance"], 0.25)
+        self.assertIs(type(controller["threshold_tolerance"]), float)
+
+
+def test_plot_convergence_history_of_two_cycles():
+    """The plot of a plane is built from a two-cycle imaging_dict, without a
+    display."""
+    hv = pytest.importorskip("holoviews")
+    pytest.importorskip("bokeh")
+    rd = {}
+    for start_peakres, peakres, start_model_flux, model_flux in (
+        (1.0, 0.5, 0.0, 0.5),
+        (0.5, 0.2, 0.5, 0.8),
+    ):
+        add_to_imaging_dict(
+            rd,
+            {
+                "start_peakres": start_peakres,
+                "peakres": peakres,
+                "iter_done": 100,
+                "start_model_flux": start_model_flux,
+                "model_flux": model_flux,
+            },
+            time=0,
+            pol=0,
+            chan=0,
+        )
+
+    plot = plot_convergence_history(rd)
+
+    assert isinstance(plot, hv.DynamicMap)
+    assert [(kdim.name, kdim.values) for kdim in plot.kdims] == [
+        ("Stokes", ["I"]),
+        ("Channel", [0]),
+    ]
+    peakres_curve, model_flux_curve = plot["I", 0]
+    np.testing.assert_array_equal(peakres_curve.dimension_values(0), [0, 100, 200])
+    np.testing.assert_array_equal(peakres_curve.dimension_values(1), [1.0, 0.5, 0.2])
+    np.testing.assert_array_equal(model_flux_curve.dimension_values(0), [0, 100, 200])
+    np.testing.assert_array_equal(model_flux_curve.dimension_values(1), [0.0, 0.5, 0.8])

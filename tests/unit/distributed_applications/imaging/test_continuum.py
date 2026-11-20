@@ -1847,13 +1847,13 @@ def test_tw_hydra_native_mtmfs_matches_reduction_and_visibility_cache_modes(
         (cached_result, cached),
     ):
         assert result["n_cycles"] == 2
-        assert result["controller"].cycles_done == 2
-        assert result["controller"].total_iter_done > 0
-        assert result["deconvolution"].data
+        assert result["cycle_control_state"]["cycles_done"] == 2
+        assert result["cycle_control_state"]["total_iter_done"] > 0
+        assert result["deconvolution"]
         assert image.SKY_MODEL.sizes["taylor_term"] == 2
         assert np.nanmax(np.abs(image.SKY_MODEL.isel(taylor_term=0))) > 0.0
         assert np.nanmax(np.abs(image.SKY_MODEL.isel(taylor_term=1))) > 0.0
-        for fields in result["deconvolution"].data.values():
+        for fields in result["deconvolution"].values():
             assert np.isfinite(fields["hessian_condition_number"]).all()
             np.testing.assert_array_equal(fields["scales"], [0.0])
 
@@ -2809,7 +2809,7 @@ def test_refreshed_residual_resumes_after_provisional_threshold_without_restorin
         events.append("update")
         # Emulate an approximate model-update residual below threshold, while
         # keeping the actual model and visibility-based residual untouched.
-        for fields in result.data.values():
+        for fields in result.values():
             if isinstance(fields["peakres"], list):
                 fields["peakres"][-1] = 0.0
             else:
@@ -2851,11 +2851,15 @@ def test_refreshed_residual_resumes_after_provisional_threshold_without_restorin
     assert result["stopcode"].imaging == (
         IMAGING_MAX_CYCLES if max_iter == 100 else IMAGING_MAX_ITER
     )
-    assert result["controller"].cycles_done == result["n_cycles"] == expected_updates
+    assert (
+        result["cycle_control_state"]["cycles_done"]
+        == result["n_cycles"]
+        == expected_updates
+    )
     assert len(result["timing_graphs"]) == expected_updates + 2
-    assert result["controller"].total_iter_done > 0
+    assert result["cycle_control_state"]["total_iter_done"] > 0
     assert np.nanmax(np.abs(image.SKY_RESIDUAL.values)) > 1e-8
-    assert result["residual_statistics"].data
+    assert result["residual_statistics"]
 
 
 @pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
