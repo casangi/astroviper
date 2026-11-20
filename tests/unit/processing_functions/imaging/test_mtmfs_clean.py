@@ -1,6 +1,6 @@
 """
 Unit tests for the stateless MTMFS CLEAN functions
-(``astroviper.processing_functions.imaging.deconvolvers.mtmfs``).
+(``astroviper.processing_functions.imaging.model_update.deconvolvers.mtmfs``).
 
 Casacore-free port of the model update behind CASA tclean's
 ``deconvolver='mtmfs'`` (``SDAlgorithmMSMFS`` / ``MultiTermMatrixCleaner``),
@@ -26,7 +26,7 @@ import numpy as np
 import pytest
 
 try:
-    from astroviper.processing_functions.imaging.deconvolvers import mtmfs
+    from astroviper.processing_functions.imaging.model_update.deconvolvers import mtmfs
 
     MTMFS_AVAILABLE = True
 except ImportError as e:  # pragma: no cover

@@ -328,7 +328,7 @@ def grid_imaging_weight_density_continuum(
     import numpy as np
     import xarray as xr
 
-    from astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weights import (
+    from astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.grid_imaging_weights import (
         grid_imaging_weights,
     )
 
@@ -715,7 +715,7 @@ def degrid_imaging_weights_continuum(
     import numpy as np
     import xarray as xr
 
-    from astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weights import (
+    from astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.grid_imaging_weights import (
         degrid_imaging_weights,
     )
     from astroviper.utils.data_group_tools import (
@@ -1126,10 +1126,10 @@ def calculate_imaging_weights(
 
         check_residual_update(locals(), mode=CUBE_SINGLE_FIELD)
 
-    from astroviper.processing_functions.imaging.imaging_weighting.briggs_weighting import (
+    from astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.briggs_weighting import (
         calculate_briggs_params,
     )
-    from astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weights import (
+    from astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.grid_imaging_weights import (
         degrid_imaging_weights,
         grid_imaging_weights,
     )

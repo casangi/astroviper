@@ -3,7 +3,7 @@ Anti-aliasing convolution gridder (C++ extension).
 """
 
 try:
-    from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp._anti_alias_grid_ext import (
+    from astroviper.processing_functions.imaging.gridders.anti_alias.anti_alias_grid_cpp._anti_alias_grid_ext import (
         anti_alias_degrid,
         anti_alias_grid,
         anti_alias_grid_uv_sampling,

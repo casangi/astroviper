@@ -6,7 +6,7 @@ update and of the point spread function by exact sums over the visibilities
 and the image pixels, made by
 :class:`~astroviper.processing_functions.imaging.gridders.direct_fourier_transform.gridder_direct_fourier_transform.GridderDirectFourierTransform`
 with the threaded C++ kernels of
-:mod:`~astroviper.processing_functions.imaging.gridders.direct_fourier_transform_cpp`.
+:mod:`~astroviper.processing_functions.imaging.gridders.direct_fourier_transform.direct_fourier_transform_cpp`.
 The image grid is the image itself: there is no padding (``fft_padding`` is
 not used), no FFT and no correction.
 

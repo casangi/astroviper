@@ -150,13 +150,13 @@ from astroviper.distributed_applications.imaging import (
     image_continuum_single_field,
     image_cube_single_field,
 )
-from astroviper.processing_functions.imaging import model_update
-from astroviper.processing_functions.imaging.gridders import (
+from astroviper.processing_functions.imaging.gridders.direct_fourier_transform import (
     direct_fourier_transform_cpp,
 )
 from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
     DEFAULT_GRIDDING_KERNEL_PARAMS,
 )
+from astroviper.processing_functions.imaging.model_update import model_update
 from astroviper.processing_functions.imaging.utils.cycle_control import (
     IMAGING_DIVERGENCE,
     IMAGING_MAX_CYCLES,

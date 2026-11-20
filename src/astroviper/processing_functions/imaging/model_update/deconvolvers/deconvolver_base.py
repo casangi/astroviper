@@ -47,7 +47,7 @@ class Deconvolver(metaclass=Interface):
         listed here are for ``"pixels"``. A deconvolver of ``"taylor_terms"``
         takes the image dataset instead and returns its record and timing
         frame (see
-        :meth:`~astroviper.processing_functions.imaging.deconvolvers.mtmfs.deconvolver_mtmfs.DeconvolverMtmfs.deconvolve`).
+        :meth:`~astroviper.processing_functions.imaging.model_update.deconvolvers.mtmfs.deconvolver_mtmfs.DeconvolverMtmfs.deconvolve`).
 
         Parameters
         ----------

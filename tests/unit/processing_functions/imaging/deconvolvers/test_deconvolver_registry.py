@@ -13,22 +13,22 @@ from astroviper.processing_functions.imaging.config_check import (
 from astroviper.processing_functions.imaging.config_check.param_check_model_update import (
     check_deconvolver,
 )
-from astroviper.processing_functions.imaging.deconvolvers.aspclean.deconvolver_asp import (
+from astroviper.processing_functions.imaging.model_update.deconvolvers.aspclean.deconvolver_asp import (
     DeconvolverAsp,
 )
-from astroviper.processing_functions.imaging.deconvolvers.deconvolver_base import (
+from astroviper.processing_functions.imaging.model_update.deconvolvers.deconvolver_base import (
     Deconvolver,
 )
-from astroviper.processing_functions.imaging.deconvolvers.deconvolver_registry import (
+from astroviper.processing_functions.imaging.model_update.deconvolvers.deconvolver_registry import (
     DECONVOLVERS,
 )
-from astroviper.processing_functions.imaging.deconvolvers.hogbom.deconvolver_hogbom import (
+from astroviper.processing_functions.imaging.model_update.deconvolvers.hogbom.deconvolver_hogbom import (
     DeconvolverHogbom,
 )
-from astroviper.processing_functions.imaging.deconvolvers.hogbom.deconvolver_hogbom_many_threads import (
+from astroviper.processing_functions.imaging.model_update.deconvolvers.hogbom.deconvolver_hogbom_many_threads import (
     DeconvolverHogbomManyThreads,
 )
-from astroviper.processing_functions.imaging.deconvolvers.mtmfs.deconvolver_mtmfs import (
+from astroviper.processing_functions.imaging.model_update.deconvolvers.mtmfs.deconvolver_mtmfs import (
     DeconvolverMtmfs,
 )
 from astroviper.utils.interface import Interface

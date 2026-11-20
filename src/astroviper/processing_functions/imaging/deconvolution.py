@@ -3,7 +3,10 @@ import toolviper.utils.logger as logger
 import xarray as xr
 
 from astroviper.processing_functions.image_analysis import image_statistics as imgstats
-from astroviper.processing_functions.imaging.deconvolvers import aspclean, hogbom
+from astroviper.processing_functions.imaging.model_update.deconvolvers import (
+    aspclean,
+    hogbom,
+)
 from astroviper.processing_functions.imaging.utils.imaging_dict import (
     COMPONENT_COUNT_FIELDS,
     ITERATION_HISTORY_FIELDS,
@@ -968,7 +971,7 @@ def deconvolve(
 
     # plt.show()
 
-    from astroviper.processing_functions.imaging.deconvolvers.deconvolver_registry import (
+    from astroviper.processing_functions.imaging.model_update.deconvolvers.deconvolver_registry import (
         DECONVOLVERS,
     )
 

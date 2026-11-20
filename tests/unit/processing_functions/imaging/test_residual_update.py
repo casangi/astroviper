@@ -1,4 +1,4 @@
-"""Unit tests for :mod:`astroviper.processing_functions.imaging.residual_update`.
+"""Unit tests for :mod:`astroviper.processing_functions.imaging.residual_update.residual_update`.
 
 The residual update must work for whichever measurement-set data group is
 imaged (``processing_set_data_group_name``), not only ``"base"``: the loaders
@@ -26,7 +26,7 @@ from astroviper.processing_functions.imaging.gridding_convolution_functions.grid
 from astroviper.processing_functions.imaging.gridding_convolution_functions.kernel_lookup import (
     stencil_values,
 )
-from astroviper.processing_functions.imaging.residual_update import (
+from astroviper.processing_functions.imaging.residual_update.residual_update import (
     imaging_setup_single_field,
     make_visibility_model_single_field,
     residual_update_cube_single_field,
@@ -543,7 +543,7 @@ def test_make_visibility_model_missing_input_data_group_raises():
 
 
 def test_direct_cube_setup_checks_fitter_before_input_access():
-    from astroviper.processing_functions.imaging.residual_update import (
+    from astroviper.processing_functions.imaging.residual_update.residual_update import (
         imaging_setup_single_field,
     )
 

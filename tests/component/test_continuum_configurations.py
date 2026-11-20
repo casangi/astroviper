@@ -673,7 +673,7 @@ def test_hessian_reuse_matches_fresh_checks_across_cycles(
 ):
     from importlib import import_module
 
-    from astroviper.processing_functions.imaging.deconvolvers import mtmfs
+    from astroviper.processing_functions.imaging.model_update.deconvolvers import mtmfs
 
     checks = import_module(
         "astroviper.processing_functions.imaging.config_check.param_check_model_update"

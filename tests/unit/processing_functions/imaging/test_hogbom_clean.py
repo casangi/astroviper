@@ -1,6 +1,6 @@
 """
 Unit tests for the pybind11-wrapped Hogbom CLEAN routine
-(``astroviper.processing_functions.imaging.deconvolvers.hogbom.clean``).
+(``astroviper.processing_functions.imaging.model_update.deconvolvers.hogbom.clean``).
 
 The wrapper operates on Python-owned numpy buffers with no copies on the
 C++ side: the ``dirty_image`` and ``model`` arrays are written into
@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 
 try:
-    from astroviper.processing_functions.imaging.deconvolvers import hogbom
+    from astroviper.processing_functions.imaging.model_update.deconvolvers import hogbom
 
     HOGBOM_AVAILABLE = True
 except ImportError as e:  # pragma: no cover

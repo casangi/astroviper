@@ -17,7 +17,7 @@ import unittest
 import numpy as np
 from reference_gridders import anti_alias_grid_reference
 
-from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
+from astroviper.processing_functions.imaging.gridders.anti_alias.anti_alias_grid_cpp import (
     anti_alias_grid,
 )
 from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
@@ -541,7 +541,7 @@ class TestSinglePrecisionDegrid(unittest.TestCase):
     """Single-precision (complex64) model grid degridded to double visibilities."""
 
     def test_complex64_grid_degrid_to_complex128_vis(self):
-        from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
+        from astroviper.processing_functions.imaging.gridders.anti_alias.anti_alias_grid_cpp import (
             anti_alias_degrid,
         )
 

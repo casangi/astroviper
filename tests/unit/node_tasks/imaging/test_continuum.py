@@ -1084,7 +1084,7 @@ def test_stored_coordinate_indexer_rejects_missing_values():
 @pytest.mark.parametrize("initial", [True, False])
 def test_model_update_passes_cube_parameter_names_to_backend(monkeypatch, initial):
     """Node and Taylor adapter preserve the controller's per-plane controls."""
-    import astroviper.processing_functions.imaging.model_update as cube_update
+    import astroviper.processing_functions.imaging.model_update.model_update as cube_update
     import astroviper.processing_functions.imaging.utils as imaging_utils
 
     dims = ("time", "taylor_term", "polarization", "l", "m")

@@ -11,7 +11,7 @@ import unittest
 
 import numpy as np
 
-from astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weights import (
+from astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.grid_imaging_weights import (
     degrid_imaging_weights,
     grid_imaging_weights,
 )

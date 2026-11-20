@@ -1,7 +1,8 @@
 """The direct Fourier transform between the visibilities and the image.
 
 It sums over the visibilities and the image pixels with the threaded C++
-kernels of ``gridders/direct_fourier_transform_cpp``, in the convention of
+kernels of ``gridders/direct_fourier_transform/direct_fourier_transform_cpp``,
+in the convention of
 :mod:`~astroviper.processing_functions.imaging.direct_fourier_transform`: no uv
 grid, padding, FFT or correction.
 """
@@ -90,7 +91,7 @@ class GridderDirectFourierTransform(Gridder):
         processing_function_threads,
     ):
         """:meth:`Gridder.grid` with the C++ ``dft_image``."""
-        from astroviper.processing_functions.imaging.gridders.direct_fourier_transform_cpp import (
+        from astroviper.processing_functions.imaging.gridders.direct_fourier_transform.direct_fourier_transform_cpp import (
             dft_image,
         )
 
@@ -121,7 +122,7 @@ class GridderDirectFourierTransform(Gridder):
         processing_function_threads,
     ):
         """:meth:`Gridder.grid_uv_sampling` with the C++ ``dft_image_uv_sampling``."""
-        from astroviper.processing_functions.imaging.gridders.direct_fourier_transform_cpp import (
+        from astroviper.processing_functions.imaging.gridders.direct_fourier_transform.direct_fourier_transform_cpp import (
             dft_image_uv_sampling,
         )
 
@@ -219,7 +220,7 @@ class GridderDirectFourierTransform(Gridder):
             _model_visibilities,
             image_direction_cosines,
         )
-        from astroviper.processing_functions.imaging.gridders.direct_fourier_transform_cpp import (
+        from astroviper.processing_functions.imaging.gridders.direct_fourier_transform.direct_fourier_transform_cpp import (
             dft_predict,
         )
         from astroviper.utils.data_group_tools import create_data_groups_in_and_out

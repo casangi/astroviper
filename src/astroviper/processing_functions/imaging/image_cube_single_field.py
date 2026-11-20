@@ -28,7 +28,7 @@ def imaging_preparation_single_field(
     * construction of the cycle control state and the (empty) combined
       return dict, and
     * the imaging weights, the point spread function and the primary beam (via
-      :func:`~astroviper.processing_functions.imaging.residual_update.imaging_setup_single_field`).
+      :func:`~astroviper.processing_functions.imaging.residual_update.residual_update.imaging_setup_single_field`).
 
     The dirty image and the first model update are deliberately NOT done here --
     they are the first iteration of the loop in :func:`image_cube_single_field`.
@@ -443,7 +443,7 @@ def imaging_preparation_single_field(
 
     import toolviper.utils.logger as logger
 
-    from astroviper.processing_functions.imaging.residual_update import (
+    from astroviper.processing_functions.imaging.residual_update.residual_update import (
         imaging_setup_single_field,
     )
     from astroviper.processing_functions.imaging.utils import (
@@ -1082,10 +1082,10 @@ def image_cube_single_field(
     from astroviper.processing_functions.imaging.make_point_spread_function import (
         make_subtraction_point_spread_function_single_field,
     )
-    from astroviper.processing_functions.imaging.model_update import (
+    from astroviper.processing_functions.imaging.model_update.model_update import (
         model_update_cube_single_field,
     )
-    from astroviper.processing_functions.imaging.residual_update import (
+    from astroviper.processing_functions.imaging.residual_update.residual_update import (
         residual_update_cube_single_field,
     )
     from astroviper.processing_functions.imaging.utils import (

@@ -155,10 +155,10 @@ via the cycle control functions on `cycle_control_state`:
 - Restore: `restore.py` (`restore_image`) — clean-beam-convolved model plus
   residual (FFT convolution, clean beam built from the residual group's
   `beam_fit_params_point_spread_function`).
-- Deconvolvers: `deconvolution.py` dispatch → `deconvolvers/hogbom` (C++),
-  `deconvolvers/aspclean` (C++).
+- Deconvolvers: `deconvolution.py` dispatch → `model_update/deconvolvers/hogbom` (C++),
+  `model_update/deconvolvers/aspclean` (C++).
 - The anti-aliasing gridder is implemented in C++
-  (`gridders/anti_alias_grid_cpp`); `gridding_kernel_params` selects its
+  (`gridders/anti_alias/anti_alias_grid_cpp`); `gridding_kernel_params` selects its
   kernel. The default is the `least_misfit` kernel of support 9,
   oversampling 300 and linear lookup (RADPS Memo 13a);
   `prolate_spheroidal_casa` is the kernel of CASA's standard gridder, and that

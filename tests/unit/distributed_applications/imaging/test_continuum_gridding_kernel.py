@@ -331,7 +331,9 @@ def test_mfs_with_a_designed_kernel_equals_the_cube_on_one_channel(
 
 def _spy_kernels(monkeypatch):
     """Record the kernel of every gridder, degridder and image correction call."""
-    from astroviper.processing_functions.imaging.gridders import anti_alias_grid_cpp
+    from astroviper.processing_functions.imaging.gridders.anti_alias import (
+        anti_alias_grid_cpp,
+    )
 
     calls = {"grid": [], "uv_sampling": [], "degrid": [], "correction": []}
     table_position = {"grid": 9, "uv_sampling": 8, "degrid": 7}

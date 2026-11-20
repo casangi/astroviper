@@ -653,7 +653,7 @@ def test_global_weight_preparation_builds_factors_and_returns_all_tasks(monkeypa
         lambda params: {"weighting": "briggs", "robust": 0.5},
     )
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.imaging_weighting.briggs_weighting.calculate_briggs_params",
+        "astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.briggs_weighting.calculate_briggs_params",
         lambda density, weights, params: np.ones((2, 1, 1)),
     )
     degrid_calls = []

@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 try:
-    from astroviper.processing_functions.imaging.deconvolvers import (  # noqa: F401
+    from astroviper.processing_functions.imaging.model_update.deconvolvers import (  # noqa: F401
         hogbom,
     )
 

@@ -6,15 +6,16 @@ cmake_minimum_required(VERSION 3.15...3.27)
 # directory on the module path. When built from the repo root these are already
 # set and the include_guard in AstroviperPybind.cmake makes include() a no-op.
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
-    project(astroviper_aspclean LANGUAGES CXX)
+    project(astroviper_mtmfs LANGUAGES CXX)
     get_filename_component(_av_repo_root
-        "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../.." ABSOLUTE)
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../.." ABSOLUTE)
     list(APPEND CMAKE_MODULE_PATH "${_av_repo_root}/cmake")
 endif()
 
 include(AstroviperPybind)
 
 astroviper_add_pybind_module(
-    NAME _aspclean_ext
-    SOURCES src/asp_clean.cpp python/bindings.cpp
+    NAME _mtmfs_ext
+    SOURCES src/mt_fft.cpp src/mt_scales.cpp src/mt_image_math.cpp
+            src/mtmfs_clean.cpp python/bindings.cpp
 )

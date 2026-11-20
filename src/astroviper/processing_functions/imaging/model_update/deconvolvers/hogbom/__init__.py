@@ -3,7 +3,7 @@ Hogbom CLEAN implementation
 """
 
 try:
-    from astroviper.processing_functions.imaging.deconvolvers.hogbom._hogbom_ext import (
+    from astroviper.processing_functions.imaging.model_update.deconvolvers.hogbom._hogbom_ext import (
         clean,
         clean_cube,
         clean_cube_many_threads,

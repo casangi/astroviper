@@ -3,11 +3,11 @@
 import pytest
 import xarray as xr
 
-from astroviper.processing_functions.imaging.deconvolvers.deconvolver_registry import (
-    DECONVOLVERS,
-)
 from astroviper.processing_functions.imaging.image_continuum_single_field import (
     _mtmfs_principal_residual_for_restoration,
+)
+from astroviper.processing_functions.imaging.model_update.deconvolvers.deconvolver_registry import (
+    DECONVOLVERS,
 )
 from tests.utils.continuum_images import make_runaway_taylor_image
 

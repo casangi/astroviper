@@ -216,7 +216,7 @@ function, `processing_functions/simulation/antenna_beams.py::symmetric_beam_resp
 `processing_functions/imaging/primary_beam/airy_disk.py` (textbook by default,
 CASA's `PBMath1DAiry` with `func="casa_airy"`) and the EVLA beam polynomial,
 zero beyond `max_rad_1GHz` when the model has one. The Adaptive Scale Pixel
-deconvolver (`processing_functions/imaging/deconvolvers/aspclean/`, a port of
+deconvolver (`processing_functions/imaging/model_update/deconvolvers/aspclean/`, a port of
 CASA's `AspMatrixCleaner`) does its FFTs with the vendored
 `include/pocketfft_hdronly.h` (the BSD-3 header-only FFT behind NumPy/SciPy,
 kept verbatim with its licence block); its per-Aspen L-BFGS
@@ -618,7 +618,7 @@ per-variable nodes.
     datasets it is given (`ps_xdt`, `img_xds`, `gcf_xds`), never in the class.
 - **Formatting**: **Ruff** (enforced by CI + pre-commit). Don't hand-format.
 - **Imports**: prefer **absolute** imports (`from
-  astroviper.processing_functions.imaging.residual_update import ...`). Relative
+  astroviper.processing_functions.imaging.residual_update.residual_update import ...`). Relative
   imports appear only as short re-exports in `__init__.py` files. Heavy/optional
   deps (dask, zarr, matplotlib, the C++ ext, even numpy in some hot node-task
   paths) are frequently imported **inside functions** to keep worker import time

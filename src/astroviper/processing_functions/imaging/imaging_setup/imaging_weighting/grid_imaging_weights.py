@@ -47,7 +47,7 @@ def grid_imaging_weights(
 
     This is a thin Python wrapper that prepares mapping arrays and basic parameters,
     and then calls the serial C++ kernel
-    :func:`~astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weights_cpp.grid_imaging_weights`.
+    :func:`~astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.grid_imaging_weights_cpp.grid_imaging_weights`.
 
     Parameters
     ----------
@@ -106,7 +106,7 @@ def grid_imaging_weights(
       continuum path instead truncates the shifted coordinate toward zero;
       select that behavior with ``truncate_uv_cells=True``.
     """
-    from astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weights_cpp import (
+    from astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.grid_imaging_weights_cpp import (
         grid_imaging_weights as grid_imaging_weights_cpp,
     )
 
@@ -150,7 +150,7 @@ def degrid_imaging_weights(
     per-visibility imaging weights (e.g., natural/Briggs/robust).
 
     This is a thin Python wrapper around the serial C++ kernel
-    :func:`~astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weights_cpp.degrid_imaging_weights`.
+    :func:`~astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.grid_imaging_weights_cpp.degrid_imaging_weights`.
 
     Parameters
     ----------
@@ -195,7 +195,7 @@ def degrid_imaging_weights(
       their natural weight when the corresponding density-grid value is zero
       or NaN.
     """
-    from astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weights_cpp import (
+    from astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.grid_imaging_weights_cpp import (
         degrid_imaging_weights as degrid_imaging_weights_cpp,
     )
 

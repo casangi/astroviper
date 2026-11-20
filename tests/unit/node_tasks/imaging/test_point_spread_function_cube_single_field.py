@@ -125,7 +125,7 @@ def test_the_gridder_reaches_the_setup(monkeypatch):
 
     graph_map = importlib.import_module("graphviper.graph_tools.map")
     residual_update = importlib.import_module(
-        "astroviper.processing_functions.imaging.residual_update"
+        "astroviper.processing_functions.imaging.residual_update.residual_update"
     )
 
     class SetupReached(Exception):

@@ -139,7 +139,7 @@ def check_model_update(config, *, mode, require_complete=False):
         # Högbom and Asp update only the constant term of a continuum model.
         model_basis = None
         if deconvolver is not None:
-            from astroviper.processing_functions.imaging.deconvolvers.deconvolver_registry import (
+            from astroviper.processing_functions.imaging.model_update.deconvolvers.deconvolver_registry import (
                 DECONVOLVERS,
             )
 
@@ -1120,7 +1120,7 @@ def check_model_products(
     from astroviper.processing_functions.imaging.config_check._spatial_hessian import (
         check_psf_spatial_hessian,
     )
-    from astroviper.processing_functions.imaging.deconvolvers import mtmfs
+    from astroviper.processing_functions.imaging.model_update.deconvolvers import mtmfs
 
     psf_values = psf.transpose(*psf_dims).values
     hessian_fields = (
@@ -1434,7 +1434,7 @@ def check_deconvolver(deconvolver, *, mode):
     Restoration needs the algorithm name without the iteration controls and
     Taylor configuration required when actually updating a model.
     """
-    from astroviper.processing_functions.imaging.deconvolvers.deconvolver_registry import (
+    from astroviper.processing_functions.imaging.model_update.deconvolvers.deconvolver_registry import (
         DECONVOLVERS,
     )
 

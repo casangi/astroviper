@@ -220,7 +220,7 @@ def test_invalid_hermitian_allowance_is_rejected(tolerance):
 def test_gridded_even_psf_passes_self_adjointness(
     diagnostic_warnings, single_precision
 ):
-    from astroviper.processing_functions.imaging.residual_update import (
+    from astroviper.processing_functions.imaging.residual_update.residual_update import (
         imaging_setup_single_field,
     )
     from tests.unit.processing_functions.imaging.test_exact_psf_subtraction import (

@@ -11,7 +11,7 @@ from astroviper.processing_functions.imaging.config_check import CONTINUUM_SINGL
 from astroviper.processing_functions.imaging.config_check.param_check_model_update import (
     check_model_products,
 )
-from astroviper.processing_functions.imaging.deconvolvers import mtmfs
+from astroviper.processing_functions.imaging.model_update.deconvolvers import mtmfs
 from tests.utils.continuum_images import make_runaway_taylor_image
 
 

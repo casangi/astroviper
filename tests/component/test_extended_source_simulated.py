@@ -94,7 +94,7 @@ from astroviper.distributed_applications.imaging import (
     image_continuum_single_field,
     image_cube_single_field,
 )
-from astroviper.processing_functions.imaging import model_update
+from astroviper.processing_functions.imaging.model_update import model_update
 from astroviper.processing_functions.imaging.restore import (
     _clean_beam_kernel_ft,
     _convolve_with_clean_beam,

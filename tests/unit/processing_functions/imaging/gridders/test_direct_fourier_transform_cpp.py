@@ -17,7 +17,7 @@ import pickle
 import numpy as np
 import pytest
 
-from astroviper.processing_functions.imaging.gridders.direct_fourier_transform_cpp import (
+from astroviper.processing_functions.imaging.gridders.direct_fourier_transform.direct_fourier_transform_cpp import (
     cos_sin_turns,
     dft_image,
     dft_image_uv_sampling,

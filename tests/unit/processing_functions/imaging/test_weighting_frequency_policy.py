@@ -40,7 +40,7 @@ def _inputs(frequencies):
 @pytest.mark.parametrize("truncate", [False, True])
 def test_weighting_preserves_reordered_subset_and_uv_policy(truncate):
     ps, image = _inputs([1.2e9, 1.0e9])
-    module = "astroviper.processing_functions.imaging.imaging_weighting"
+    module = "astroviper.processing_functions.imaging.imaging_setup.imaging_weighting"
     with (
         patch(module + ".grid_imaging_weights.grid_imaging_weights") as grid,
         patch(
@@ -67,7 +67,7 @@ def test_weighting_preserves_reordered_subset_and_uv_policy(truncate):
 
 def test_weighting_uses_nearest_frequency_map():
     ps, image = _inputs([1.21e9, 1.0e9])
-    module = "astroviper.processing_functions.imaging.imaging_weighting"
+    module = "astroviper.processing_functions.imaging.imaging_setup.imaging_weighting"
     with (
         patch(module + ".grid_imaging_weights.grid_imaging_weights") as grid,
         patch(
@@ -129,9 +129,7 @@ def test_collapsed_global_weight_lookup_maps_channels_without_repeating_grid():
         coords={"frequency": [1.1e9]},
         attrs={"continuum_frequency_collapsed": True},
     )
-    module = (
-        "astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weights"
-    )
+    module = "astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.grid_imaging_weights"
     with patch(
         module + ".degrid_imaging_weights", return_value=np.ones((1, 1, 2, 1))
     ) as degrid:
@@ -201,13 +199,13 @@ def test_one_channel_continuum_weights_equal_cube_weights(monkeypatch, weighting
         grid_imaging_weight_density_continuum,
         normalize_imaging_weight_params,
     )
+    from astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.briggs_weighting import (
+        calculate_briggs_params,
+    )
     from astroviper.processing_functions.imaging.imaging_setup_continuum_single_field import (
         imaging_setup_continuum_single_field,
     )
-    from astroviper.processing_functions.imaging.imaging_weighting.briggs_weighting import (
-        calculate_briggs_params,
-    )
-    from astroviper.processing_functions.imaging.residual_update import (
+    from astroviper.processing_functions.imaging.residual_update.residual_update import (
         imaging_setup_single_field,
     )
 

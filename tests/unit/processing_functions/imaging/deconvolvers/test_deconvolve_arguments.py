@@ -6,7 +6,7 @@ from astroviper.processing_functions.imaging import (
     deconvolution,
     image_continuum_single_field,
 )
-from astroviper.processing_functions.imaging.deconvolvers.deconvolver_registry import (
+from astroviper.processing_functions.imaging.model_update.deconvolvers.deconvolver_registry import (
     DECONVOLVERS,
 )
 

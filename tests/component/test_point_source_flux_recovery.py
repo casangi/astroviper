@@ -987,7 +987,7 @@ def oracle_residual(work_dir, ps_store, truth_store, tag, size, gridding_kernel_
     from astroviper.processing_functions.imaging.image_cube_single_field import (
         imaging_preparation_single_field,
     )
-    from astroviper.processing_functions.imaging.residual_update import (
+    from astroviper.processing_functions.imaging.residual_update.residual_update import (
         residual_update_cube_single_field,
     )
     from astroviper.processing_functions.imaging.utils import (

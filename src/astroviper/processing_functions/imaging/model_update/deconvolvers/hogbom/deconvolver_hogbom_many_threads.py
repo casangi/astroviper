@@ -1,6 +1,6 @@
 """Hogbom CLEAN, with threads across and within the image planes."""
 
-from astroviper.processing_functions.imaging.deconvolvers.deconvolver_base import (
+from astroviper.processing_functions.imaging.model_update.deconvolvers.deconvolver_base import (
     Deconvolver,
 )
 

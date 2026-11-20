@@ -1008,7 +1008,7 @@ def prepare_continuum_imaging_weights_global(
         check_continuum_weight_density_products,
         normalize_imaging_weight_params,
     )
-    from astroviper.processing_functions.imaging.imaging_weighting.briggs_weighting import (
+    from astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.briggs_weighting import (
         calculate_briggs_params,
     )
 

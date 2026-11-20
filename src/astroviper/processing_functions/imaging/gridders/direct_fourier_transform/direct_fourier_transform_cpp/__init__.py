@@ -3,7 +3,7 @@ Direct Fourier transform between visibilities and an image (C++ extension).
 """
 
 try:
-    from astroviper.processing_functions.imaging.gridders.direct_fourier_transform_cpp._direct_fourier_transform_ext import (
+    from astroviper.processing_functions.imaging.gridders.direct_fourier_transform.direct_fourier_transform_cpp._direct_fourier_transform_ext import (
         cos_sin_turns,
         dft_image,
         dft_image_uv_sampling,

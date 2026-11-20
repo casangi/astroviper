@@ -8,7 +8,7 @@ the ``residual`` and ``model`` arrays are written into directly.
 """
 
 try:
-    from astroviper.processing_functions.imaging.deconvolvers.aspclean._aspclean_ext import (
+    from astroviper.processing_functions.imaging.model_update.deconvolvers.aspclean._aspclean_ext import (
         clean,
         clean_cube,
         convolve_centered,

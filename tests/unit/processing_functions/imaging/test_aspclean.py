@@ -1,7 +1,7 @@
 """
 Unit tests for the pybind11-wrapped Adaptive Scale Pixel (Asp / AAspClean)
 deconvolver
-(``astroviper.processing_functions.imaging.deconvolvers.aspclean``).
+(``astroviper.processing_functions.imaging.model_update.deconvolvers.aspclean``).
 
 This is a dependency-free port of CASA's ``AspMatrixCleaner``: casacore and
 ALGLIB have been replaced by the self-contained FFT (``asp_fft.hpp``) and
@@ -29,7 +29,9 @@ import numpy as np
 import pytest
 
 try:
-    from astroviper.processing_functions.imaging.deconvolvers import aspclean
+    from astroviper.processing_functions.imaging.model_update.deconvolvers import (
+        aspclean,
+    )
 
     ASP_AVAILABLE = True
 except ImportError as e:  # pragma: no cover

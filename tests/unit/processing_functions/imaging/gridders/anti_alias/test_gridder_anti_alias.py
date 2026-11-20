@@ -23,12 +23,12 @@ from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder im
     fft_norm_img_xds,
     ifft_norm_img_xds,
 )
-from astroviper.processing_functions.imaging.gridders.anti_alias.gridder_anti_alias import (
-    GridderAntiAlias,
-)
-from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
+from astroviper.processing_functions.imaging.gridders.anti_alias.anti_alias_grid_cpp import (
     anti_alias_grid,
     anti_alias_grid_uv_sampling,
+)
+from astroviper.processing_functions.imaging.gridders.anti_alias.gridder_anti_alias import (
+    GridderAntiAlias,
 )
 from astroviper.processing_functions.imaging.gridders.gridder_base import Gridder
 from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (

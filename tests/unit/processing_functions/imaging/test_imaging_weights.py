@@ -29,17 +29,13 @@ from astroviper.processing_functions.imaging.calculate_imaging_weights import (
 from astroviper.processing_functions.imaging.check_imaging_parameters import (
     check_imaging_weights_params,
 )
-from astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weights import (
+from astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.grid_imaging_weights import (
     degrid_imaging_weights,
 )
 
 _MS_DIMS = ("time", "baseline", "frequency", "polarization")
-_GRID_MOD_PATH = (
-    "astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weights"
-)
-_BRIGGS_MOD_PATH = (
-    "astroviper.processing_functions.imaging.imaging_weighting.briggs_weighting"
-)
+_GRID_MOD_PATH = "astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.grid_imaging_weights"
+_BRIGGS_MOD_PATH = "astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.briggs_weighting"
 
 
 def test_degrid_imaging_weights_rejects_non_native_float_density_grid():

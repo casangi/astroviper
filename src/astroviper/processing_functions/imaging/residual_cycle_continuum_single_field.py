@@ -250,7 +250,7 @@ def residual_cycle_continuum_single_field(
     from astroviper.processing_functions.imaging.image_continuum_single_field import (
         prepare_model_uv_mvc_single_field,
     )
-    from astroviper.processing_functions.imaging.residual_update import (
+    from astroviper.processing_functions.imaging.residual_update.residual_update import (
         calculate_residual_visibilities,
         make_visibility_model_single_field,
     )

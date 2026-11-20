@@ -7,7 +7,6 @@ import pandas as pd
 import pytest
 import xarray as xr
 
-from astroviper.processing_functions.imaging.deconvolvers import mtmfs
 from astroviper.processing_functions.imaging.image_continuum_single_field import (
     _convert_mvc_cubes_to_taylor_normal_equations,
     accumulate_continuum_model,
@@ -15,6 +14,7 @@ from astroviper.processing_functions.imaging.image_continuum_single_field import
     model_update_mtmfs_single_field,
     restore_continuum_image,
 )
+from astroviper.processing_functions.imaging.model_update.deconvolvers import mtmfs
 from tests.utils.continuum_images import (
     make_continuum_image,
     make_runaway_taylor_image,
@@ -332,7 +332,7 @@ def test_native_mtmfs_receives_taylor_stacks_without_reshaping(monkeypatch, dtyp
         }
 
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.deconvolvers.mtmfs.clean",
+        "astroviper.processing_functions.imaging.model_update.deconvolvers.mtmfs.clean",
         native_clean,
     )
     statistics, timing = model_update_mtmfs_single_field(
@@ -463,7 +463,7 @@ def test_native_mtmfs_default_per_cycle_limits_follow_deconvolve(
         }
 
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.deconvolvers.mtmfs.clean",
+        "astroviper.processing_functions.imaging.model_update.deconvolvers.mtmfs.clean",
         native_clean,
     )
     model_update_mtmfs_single_field(
@@ -497,7 +497,7 @@ def test_native_mtmfs_refuses_gain_and_divergence_values_deconvolve_refuses(
     residual_snapshot = image.SKY_RESIDUAL.copy(deep=True)
     calls = []
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.deconvolvers.mtmfs.clean",
+        "astroviper.processing_functions.imaging.model_update.deconvolvers.mtmfs.clean",
         lambda *args, **kwargs: calls.append(kwargs),
     )
 
@@ -646,7 +646,7 @@ def test_native_mtmfs_cleans_the_support_the_stop_test_measures(
         }
 
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.deconvolvers.mtmfs.clean",
+        "astroviper.processing_functions.imaging.model_update.deconvolvers.mtmfs.clean",
         native_clean,
     )
     stop_test = build_continuum_residual_imaging_dict(image, "residual", params)
@@ -683,7 +683,7 @@ def test_cube_deconvolvers_clean_the_support_the_stop_test_measures(
         return {}, pd.DataFrame({"T_deconvolve": [0.0]})
 
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.model_update."
+        "astroviper.processing_functions.imaging.model_update.model_update."
         "model_update_cube_single_field",
         cube_backend,
     )
@@ -750,7 +750,7 @@ def test_hogbom_writes_back_its_residual_only_on_request(monkeypatch, keywords):
     allows, which Högbom then updates in place with or without the write-back.
     The backend here detaches the residual first, as an adapter that copies
     would, so that only the write-back can bring it back."""
-    from astroviper.processing_functions.imaging import model_update
+    from astroviper.processing_functions.imaging.model_update import model_update
 
     image = (
         _hogbom_continuum_image()
@@ -833,7 +833,7 @@ def test_single_term_mtmfs_must_be_resolved_by_public_api(monkeypatch):
         return {}, pd.DataFrame({"T_deconvolve": [0.0]})
 
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.model_update."
+        "astroviper.processing_functions.imaging.model_update.model_update."
         "model_update_cube_single_field",
         hogbom_backend,
     )
@@ -868,7 +868,7 @@ def test_hogbom_model_update_does_not_leak_temporary_mask_metadata(monkeypatch):
         return {}, pd.DataFrame({"T_deconvolve": [0.0]})
 
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.model_update."
+        "astroviper.processing_functions.imaging.model_update.model_update."
         "model_update_cube_single_field",
         hogbom_backend,
     )
@@ -921,7 +921,7 @@ def test_hogbom_model_update_rejects_mixed_image_precision(monkeypatch, dtype):
         return {}, pd.DataFrame({"T_deconvolve": [0.0]})
 
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.model_update."
+        "astroviper.processing_functions.imaging.model_update.model_update."
         "model_update_cube_single_field",
         hogbom_backend,
     )
@@ -974,7 +974,7 @@ def test_hogbom_adapter_builds_one_contiguous_boolean_mask_plane(monkeypatch):
         return {}, pd.DataFrame({"T_deconvolve": [0.0]})
 
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.model_update."
+        "astroviper.processing_functions.imaging.model_update.model_update."
         "model_update_cube_single_field",
         hogbom_backend,
     )
@@ -1009,7 +1009,7 @@ def test_hogbom_adapter_canonicalizes_generated_primary_beam_mask(monkeypatch):
         return {}, pd.DataFrame({"T_deconvolve": [0.0]})
 
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.model_update."
+        "astroviper.processing_functions.imaging.model_update.model_update."
         "model_update_cube_single_field",
         hogbom_backend,
     )
@@ -1134,7 +1134,7 @@ def _assert_continuum_asp_is_cube_asp(continuum, params):
     """Run continuum Asp on ``continuum`` (one Taylor term) and cube Asp on a
     one-channel cube built here from its arrays; the models and residuals
     must agree bit for bit."""
-    from astroviper.processing_functions.imaging.model_update import (
+    from astroviper.processing_functions.imaging.model_update.model_update import (
         model_update_cube_single_field,
     )
 

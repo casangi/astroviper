@@ -3453,7 +3453,7 @@ def _model_update_native_mtmfs(
     from astroviper.processing_functions.imaging.deconvolution import (
         _divergence_factors,
     )
-    from astroviper.processing_functions.imaging.deconvolvers import mtmfs
+    from astroviper.processing_functions.imaging.model_update.deconvolvers import mtmfs
     from astroviper.processing_functions.imaging.utils import (
         ITERATION_HISTORY_FIELDS,
         StopCode,
@@ -3857,7 +3857,7 @@ def model_update_mtmfs_single_field(
     from astroviper.processing_functions.imaging.config_check.param_check_model_update import (
         check_model_products,
     )
-    from astroviper.processing_functions.imaging.deconvolvers.deconvolver_registry import (
+    from astroviper.processing_functions.imaging.model_update.deconvolvers.deconvolver_registry import (
         DECONVOLVERS,
     )
     from astroviper.utils.data_group_tools import (
@@ -4091,7 +4091,7 @@ def model_update_mtmfs_single_field(
     # ------------------------------------------------------------------
     start = time.time()
 
-    from astroviper.processing_functions.imaging.model_update import (
+    from astroviper.processing_functions.imaging.model_update.model_update import (
         model_update_cube_single_field,
     )
 
@@ -4309,7 +4309,7 @@ def _mtmfs_principal_residual_for_restoration(residual_da, psf_da):
     """
     import numpy as np
 
-    from astroviper.processing_functions.imaging.deconvolvers import mtmfs
+    from astroviper.processing_functions.imaging.model_update.deconvolvers import mtmfs
 
     residual_dims = ("time", "taylor_term", "polarization", "l", "m")
     psf_dims = ("time", "psf_taylor_order", "polarization", "l", "m")
@@ -4716,7 +4716,7 @@ def restore_continuum_image(
     import numpy as np
     import pandas as pd
 
-    from astroviper.processing_functions.imaging.deconvolvers.deconvolver_registry import (
+    from astroviper.processing_functions.imaging.model_update.deconvolvers.deconvolver_registry import (
         DECONVOLVERS,
     )
     from astroviper.processing_functions.imaging.restore import (

@@ -134,7 +134,7 @@ def mvc_grid_inputs(monkeypatch):
         normalization += 3
 
     module = importlib.import_module(
-        "astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp"
+        "astroviper.processing_functions.imaging.gridders.anti_alias.anti_alias_grid_cpp"
     )
     monkeypatch.setattr(module, "anti_alias_grid", kernel)
     return ms, image
@@ -173,7 +173,7 @@ def test_mvc_grid_passes_nonpositive_thread_count_to_kernel(
         received.append(kwargs["processing_function_threads"])
 
     module = importlib.import_module(
-        "astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp"
+        "astroviper.processing_functions.imaging.gridders.anti_alias.anti_alias_grid_cpp"
     )
     monkeypatch.setattr(module, "anti_alias_grid", kernel)
     add_visibility_grid_mvc_single_field(

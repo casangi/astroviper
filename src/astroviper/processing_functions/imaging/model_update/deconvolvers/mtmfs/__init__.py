@@ -4,7 +4,7 @@ Multi-Term Multi-Frequency Synthesis (MTMFS) deconvolution.
 A casacore-free, stateless port of the model update behind CASA
 tclean's ``deconvolver='mtmfs'`` (``SDAlgorithmMSMFS`` driving
 ``MultiTermMatrixCleaner``), wrapped with pybind11 as free functions in the
-same style as :mod:`~astroviper.processing_functions.imaging.deconvolvers.hogbom`.
+same style as :mod:`~astroviper.processing_functions.imaging.model_update.deconvolvers.hogbom`.
 
 ``clean`` runs one model update in place on Python-owned numpy buffers: the
 ``residual`` and ``model`` Taylor-term stacks are written into directly and
@@ -24,7 +24,7 @@ STOP_THRESHOLD = 2
 STOP_DIVERGED = 4
 
 try:
-    from astroviper.processing_functions.imaging.deconvolvers.mtmfs._mtmfs_ext import (
+    from astroviper.processing_functions.imaging.model_update.deconvolvers.mtmfs._mtmfs_ext import (
         clean,
         hessian,
         principal_solution,

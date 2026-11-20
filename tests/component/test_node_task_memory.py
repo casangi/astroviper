@@ -237,17 +237,17 @@ PHASES = [
     # call, so the module attributes wrapped here are what it calls
     ("astroviper.utils.node_task_io", "load_processing_set", 2.5),
     (
-        "astroviper.processing_functions.imaging.residual_update",
+        "astroviper.processing_functions.imaging.residual_update.residual_update",
         "imaging_setup_single_field",
         10.5,
     ),
     (
-        "astroviper.processing_functions.imaging.residual_update",
+        "astroviper.processing_functions.imaging.residual_update.residual_update",
         "residual_update_cube_single_field",
         8.3,
     ),
     (
-        "astroviper.processing_functions.imaging.model_update",
+        "astroviper.processing_functions.imaging.model_update.model_update",
         "model_update_cube_single_field",
         3.0,
     ),

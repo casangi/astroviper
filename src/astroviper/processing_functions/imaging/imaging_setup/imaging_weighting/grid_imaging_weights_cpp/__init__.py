@@ -3,7 +3,7 @@ Imaging-weight UV gridding / degridding kernels (C++ extension).
 """
 
 try:
-    from astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weights_cpp._grid_imaging_weights_ext import (
+    from astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.grid_imaging_weights_cpp._grid_imaging_weights_ext import (
         degrid_imaging_weights,
         grid_imaging_weights,
     )

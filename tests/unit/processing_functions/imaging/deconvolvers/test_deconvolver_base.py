@@ -4,7 +4,7 @@ import inspect
 
 import pytest
 
-from astroviper.processing_functions.imaging.deconvolvers.deconvolver_base import (
+from astroviper.processing_functions.imaging.model_update.deconvolvers.deconvolver_base import (
     Deconvolver,
 )
 

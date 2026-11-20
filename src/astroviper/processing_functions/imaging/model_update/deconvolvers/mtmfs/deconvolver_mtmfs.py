@@ -1,6 +1,6 @@
 """Multi-term multi-frequency synthesis (MT-MFS) CLEAN of the Taylor terms of a continuum image."""
 
-from astroviper.processing_functions.imaging.deconvolvers.deconvolver_base import (
+from astroviper.processing_functions.imaging.model_update.deconvolvers.deconvolver_base import (
     Deconvolver,
 )
 

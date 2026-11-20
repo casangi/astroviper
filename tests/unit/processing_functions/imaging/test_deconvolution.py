@@ -48,7 +48,7 @@ from astroviper.processing_functions.imaging.utils.imaging_dict import (
 )
 
 try:
-    from astroviper.processing_functions.imaging.deconvolvers import (  # noqa: F401
+    from astroviper.processing_functions.imaging.model_update.deconvolvers import (  # noqa: F401
         hogbom,
     )
 
@@ -57,7 +57,7 @@ except ImportError:  # pragma: no cover
     HOGBOM_AVAILABLE = False
 
 try:
-    from astroviper.processing_functions.imaging.deconvolvers import (  # noqa: F401
+    from astroviper.processing_functions.imaging.model_update.deconvolvers import (  # noqa: F401
         aspclean,
     )
 
@@ -1041,7 +1041,9 @@ PLAIN_ASP = {"asp_residual_components": False, "asp_scale_significance": False}
 class TestAspClean:
     @staticmethod
     def _gauss_psf_cube(nt, nf, npol, ny, nx, sig=2.0):
-        from astroviper.processing_functions.imaging.deconvolvers import aspclean
+        from astroviper.processing_functions.imaging.model_update.deconvolvers import (
+            aspclean,
+        )
 
         yy, xx = np.mgrid[0:ny, 0:nx]
         g = np.exp(-(((xx - nx // 2) ** 2 + (yy - ny // 2) ** 2) / (2 * sig**2)))

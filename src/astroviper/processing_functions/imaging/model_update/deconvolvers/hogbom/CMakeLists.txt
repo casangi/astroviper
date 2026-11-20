@@ -8,7 +8,7 @@ cmake_minimum_required(VERSION 3.15...3.27)
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     project(astroviper_hogbom LANGUAGES CXX)
     get_filename_component(_av_repo_root
-        "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../.." ABSOLUTE)
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../.." ABSOLUTE)
     list(APPEND CMAKE_MODULE_PATH "${_av_repo_root}/cmake")
 endif()
 

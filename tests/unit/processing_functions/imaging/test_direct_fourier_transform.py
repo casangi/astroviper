@@ -47,7 +47,7 @@ from astroviper.processing_functions.imaging.make_undeconvolved_image_continuum 
 from astroviper.processing_functions.imaging.residual_cycle_continuum_single_field import (
     make_visibility_model_continuum_single_field,
 )
-from astroviper.processing_functions.imaging.residual_update import (
+from astroviper.processing_functions.imaging.residual_update.residual_update import (
     calculate_residual_visibilities,
     imaging_setup_single_field,
     make_visibility_model_single_field,

@@ -40,7 +40,7 @@ def point_spread_function_cube_single_field(
     Thin node task: loads this chunk's weights, flags and uvw (``VISIBILITY``
     is never read when ``load_correlated_data`` is false), then, **once
     per frequency channel**, runs
-    :func:`~astroviper.processing_functions.imaging.residual_update.imaging_setup_single_field`
+    :func:`~astroviper.processing_functions.imaging.residual_update.residual_update.imaging_setup_single_field`
     (imaging weights, point spread function, primary beam, Stokes basis and
     Gaussian beam fit, exactly as the imager's setup) followed by
     :func:`~astroviper.processing_functions.imaging.weight_statistics.calculate_weight_statistics_single_field`
@@ -260,7 +260,7 @@ def point_spread_function_cube_single_field(
         _visibility_to_image_frequency_maps,
         _whole_processing_set_channel,
     )
-    from astroviper.processing_functions.imaging.residual_update import (
+    from astroviper.processing_functions.imaging.residual_update.residual_update import (
         imaging_setup_single_field,
     )
     from astroviper.processing_functions.imaging.utils.imaging_polarization import (

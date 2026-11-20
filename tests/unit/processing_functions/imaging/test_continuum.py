@@ -97,7 +97,7 @@ def test_psf_taylor_gridding_uses_output_views_and_reuses_order_zero_weights(
         normalization[...] = 7.0 + order
 
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp."
+        "astroviper.processing_functions.imaging.gridders.anti_alias.anti_alias_grid_cpp."
         "anti_alias_grid_uv_sampling",
         fake_grid,
     )
@@ -1136,7 +1136,7 @@ def test_mvc_grid_accumulates_child_into_full_image_frequency_axis(
         grid[:, observed_frequency_map, ...] = 1.0
         normalization[:, observed_frequency_map, ...] = 1.0
 
-    module_name = "astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp"
+    module_name = "astroviper.processing_functions.imaging.gridders.anti_alias.anti_alias_grid_cpp"
     extension_module = ModuleType(module_name)
     extension_module.anti_alias_grid = fake_grid
     monkeypatch.setitem(sys.modules, module_name, extension_module)
@@ -1198,7 +1198,7 @@ def test_mfs_grid_accumulates_normalization_across_processing_children(monkeypat
         grid += weight_sum[..., None, None]
         normalization += weight_sum
 
-    module_name = "astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp"
+    module_name = "astroviper.processing_functions.imaging.gridders.anti_alias.anti_alias_grid_cpp"
     extension_module = ModuleType(module_name)
     extension_module.anti_alias_grid = fake_grid
     monkeypatch.setitem(sys.modules, module_name, extension_module)
@@ -1787,7 +1787,7 @@ def _mvc_image_point_sources(
     Returns the Taylor model, effective beam, and final Taylor-zero residual
     peak.
     """
-    from astroviper.processing_functions.imaging.deconvolvers import mtmfs
+    from astroviper.processing_functions.imaging.model_update.deconvolvers import mtmfs
 
     size, centre, n_taylor_terms = 64, 32, 2
     x = (np.arange(8) - 3.5) / 32.0
@@ -2493,12 +2493,12 @@ def test_residual_cycle_times_prediction_stages_once(
         fake_prepare_model,
     )
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.residual_update."
+        "astroviper.processing_functions.imaging.residual_update.residual_update."
         "make_visibility_model_single_field",
         lambda *args, **kwargs: None,
     )
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.residual_update."
+        "astroviper.processing_functions.imaging.residual_update.residual_update."
         "calculate_residual_visibilities",
         lambda *args, **kwargs: None,
     )
@@ -2583,7 +2583,7 @@ def test_shared_degridder_registers_output_and_calls_cpp_kernel(monkeypatch):
         vis[...] = 3.0
 
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp."
+        "astroviper.processing_functions.imaging.gridders.anti_alias.anti_alias_grid_cpp."
         "anti_alias_degrid",
         fake_kernel,
     )
@@ -2630,7 +2630,7 @@ def test_shared_degridder_allocates_model_from_weights_without_observed_data(
     )
 
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp."
+        "astroviper.processing_functions.imaging.gridders.anti_alias.anti_alias_grid_cpp."
         "anti_alias_degrid",
         lambda grid, vis, *args, **kwargs: vis.fill(2.0),
     )

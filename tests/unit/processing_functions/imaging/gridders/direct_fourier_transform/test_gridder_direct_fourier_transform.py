@@ -19,13 +19,13 @@ from astroviper.processing_functions.imaging.direct_fourier_transform import (
     image_direction_cosines,
     normalize_dft_image,
 )
-from astroviper.processing_functions.imaging.gridders.direct_fourier_transform.gridder_direct_fourier_transform import (
-    GridderDirectFourierTransform,
-)
-from astroviper.processing_functions.imaging.gridders.direct_fourier_transform_cpp import (
+from astroviper.processing_functions.imaging.gridders.direct_fourier_transform.direct_fourier_transform_cpp import (
     dft_image,
     dft_image_uv_sampling,
     dft_predict,
+)
+from astroviper.processing_functions.imaging.gridders.direct_fourier_transform.gridder_direct_fourier_transform import (
+    GridderDirectFourierTransform,
 )
 from astroviper.processing_functions.imaging.gridders.gridder_base import Gridder
 from astroviper.processing_functions.imaging.utils.frequency_mapping import (

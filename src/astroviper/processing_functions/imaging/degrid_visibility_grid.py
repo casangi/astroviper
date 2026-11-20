@@ -184,7 +184,7 @@ def degrid_visibility_grid_single_field(
     n_uv = padded_grid_size([img_xds.sizes["l"], img_xds.sizes["m"]], fft_padding)
     delta_lm = img_xds.xr_img.get_lm_cell_size()
 
-    from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
+    from astroviper.processing_functions.imaging.gridders.anti_alias.anti_alias_grid_cpp import (
         anti_alias_degrid,
     )
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (

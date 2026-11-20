@@ -28,7 +28,7 @@ from tests.unit.processing_functions.imaging.test_max_cycles_auto import (
 )
 
 try:
-    from astroviper.processing_functions.imaging.deconvolvers import hogbom
+    from astroviper.processing_functions.imaging.model_update.deconvolvers import hogbom
 
     HOGBOM_AVAILABLE = True
 except ImportError:  # pragma: no cover
@@ -122,7 +122,7 @@ def test_the_psf_of_twice_the_image_size(
     from astroviper.processing_functions.imaging.calculate_imaging_weights import (
         calculate_imaging_weights,
     )
-    from astroviper.processing_functions.imaging.residual_update import (
+    from astroviper.processing_functions.imaging.residual_update.residual_update import (
         imaging_setup_single_field,
     )
 
@@ -230,7 +230,7 @@ def test_one_uv_grid_when_the_correlation_weights_are_equal(
     unequal weights a grid per correlation. Both give the bits of the PSF
     maker on a 2n image of both correlations."""
     import astroviper.processing_functions.imaging.make_point_spread_function as mpsf
-    from astroviper.processing_functions.imaging.residual_update import (
+    from astroviper.processing_functions.imaging.residual_update.residual_update import (
         imaging_setup_single_field,
     )
 

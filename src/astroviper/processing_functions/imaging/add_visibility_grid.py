@@ -292,7 +292,7 @@ def add_visibility_grid_single_field(
     See Also
     --------
     add_visibility_grid_mosaic : Mosaic (direction-dependent GCF) variant.
-    astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp.anti_alias_grid :
+    astroviper.processing_functions.imaging.gridders.anti_alias.anti_alias_grid_cpp.anti_alias_grid :
         C++ separable anti-aliasing gridder.
     """
     _add_grid_single_field(

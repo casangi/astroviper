@@ -44,7 +44,7 @@ from astroviper.processing_functions.imaging.utils.imaging_dict import (
 )
 
 try:
-    from astroviper.processing_functions.imaging.deconvolvers import hogbom
+    from astroviper.processing_functions.imaging.model_update.deconvolvers import hogbom
 
     HOGBOM_AVAILABLE = True
 except ImportError:  # pragma: no cover

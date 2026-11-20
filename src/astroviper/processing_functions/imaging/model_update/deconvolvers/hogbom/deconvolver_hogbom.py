@@ -1,14 +1,14 @@
-"""Adaptive Scale Pixel (Asp) CLEAN."""
+"""Hogbom CLEAN, with threads across the image planes."""
 
-from astroviper.processing_functions.imaging.deconvolvers.deconvolver_base import (
+from astroviper.processing_functions.imaging.model_update.deconvolvers.deconvolver_base import (
     Deconvolver,
 )
 
 
-class DeconvolverAsp(Deconvolver):
-    """Asp CLEAN; its methods follow the contracts of :class:`Deconvolver`."""
+class DeconvolverHogbom(Deconvolver):
+    """Hogbom CLEAN; its methods follow the contracts of :class:`Deconvolver`."""
 
-    name = "asp"
+    name = "hogbom"
     model_basis = "pixels"
     imaging_kinds = ("cube", "continuum")
 
@@ -23,10 +23,10 @@ class DeconvolverAsp(Deconvolver):
         *,
         input_checked=False,
     ):
-        """:meth:`Deconvolver.deconvolve` by :func:`~astroviper.processing_functions.imaging.deconvolution.asp_clean`."""
+        """:meth:`Deconvolver.deconvolve` by :func:`~astroviper.processing_functions.imaging.deconvolution.hogbom_clean`."""
         from astroviper.processing_functions.imaging import deconvolution
 
-        return deconvolution.asp_clean(
+        return deconvolution.hogbom_clean(
             residual_cube=residual_cube,
             psf_cube=psf_cube,
             model_cube=model_cube,

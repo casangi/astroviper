@@ -1,7 +1,7 @@
 """The anti-alias gridder (the standard gridder in CASA).
 
 It grids with the separable kernel of the anti-alias term of ``gcf_xds`` (the
-C++ kernels of ``gridders/anti_alias_grid_cpp``) onto a padded uv grid, and
+C++ kernels of ``gridders/anti_alias/anti_alias_grid_cpp``) onto a padded uv grid, and
 transforms between the uv grid and the image with an FFT and the image plane
 correction of the kernel (``fft_normalize_anti_alias_gridder``).
 """
@@ -69,7 +69,7 @@ class GridderAntiAlias(Gridder):
         processing_function_threads,
     ):
         """:meth:`Gridder.grid` with the C++ ``anti_alias_grid``."""
-        from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
+        from astroviper.processing_functions.imaging.gridders.anti_alias.anti_alias_grid_cpp import (
             anti_alias_grid,
         )
 
@@ -102,7 +102,7 @@ class GridderAntiAlias(Gridder):
         processing_function_threads,
     ):
         """:meth:`Gridder.grid_uv_sampling` with the C++ ``anti_alias_grid_uv_sampling``."""
-        from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
+        from astroviper.processing_functions.imaging.gridders.anti_alias.anti_alias_grid_cpp import (
             anti_alias_grid_uv_sampling,
         )
 

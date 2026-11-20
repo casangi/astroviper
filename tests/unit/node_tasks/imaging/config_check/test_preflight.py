@@ -148,7 +148,7 @@ def test_full_preflight_uses_only_metadata(mode, weighting, scope, monkeypatch):
             dims=variable.dims,
         )
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weights.grid_imaging_weights",
+        "astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.grid_imaging_weights.grid_imaging_weights",
         forbidden_work,
     )
     monkeypatch.setattr(

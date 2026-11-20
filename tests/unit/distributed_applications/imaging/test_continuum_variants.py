@@ -223,7 +223,7 @@ def test_global_weight_preparation_reports_corrupt_upstream_results(
         lambda p: params,
     )
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.imaging_weighting.briggs_weighting.calculate_briggs_params",
+        "astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.briggs_weighting.calculate_briggs_params",
         lambda *args: factors,
     )
     monkeypatch.setattr(
