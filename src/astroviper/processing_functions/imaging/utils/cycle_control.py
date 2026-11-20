@@ -957,10 +957,7 @@ def make_cycle_control_state(
     # Convergence state (namedtuple matching CASA). stopcode is the
     # aggregate over all planes; per-plane codes live in stop_code_imaging /
     # stop_code_model_update (allocated lazily alongside max_iter_remaining).
-    cycle_control_state["stopcode"] = StopCode(
-        imaging=IMAGING_CONTINUE, model_update=MODEL_UPDATE_CONTINUE
-    )
-    cycle_control_state["stopdescription"] = IMAGING_STOP_DESCRIPTIONS[IMAGING_CONTINUE]
+    reset_stopcode(cycle_control_state)
     return cycle_control_state
 
 
@@ -1000,6 +997,35 @@ def plane_threshold(cycle_control_state, pol):
     )
 
 
+# The per-plane arrays of the state after max_iter_remaining, with the value a
+# new plane starts with and the dtype, in the order they are allocated.
+_PLANE_ARRAYS = (
+    ("stop_code_imaging", IMAGING_CONTINUE, int),
+    ("stop_code_model_update", MODEL_UPDATE_CONTINUE, int),
+    ("zero_iter_model_updates", 0, int),
+    ("max_entropy", np.nan, float),
+    ("entropy_stopped", False, bool),
+    ("diverged_model_updates", 0, int),
+    ("divergence_stopped", False, bool),
+)
+# The two arrays check_refreshed_residual_divergence allocates.
+_REFRESHED_ARRAYS = (
+    ("previous_refreshed_peak_residual", np.nan, float),
+    ("refreshed_residual_divergence_stopped", False, bool),
+)
+
+
+def _psf_fraction(cycle_control_state, max_psf_sidelobe):
+    """The PSF fraction of ``max_psf_sidelobe``, clamped; a NaN fraction stays NaN."""
+    return min(
+        max(
+            max_psf_sidelobe * cycle_control_state["psf_sidelobe_factor"],
+            cycle_control_state["min_psf_fraction"],
+        ),
+        cycle_control_state["max_psf_fraction"],
+    )
+
+
 def _ensure_shape(cycle_control_state, needed):
     """Allocate (or grow) the per-plane arrays to the ``needed`` shape.
 
@@ -1019,17 +1045,8 @@ def _ensure_shape(cycle_control_state, needed):
         cycle_control_state["max_iter_remaining"] = np.full(
             needed, cycle_control_state["max_iter"], dtype=int
         )
-        cycle_control_state["stop_code_imaging"] = np.full(
-            needed, IMAGING_CONTINUE, dtype=int
-        )
-        cycle_control_state["stop_code_model_update"] = np.full(
-            needed, MODEL_UPDATE_CONTINUE, dtype=int
-        )
-        cycle_control_state["zero_iter_model_updates"] = np.zeros(needed, dtype=int)
-        cycle_control_state["max_entropy"] = np.full(needed, np.nan, dtype=float)
-        cycle_control_state["entropy_stopped"] = np.zeros(needed, dtype=bool)
-        cycle_control_state["diverged_model_updates"] = np.zeros(needed, dtype=int)
-        cycle_control_state["divergence_stopped"] = np.zeros(needed, dtype=bool)
+        for attr, fill, dtype in _PLANE_ARRAYS:
+            cycle_control_state[attr] = np.full(needed, fill, dtype=dtype)
     elif any(
         n > c
         for n, c in zip(
@@ -1045,21 +1062,10 @@ def _ensure_shape(cycle_control_state, needed):
         sl = tuple(slice(0, d) for d in cycle_control_state["max_iter_remaining"].shape)
         state_arrays = [
             ("max_iter_remaining", cycle_control_state["max_iter"], int),
-            ("stop_code_imaging", IMAGING_CONTINUE, int),
-            ("stop_code_model_update", MODEL_UPDATE_CONTINUE, int),
-            ("zero_iter_model_updates", 0, int),
-            ("max_entropy", np.nan, float),
-            ("entropy_stopped", False, bool),
-            ("diverged_model_updates", 0, int),
-            ("divergence_stopped", False, bool),
+            *_PLANE_ARRAYS,
         ]
         if cycle_control_state["previous_refreshed_peak_residual"] is not None:
-            state_arrays.extend(
-                [
-                    ("previous_refreshed_peak_residual", np.nan, float),
-                    ("refreshed_residual_divergence_stopped", False, bool),
-                ]
-            )
+            state_arrays.extend(_REFRESHED_ARRAYS)
         for attr, fill, dtype in state_arrays:
             new = np.full(grown, fill, dtype=dtype)
             new[sl] = cycle_control_state[attr]
@@ -1143,12 +1149,10 @@ def check_refreshed_residual_divergence(
     if cycle_control_state["max_iter_remaining"] is None:
         return []
     if cycle_control_state["previous_refreshed_peak_residual"] is None:
-        cycle_control_state["previous_refreshed_peak_residual"] = np.full(
-            cycle_control_state["max_iter_remaining"].shape, np.nan, dtype=float
-        )
-        cycle_control_state["refreshed_residual_divergence_stopped"] = np.zeros(
-            cycle_control_state["max_iter_remaining"].shape, dtype=bool
-        )
+        for attr, fill, dtype in _REFRESHED_ARRAYS:
+            cycle_control_state[attr] = np.full(
+                cycle_control_state["max_iter_remaining"].shape, fill, dtype=dtype
+            )
     newly_stopped = []
     for key, fields in imaging_dict.items():
         if not _matches(key, time, pol, chan):
@@ -1249,11 +1253,7 @@ def calculate_per_cycle_limits(
         )
 
     # Calculate adaptive PSF fraction for threshold_per_cycle
-    psf_fraction = max_psf_sidelobe * cycle_control_state["psf_sidelobe_factor"]
-
-    # Clamp to user-specified bounds
-    psf_fraction = max(psf_fraction, cycle_control_state["min_psf_fraction"])
-    psf_fraction = min(psf_fraction, cycle_control_state["max_psf_fraction"])
+    psf_fraction = _psf_fraction(cycle_control_state, max_psf_sidelobe)
 
     # Set threshold_per_cycle as fraction of current peak residual
     threshold_per_cycle = psf_fraction * peak_residual
@@ -1318,13 +1318,7 @@ def per_plane_threshold_per_cycle(
         idx = _key_index(key)
         peak = abs(_latest(fields, "peakres", 0.0))
         sidelobe = _latest(fields, "max_psf_sidelobe", 0.2)
-        frac = min(
-            max(
-                sidelobe * cycle_control_state["psf_sidelobe_factor"],
-                cycle_control_state["min_psf_fraction"],
-            ),
-            cycle_control_state["max_psf_fraction"],
-        )
+        frac = _psf_fraction(cycle_control_state, sidelobe)
         threshold_per_cycle[idx] = max(
             frac * peak, plane_threshold(cycle_control_state, idx[2])
         )
@@ -1408,13 +1402,8 @@ def resolve_max_cycles(
             level = float(threshold)
         else:
             level = np.nan if sensitivity is None else float(sensitivity[idx])
-        fraction = min(
-            max(
-                _latest(fields, "max_psf_sidelobe", 0.2)
-                * cycle_control_state["psf_sidelobe_factor"],
-                cycle_control_state["min_psf_fraction"],
-            ),
-            cycle_control_state["max_psf_fraction"],
+        fraction = _psf_fraction(
+            cycle_control_state, _latest(fields, "max_psf_sidelobe", 0.2)
         )
         if not (
             pixels > 0
@@ -1984,22 +1973,9 @@ def reset(cycle_control_state) -> None:
     """Reset the cycle control state to initial state."""
     if cycle_control_state["max_iter_remaining"] is not None:
         cycle_control_state["max_iter_remaining"][...] = cycle_control_state["max_iter"]
-        cycle_control_state["stop_code_imaging"][...] = IMAGING_CONTINUE
-        cycle_control_state["stop_code_model_update"][...] = MODEL_UPDATE_CONTINUE
-        cycle_control_state["zero_iter_model_updates"][...] = 0
-        cycle_control_state["max_entropy"][...] = np.nan
-        cycle_control_state["entropy_stopped"][...] = False
-        cycle_control_state["diverged_model_updates"][...] = 0
-        cycle_control_state["divergence_stopped"][...] = False
-        if cycle_control_state["previous_refreshed_peak_residual"] is not None:
-            cycle_control_state["previous_refreshed_peak_residual"][...] = np.nan
-            cycle_control_state["refreshed_residual_divergence_stopped"][...] = False
+    reset_stopcode(cycle_control_state)
     cycle_control_state["cycles_done"] = 0
     cycle_control_state["total_iter_done"] = 0
-    cycle_control_state["stopcode"] = StopCode(
-        imaging=IMAGING_CONTINUE, model_update=MODEL_UPDATE_CONTINUE
-    )
-    cycle_control_state["stopdescription"] = IMAGING_STOP_DESCRIPTIONS[IMAGING_CONTINUE]
 
 
 def reset_stopcode(cycle_control_state) -> None:
@@ -2009,16 +1985,11 @@ def reset_stopcode(cycle_control_state) -> None:
     )
     cycle_control_state["stopdescription"] = IMAGING_STOP_DESCRIPTIONS[IMAGING_CONTINUE]
     if cycle_control_state["stop_code_imaging"] is not None:
-        cycle_control_state["stop_code_imaging"][...] = IMAGING_CONTINUE
-        cycle_control_state["stop_code_model_update"][...] = MODEL_UPDATE_CONTINUE
-        cycle_control_state["zero_iter_model_updates"][...] = 0
-        cycle_control_state["max_entropy"][...] = np.nan
-        cycle_control_state["entropy_stopped"][...] = False
-        cycle_control_state["diverged_model_updates"][...] = 0
-        cycle_control_state["divergence_stopped"][...] = False
+        for attr, fill, _ in _PLANE_ARRAYS:
+            cycle_control_state[attr][...] = fill
         if cycle_control_state["previous_refreshed_peak_residual"] is not None:
-            cycle_control_state["previous_refreshed_peak_residual"][...] = np.nan
-            cycle_control_state["refreshed_residual_divergence_stopped"][...] = False
+            for attr, fill, _ in _REFRESHED_ARRAYS:
+                cycle_control_state[attr][...] = fill
 
 
 def get_state(cycle_control_state) -> dict[str, Any]:

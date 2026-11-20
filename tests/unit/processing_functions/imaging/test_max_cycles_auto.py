@@ -247,6 +247,17 @@ class TestResolveMaxCycles:
             (0, 0, 3): None,
         }
 
+    def test_a_psf_fraction_that_is_not_a_number_is_left_out(self):
+        # max(NaN, min_psf_fraction) is NaN: the brighter plane is left out
+        controller = _controller(threshold=0.01)
+        record = _dirty_record(
+            {(0, 0, 0): (1.0, 0.2, 100), (0, 0, 1): (100.0, np.nan, 100)}
+        )
+        resolve_max_cycles(controller, record)
+        expected = predicted_imaging_cycles(1.0, 0.01, 0.2) + EXTRA_CYCLES
+        assert controller["max_cycles"] == expected
+        assert controller["max_cycles_auto"] == {(0, 0, 0): expected, (0, 0, 1): None}
+
     def test_masksum_of_the_record_without_mask_pixels(self):
         controller = _controller(threshold=0.01)
         resolve_max_cycles(
