@@ -1,7 +1,8 @@
 """Unit tests for the C++ direct Fourier transform extension.
 
 Coverage:
-  * cos(2 pi t), sin(2 pi t) of the kernels against NumPy, special angles exact
+  * cos(2 pi t), sin(2 pi t) of the kernels against NumPy, special angles exact,
+    the reduction exact at every magnitude
   * dft_image, dft_image_uv_sampling and dft_predict against a NumPy evaluation of
     their definitions (w term and 1/n included), every output dtype
   * the samples skipped (non-finite uvw, NaN or zero weight, NaN visibility)
@@ -204,6 +205,31 @@ def test_cos_sin_turns_special_angles_are_exact():
     cos_values, sin_values = cos_sin_turns(turns)
     np.testing.assert_array_equal(cos_values, [1, 0, -1, 0, 1, 0, -1, 1, 0])
     np.testing.assert_array_equal(sin_values, [0, 1, 0, -1, 0, -1, 0, 0, 1])
+
+
+def test_cos_sin_turns_reduce_exactly_at_every_magnitude():
+    """The value at t is the value at t - rint(t), exactly reduced, below and
+    above 2^51 turns, where every double is a multiple of 1/2 (and from 2^52 on an
+    integer): cos is 1 or -1 and sin 0 there."""
+    rng = np.random.default_rng(15)
+    turns = np.concatenate(
+        [
+            rng.uniform(-(2.0**51), 2.0**51, 20_000),
+            2.0**51 + rng.integers(0, 2**52, 20_000) / 2.0,
+            np.exp(rng.uniform(np.log(2.0**51), np.log(1e308), 20_000)),
+        ]
+    ) * rng.choice([-1.0, 1.0], 60_000)
+    cos_values, sin_values = cos_sin_turns(turns)
+    reduced_cos, reduced_sin = cos_sin_turns(turns - np.rint(turns))
+    np.testing.assert_array_equal(cos_values, reduced_cos)
+    np.testing.assert_array_equal(sin_values, reduced_sin)
+    edges = np.array(
+        [2.0**51 + 0.5, 2.0**51 + 1, -(2.0**51 + 3), 2.0**52 - 0.5, 2.0**52 + 1]
+        + [2.0**53 + 2, 2.0**60, np.finfo(float).max]
+    )
+    cos_values, sin_values = cos_sin_turns(edges)
+    np.testing.assert_array_equal(cos_values, [-1, 1, 1, -1, 1, 1, 1, 1])
+    np.testing.assert_array_equal(sin_values, 0)
 
 
 @pytest.mark.parametrize("dtype", [np.complex128, np.complex64, np.float64, np.float32])
