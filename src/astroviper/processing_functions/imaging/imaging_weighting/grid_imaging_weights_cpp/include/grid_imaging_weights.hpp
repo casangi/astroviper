@@ -19,16 +19,18 @@ namespace imaging_weighting {
 // chan_map        : (n_vis_chan,)                          int64
 // data_weights    : (n_time, n_baseline, n_vis_chan, n_pol) float64
 //
+// Buffers may be unaligned: dispatch uses scalar byte loads/stores without
+// allocating array copies. Aligned buffers retain the typed fast path.
 // Only polarization 0 is gridded (parallel-hand-equalized weights); this
 // matches the Python wrapper's `n_pol < 3` contract.
 template <typename GridT>
 void grid_imaging_weights(
-    GridT* grid,
-    double* sum_weight,
-    const double* uvw,
-    const double* frequency_coord,
-    const int64_t* chan_map,
-    const double* data_weights,
+    void* grid,
+    void* sum_weight,
+    const void* uvw,
+    const void* frequency_coord,
+    const void* chan_map,
+    const void* data_weights,
     int n_chan_g, int n_pol_g, int m_u, int m_v,
     int n_time, int n_baseline, int n_vis_chan, int n_pol,
     double delta_l, double delta_m, bool truncate_uv_cells);
@@ -49,32 +51,32 @@ void grid_imaging_weights(
 // Throws std::invalid_argument (Python ValueError) on NaN Briggs factors.
 template <typename GridT>
 void degrid_imaging_weights(
-    double* imaging_weight,
-    const GridT* grid_imaging_weight,
-    const double* briggs_factors,
-    const double* uvw,
-    const double* frequency_coord,
-    const int64_t* chan_map,
-    const int64_t* pol_map,
-    const double* data_weight,
+    void* imaging_weight,
+    const void* grid_imaging_weight,
+    const void* briggs_factors,
+    const void* uvw,
+    const void* frequency_coord,
+    const void* chan_map,
+    const void* pol_map,
+    const void* data_weight,
     int n_chan_g, int n_pol_g, int m_u, int m_v,
     int n_time, int n_baseline, int n_vis_chan, int n_pol, int n_pol_out,
     double delta_l, double delta_m, bool truncate_uv_cells);
 
 extern template void grid_imaging_weights<float>(
-    float*, double*, const double*, const double*, const int64_t*,
-    const double*, int, int, int, int, int, int, int, int, double, double, bool);
+    void*, void*, const void*, const void*, const void*,
+    const void*, int, int, int, int, int, int, int, int, double, double, bool);
 extern template void grid_imaging_weights<double>(
-    double*, double*, const double*, const double*, const int64_t*,
-    const double*, int, int, int, int, int, int, int, int, double, double, bool);
+    void*, void*, const void*, const void*, const void*,
+    const void*, int, int, int, int, int, int, int, int, double, double, bool);
 
 extern template void degrid_imaging_weights<float>(
-    double*, const float*, const double*, const double*, const double*,
-    const int64_t*, const int64_t*, const double*,
+    void*, const void*, const void*, const void*, const void*,
+    const void*, const void*, const void*,
     int, int, int, int, int, int, int, int, int, double, double, bool);
 extern template void degrid_imaging_weights<double>(
-    double*, const double*, const double*, const double*, const double*,
-    const int64_t*, const int64_t*, const double*,
+    void*, const void*, const void*, const void*, const void*,
+    const void*, const void*, const void*,
     int, int, int, int, int, int, int, int, int, double, double, bool);
 
 }  // namespace imaging_weighting

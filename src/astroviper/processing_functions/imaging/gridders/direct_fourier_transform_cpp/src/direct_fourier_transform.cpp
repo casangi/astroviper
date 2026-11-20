@@ -1,4 +1,5 @@
 #include "../include/direct_fourier_transform.hpp"
+#include "scalar_buffer.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -93,11 +94,11 @@ inline void block_cos_sin(double u, double v, double w, const double* l_block,
                           const double* m_block, const double* n_minus_one_block,
                           std::int64_t count, double* cos_block, double* sin_block) {
     for (std::int64_t j = 0; j < count; ++j) {
-        const double turns = u * l_block[j] + v * m_block[j] + w * n_minus_one_block[j];
+        const double turns = u * astroviper::scalar_load(l_block, j) + v * astroviper::scalar_load(m_block, j) + w * astroviper::scalar_load(n_minus_one_block, j);
         double c, s;
         cos_sin_of_turns(turns, c, s);
-        cos_block[j] = c;
-        sin_block[j] = s;
+        astroviper::scalar_store(cos_block, j, c);
+        astroviper::scalar_store(sin_block, j, s);
     }
 }
 
@@ -113,20 +114,20 @@ inline void accumulate_sample(const double* value, const double* cos_block,
                               double* accumulator_re, double* accumulator_im) {
     double re[NPol], im[NPol];
     for (int p = 0; p < NPol; ++p) {
-        re[p] = value[NComponents * p];
-        im[p] = NComponents == 2 ? value[2 * p + 1] : 0.0;
+        re[p] = astroviper::scalar_load(value, NComponents * p);
+        im[p] = NComponents == 2 ? astroviper::scalar_load(value, 2 * p + 1) : 0.0;
     }
     for (std::int64_t j = 0; j < count; ++j) {
-        const double c = cos_block[j];
-        const double s = sin_block[j];
+        const double c = astroviper::scalar_load(cos_block, j);
+        const double s = astroviper::scalar_load(sin_block, j);
         for (int p = 0; p < NPol; ++p) {
             if constexpr (NComponents == 2) {
-                accumulator_re[p * kTilePixels + j] += re[p] * c + im[p] * s;
+                astroviper::scalar_add(accumulator_re, p * kTilePixels + j, re[p] * c + im[p] * s);
                 if constexpr (ComplexImage) {
-                    accumulator_im[p * kTilePixels + j] += im[p] * c - re[p] * s;
+                    astroviper::scalar_add(accumulator_im, p * kTilePixels + j, im[p] * c - re[p] * s);
                 }
             } else {
-                accumulator_re[p * kTilePixels + j] += re[p] * c;
+                astroviper::scalar_add(accumulator_re, p * kTilePixels + j, re[p] * c);
             }
         }
     }
@@ -143,22 +144,22 @@ inline void sum_pixels(const double* model_over_n, std::int64_t m_pol,
     double re[NPol], im[NPol];
     std::int64_t offset[NPol];
     for (int p = 0; p < NPol; ++p) {
-        re[p] = sum_re[p];
-        im[p] = sum_im[p];
-        offset[p] = 2 * pol_map[p];
+        re[p] = astroviper::scalar_load(sum_re, p);
+        im[p] = astroviper::scalar_load(sum_im, p);
+        offset[p] = 2 * astroviper::scalar_load(pol_map, p);
     }
     for (std::int64_t j = 0; j < count; ++j) {
         const double* value = model_over_n + j * m_pol * 2;
         for (int p = 0; p < NPol; ++p) {
-            const double model_re = value[offset[p]];
-            const double model_im = value[offset[p] + 1];
-            re[p] += model_re * cos_block[j] - model_im * sin_block[j];
-            im[p] += model_re * sin_block[j] + model_im * cos_block[j];
+            const double model_re = astroviper::scalar_load(value, offset[p]);
+            const double model_im = astroviper::scalar_load(value, offset[p] + 1);
+            re[p] += model_re * astroviper::scalar_load(cos_block, j) - model_im * astroviper::scalar_load(sin_block, j);
+            im[p] += model_re * astroviper::scalar_load(sin_block, j) + model_im * astroviper::scalar_load(cos_block, j);
         }
     }
     for (int p = 0; p < NPol; ++p) {
-        sum_re[p] = re[p];
-        sum_im[p] = im[p];
+        astroviper::scalar_store(sum_re, p, re[p]);
+        astroviper::scalar_store(sum_im, p, im[p]);
     }
 }
 
@@ -179,10 +180,10 @@ template <typename ImageT>
 inline void add_to_pixel(ImageT* pixel, double re, double im) {
     if constexpr (is_complex<ImageT>::value) {
         using Element = typename ImageT::value_type;
-        *pixel += ImageT(static_cast<Element>(re), static_cast<Element>(im));
+        astroviper::scalar_add(pixel, 0, ImageT(static_cast<Element>(re), static_cast<Element>(im)));
     } else {
         (void)im;
-        *pixel += static_cast<ImageT>(re);
+        astroviper::scalar_add(pixel, 0, static_cast<ImageT>(re));
     }
 }
 
@@ -241,21 +242,21 @@ PlaneSamples collect_samples(
     std::int64_t m_chan, std::int64_t m_pol, std::int64_t n_planes, std::int64_t n_time,
     std::int64_t n_baseline, std::int64_t n_vis_chan, std::int64_t n_pol) {
     std::vector<double> scale(static_cast<std::size_t>(n_vis_chan));
-    for (std::int64_t c = 0; c < n_vis_chan; ++c) scale[c] = frequency_coord[c] / kSpeedOfLight;
+    for (std::int64_t c = 0; c < n_vis_chan; ++c) scale[c] = astroviper::scalar_load(frequency_coord, c) / kSpeedOfLight;
 
     // weighted value of one polarization of a sample; false if the sample is
     // skipped: a NaN value or a zero weight (a zero visibility is imaged)
     auto sample_value = [&](std::int64_t index, double* out) -> bool {
-        const double sample_weight = weight[index];
+        const double sample_weight = astroviper::scalar_load(weight, index);
         if constexpr (NComponents == 2) {
-            const std::complex<double> weighted = vis_data[index] * sample_weight;
+            const std::complex<double> weighted = astroviper::scalar_load(vis_data, index) * sample_weight;
             if (std::isnan(weighted.real()) || std::isnan(weighted.imag())) return false;
             if (sample_weight == 0.0) return false;
-            out[0] = weighted.real();
-            out[1] = weighted.imag();
+            astroviper::scalar_store(out, 0, weighted.real());
+            astroviper::scalar_store(out, 1, weighted.imag());
         } else {
             if (std::isnan(sample_weight) || sample_weight == 0.0) return false;
-            out[0] = sample_weight;
+            astroviper::scalar_store(out, 0, sample_weight);
         }
         return true;
     };
@@ -267,13 +268,13 @@ PlaneSamples collect_samples(
     for (std::int64_t t = 0; t < n_time; ++t) {
         for (std::int64_t b = 0; b < n_baseline; ++b) {
             const double* uvw_b = uvw + (t * n_baseline + b) * 3;
-            if (!std::isfinite(uvw_b[0]) || !std::isfinite(uvw_b[1]) || !std::isfinite(uvw_b[2]))
+            if (!std::isfinite(astroviper::scalar_load(uvw_b, 0)) || !std::isfinite(astroviper::scalar_load(uvw_b, 1)) || !std::isfinite(astroviper::scalar_load(uvw_b, 2)))
                 continue;
             for (std::int64_t c = 0; c < n_vis_chan; ++c) {
                 const std::int64_t base = ((t * n_baseline + b) * n_vis_chan + c) * n_pol;
                 bool any = false;
                 for (std::int64_t p = 0; p < n_pol && !any; ++p) any = sample_value(base + p, value);
-                if (any) ++samples.plane_start[time_map[t] * m_chan + frequency_map[c] + 1];
+                if (any) ++samples.plane_start[astroviper::scalar_load(time_map, t) * m_chan + astroviper::scalar_load(frequency_map, c) + 1];
             }
         }
     }
@@ -291,12 +292,12 @@ PlaneSamples collect_samples(
     for (std::int64_t t = 0; t < n_time; ++t) {
         for (std::int64_t b = 0; b < n_baseline; ++b) {
             const double* uvw_b = uvw + (t * n_baseline + b) * 3;
-            if (!std::isfinite(uvw_b[0]) || !std::isfinite(uvw_b[1]) || !std::isfinite(uvw_b[2]))
+            if (!std::isfinite(astroviper::scalar_load(uvw_b, 0)) || !std::isfinite(astroviper::scalar_load(uvw_b, 1)) || !std::isfinite(astroviper::scalar_load(uvw_b, 2)))
                 continue;
             for (std::int64_t c = 0; c < n_vis_chan; ++c) {
                 const std::int64_t base = ((t * n_baseline + b) * n_vis_chan + c) * n_pol;
-                const std::int64_t a_time = time_map[t];
-                const std::int64_t a_chan = frequency_map[c];
+                const std::int64_t a_time = astroviper::scalar_load(time_map, t);
+                const std::int64_t a_chan = astroviper::scalar_load(frequency_map, c);
                 const std::int64_t plane = a_time * m_chan + a_chan;
                 const std::int64_t k = cursor[plane];
                 bool any = false;
@@ -304,14 +305,13 @@ PlaneSamples collect_samples(
                     if (!sample_value(base + p, value)) continue;
                     any = true;
                     double* stored = samples.values.data() + (k * n_pol + p) * NComponents;
-                    for (int i = 0; i < NComponents; ++i) stored[i] = value[i];
-                    normalization[(a_time * m_chan + a_chan) * m_pol + pol_map[p]] +=
-                        weight[base + p];
+                    for (int i = 0; i < NComponents; ++i) astroviper::scalar_store(stored, i, astroviper::scalar_load(value, i));
+                    astroviper::scalar_add(normalization, (a_time * m_chan + a_chan) * m_pol + astroviper::scalar_load(pol_map, p), astroviper::scalar_load(weight, base + p));
                 }
                 if (!any) continue;
-                samples.u[k] = uvw_b[0] * scale[c];
-                samples.v[k] = uvw_b[1] * scale[c];
-                samples.w[k] = uvw_b[2] * scale[c];
+                samples.u[k] = astroviper::scalar_load(uvw_b, 0) * scale[c];
+                samples.v[k] = astroviper::scalar_load(uvw_b, 1) * scale[c];
+                samples.w[k] = astroviper::scalar_load(uvw_b, 2) * scale[c];
                 ++cursor[plane];
             }
         }
@@ -363,8 +363,8 @@ void image_samples(
             const std::int64_t rows = std::min(kTileRows, n_l - row_begin);
             const std::int64_t columns = std::min(tile_columns, n_m - column_begin);
             double max_abs_n_minus_one = 0.0;
-            for (std::int64_t r = 0; r < rows; ++r) l_tile[r] = l[row_begin + r];
-            for (std::int64_t j = 0; j < columns; ++j) m_tile[j] = m[column_begin + j];
+            for (std::int64_t r = 0; r < rows; ++r) l_tile[r] = astroviper::scalar_load(l, row_begin + r);
+            for (std::int64_t j = 0; j < columns; ++j) m_tile[j] = astroviper::scalar_load(m, column_begin + j);
             for (std::int64_t r = 0; r < rows; ++r) {
                 for (std::int64_t j = 0; j < columns; ++j) {
                     const std::int64_t t = r * kTileColumns + j;
@@ -400,29 +400,29 @@ void image_samples(
                         // exp(2 pi i (u l + v m))
                         const double ca = cos_u[r], sa = sin_u[r];
                         for (std::int64_t j = 0; j < columns; ++j) {
-                            cos_block[j] = ca * cos_v[j] - sa * sin_v[j];
-                            sin_block[j] = ca * sin_v[j] + sa * cos_v[j];
+                            astroviper::scalar_store(cos_block, j, ca * cos_v[j] - sa * sin_v[j]);
+                            astroviper::scalar_store(sin_block, j, ca * sin_v[j] + sa * cos_v[j]);
                         }
                     } else if (w_term == 1) {
                         // exp(2 pi i (u l + v m)) exp(2 pi i w (n - 1))
                         const double ca = cos_u[r], sa = sin_u[r];
                         for (std::int64_t j = 0; j < columns; ++j) {
                             double cw, sw;
-                            cos_sin_of_small_angle(two_pi_w * n_minus_one_row[j], cw, sw);
+                            cos_sin_of_small_angle(two_pi_w * astroviper::scalar_load(n_minus_one_row, j), cw, sw);
                             const double c = ca * cos_v[j] - sa * sin_v[j];
                             const double s = ca * sin_v[j] + sa * cos_v[j];
-                            cos_block[j] = c * cw - s * sw;
-                            sin_block[j] = c * sw + s * cw;
+                            astroviper::scalar_store(cos_block, j, c * cw - s * sw);
+                            astroviper::scalar_store(sin_block, j, c * sw + s * cw);
                         }
                     } else {
                         const double l_row = l_tile[r];
                         for (std::int64_t j = 0; j < columns; ++j) {
                             const double turns =
-                                u * l_row + v * m_tile[j] + w * n_minus_one_row[j];
+                                u * l_row + v * m_tile[j] + w * astroviper::scalar_load(n_minus_one_row, j);
                             double c, s;
                             cos_sin_of_turns(turns, c, s);
-                            cos_block[j] = c;
-                            sin_block[j] = s;
+                            astroviper::scalar_store(cos_block, j, c);
+                            astroviper::scalar_store(sin_block, j, s);
                         }
                     }
                     // value * exp(-i phase) = (re c + im s) + i (im c - re s)
@@ -444,14 +444,14 @@ void image_samples(
                 }
             }
             for (std::int64_t p = 0; p < n_pol; ++p) {
-                ImageT* out = image + (plane * m_pol + pol_map[p]) * n_pixels;
+                ImageT* out = image + (plane * m_pol + astroviper::scalar_load(pol_map, p)) * n_pixels;
                 for (std::int64_t r = 0; r < rows; ++r) {
                     ImageT* out_row = out + (row_begin + r) * n_m + column_begin;
                     const std::int64_t t = p * kTilePixels + r * kTileColumns;
                     const double* n_row = n_tile.data() + r * kTileColumns;
                     for (std::int64_t j = 0; j < columns; ++j) {
-                        add_to_pixel(out_row + j, n_row[j] * accumulator_re[t + j],
-                                     n_row[j] * accumulator_im[t + j]);
+                        add_to_pixel(out_row + j, astroviper::scalar_load(n_row, j) * astroviper::scalar_load(accumulator_re, t + j),
+                                     astroviper::scalar_load(n_row, j) * astroviper::scalar_load(accumulator_im, t + j));
                     }
                 }
             }
@@ -466,9 +466,9 @@ void cos_sin_turns(const double* turns, double* cos_values, double* sin_values,
                    std::int64_t count) {
     for (std::int64_t j = 0; j < count; ++j) {
         double c, s;
-        cos_sin_of_turns(turns[j], c, s);
-        cos_values[j] = c;
-        sin_values[j] = s;
+        cos_sin_of_turns(astroviper::scalar_load(turns, j), c, s);
+        astroviper::scalar_store(cos_values, j, c);
+        astroviper::scalar_store(sin_values, j, s);
     }
 }
 
@@ -525,7 +525,7 @@ void dft_predict(
         for (std::int64_t pixel = 0; pixel < n_pixels; ++pixel) {
             for (std::int64_t a_pol = 0; a_pol < m_pol; ++a_pol) {
                 double re, im;
-                read_model(model[(plane * m_pol + a_pol) * n_pixels + pixel], re, im);
+                read_model(astroviper::scalar_load(model, (plane * m_pol + a_pol) * n_pixels + pixel), re, im);
                 if (re != 0.0 || im != 0.0) {
                     ++count;
                     break;
@@ -545,26 +545,26 @@ void dft_predict(
             bool any = false;
             for (std::int64_t a_pol = 0; a_pol < m_pol && !any; ++a_pol) {
                 double re, im;
-                read_model(model[(plane * m_pol + a_pol) * n_pixels + pixel], re, im);
+                read_model(astroviper::scalar_load(model, (plane * m_pol + a_pol) * n_pixels + pixel), re, im);
                 any = re != 0.0 || im != 0.0;
             }
             if (!any) continue;
-            l_pixel[q] = l[pixel / n_m];
-            m_pixel[q] = m[pixel % n_m];
+            l_pixel[q] = astroviper::scalar_load(l, pixel / n_m);
+            m_pixel[q] = astroviper::scalar_load(m, pixel % n_m);
             double n;
             direction_n(l_pixel[q], m_pixel[q], n, n_minus_one_pixel[q]);
             for (std::int64_t a_pol = 0; a_pol < m_pol; ++a_pol) {
                 double re, im;
-                read_model(model[(plane * m_pol + a_pol) * n_pixels + pixel], re, im);
-                model_over_n[(q * m_pol + a_pol) * 2 + 0] = re / n;
-                model_over_n[(q * m_pol + a_pol) * 2 + 1] = im / n;
+                read_model(astroviper::scalar_load(model, (plane * m_pol + a_pol) * n_pixels + pixel), re, im);
+                astroviper::scalar_store(model_over_n, (q * m_pol + a_pol) * 2 + 0, re / n);
+                astroviper::scalar_store(model_over_n, (q * m_pol + a_pol) * 2 + 1, im / n);
             }
             ++q;
         }
     }
 
     std::vector<double> scale(static_cast<std::size_t>(n_vis_chan));
-    for (std::int64_t c = 0; c < n_vis_chan; ++c) scale[c] = frequency_coord[c] / kSpeedOfLight;
+    for (std::int64_t c = 0; c < n_vis_chan; ++c) scale[c] = astroviper::scalar_load(frequency_coord, c) / kSpeedOfLight;
 
     const std::int64_t n_rows = n_time * n_baseline;
     if (n_rows <= 0) return;
@@ -579,13 +579,13 @@ void dft_predict(
         for (std::int64_t row = thread_index * chunk; row < row_end; ++row) {
             const std::int64_t t = row / n_baseline;
             const double* uvw_b = uvw + row * 3;
-            if (!std::isfinite(uvw_b[0]) || !std::isfinite(uvw_b[1]) || !std::isfinite(uvw_b[2]))
+            if (!std::isfinite(astroviper::scalar_load(uvw_b, 0)) || !std::isfinite(astroviper::scalar_load(uvw_b, 1)) || !std::isfinite(astroviper::scalar_load(uvw_b, 2)))
                 continue;
             for (std::int64_t c = 0; c < n_vis_chan; ++c) {
-                const std::int64_t plane = time_map[t] * m_chan + frequency_map[c];
-                const double u = uvw_b[0] * scale[c];
-                const double v = uvw_b[1] * scale[c];
-                const double w = uvw_b[2] * scale[c];
+                const std::int64_t plane = astroviper::scalar_load(time_map, t) * m_chan + astroviper::scalar_load(frequency_map, c);
+                const double u = astroviper::scalar_load(uvw_b, 0) * scale[c];
+                const double v = astroviper::scalar_load(uvw_b, 1) * scale[c];
+                const double w = astroviper::scalar_load(uvw_b, 2) * scale[c];
                 std::fill(sum_re.begin(), sum_re.end(), 0.0);
                 std::fill(sum_im.begin(), sum_im.end(), 0.0);
                 const std::int64_t q_end = pixel_start[plane + 1];
@@ -616,12 +616,12 @@ void dft_predict(
                 }
                 VisT* out = vis_data + (row * n_vis_chan + c) * n_pol;
                 for (std::int64_t p = 0; p < n_pol; ++p) {
-                    const VisT current = out[p];
+                    const VisT current = astroviper::scalar_load(out, p);
                     if (std::isnan(static_cast<double>(current.real())) ||
                         std::isnan(static_cast<double>(current.imag())))
                         continue;
-                    out[p] = VisT(static_cast<VisElement>(sum_re[p]),
-                                  static_cast<VisElement>(sum_im[p]));
+                    astroviper::scalar_store(out, p, VisT(static_cast<VisElement>(astroviper::scalar_load(sum_re, p)),
+                                  static_cast<VisElement>(astroviper::scalar_load(sum_im, p))));
                 }
             }
         }

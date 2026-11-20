@@ -12,8 +12,11 @@ from astroviper.processing_functions.imaging import config_check
 
 
 @pytest.mark.parametrize("kind", ["cube", "continuum"])
+@pytest.mark.parametrize(
+    "frequency_coords", [[np.nan], [1e9, 1e9], [1.1e9, 1e9], [1e9, 1.2e9, 1.1e9]]
+)
 def test_public_driver_rejects_numerics_before_opening_or_writing(
-    monkeypatch, tmp_path, kind
+    monkeypatch, tmp_path, kind, frequency_coords
 ):
     module = importlib.import_module(
         f"astroviper.distributed_applications.imaging.image_{kind}_single_field"
@@ -22,7 +25,7 @@ def test_public_driver_rejects_numerics_before_opening_or_writing(
     open_store = Mock(side_effect=AssertionError("must not open input"))
     monkeypatch.setattr("xradio.measurement_set.open_processing_set", open_store)
     image_params = {
-        "frequency_coords": np.array([np.nan]),
+        "frequency_coords": np.array(frequency_coords),
         "n_taylor_terms": 1,
         "reference_frequency": 1e9,
         "image_size": [8, 8],

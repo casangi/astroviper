@@ -3,6 +3,7 @@
 // comparisons are identical, so value, position and tie-breaking are unchanged.
 
 #include "../include/mt_image_math.hpp"
+#include "scalar_buffer.hpp"
 
 #include <cmath>
 
@@ -11,7 +12,7 @@ namespace mtmfs {
 template <typename T>
 T sum_array(const T* a, std::size_t n) {
     T total = static_cast<T>(0);
-    for (std::size_t i = 0; i < n; ++i) total += a[i];
+    for (std::size_t i = 0; i < n; ++i) total += astroviper::scalar_load(a, i);
     return total;
 }
 
@@ -19,7 +20,7 @@ template <typename T>
 T peak_abs(const T* a, std::size_t n) {
     T peak = static_cast<T>(0);
     for (std::size_t i = 0; i < n; ++i) {
-        const T w = std::abs(a[i]);
+        const T w = std::abs(astroviper::scalar_load(a, i));
         if (w > peak) peak = w;
     }
     return peak;
@@ -29,7 +30,7 @@ template <typename T>
 T peak_abs_masked(const T* a, const T* mask, std::size_t n) {
     T peak = static_cast<T>(0);
     for (std::size_t i = 0; i < n; ++i) {
-        const T w = std::abs(a[i] * mask[i]);
+        const T w = std::abs(astroviper::scalar_load(a, i) * astroviper::scalar_load(mask, i));
         if (w > peak) peak = w;
     }
     return peak;
@@ -71,12 +72,12 @@ PeakResult<T> extremum_by_magnitude(F weight, int nx, int ny) {
 
 template <typename T>
 PeakResult<T> find_max_abs(const T* a, int nx, int ny) {
-    return extremum_by_magnitude<T>([a](std::size_t k) { return a[k]; }, nx, ny);
+    return extremum_by_magnitude<T>([a](std::size_t k) { return astroviper::scalar_load(a, k); }, nx, ny);
 }
 
 template <typename T>
 PeakResult<T> find_max_abs_mask(const T* a, const T* mask, int nx, int ny) {
-    return extremum_by_magnitude<T>([a, mask](std::size_t k) { return a[k] * mask[k]; }, nx, ny);
+    return extremum_by_magnitude<T>([a, mask](std::size_t k) { return astroviper::scalar_load(a, k) * astroviper::scalar_load(mask, k); }, nx, ny);
 }
 
 template <typename T>
@@ -85,7 +86,7 @@ PeakResult<T> find_max_abs_mask(const T* a, const T* mask, int nx, int ny, doubl
     sum_squares = 0.0;
     return extremum_by_magnitude<T>(
         [a, mask, &sum_squares](std::size_t k) {
-            const T v = a[k] * mask[k];
+            const T v = astroviper::scalar_load(a, k) * astroviper::scalar_load(mask, k);
             sum_squares += static_cast<double>(v) * static_cast<double>(v);
             return v;
         },
