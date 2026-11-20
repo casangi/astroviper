@@ -968,36 +968,19 @@ def deconvolve(
 
     # plt.show()
 
-    if algorithm == "hogbom":
-        results = hogbom_clean(
-            residual_cube=residual_arr,
-            psf_cube=psf_arr,
-            model_cube=model_arr,
-            deconvolve_params=deconvolve_params,
-            processing_function_threads=processing_function_threads,
-            mask_cube=mask_arr,
-            input_checked=True,
-        )
-    elif algorithm == "hogbom_many_threads":
-        results = hogbom_clean_many_threads(
-            residual_cube=residual_arr,
-            psf_cube=psf_arr,
-            model_cube=model_arr,
-            deconvolve_params=deconvolve_params,
-            processing_function_threads=processing_function_threads,
-            mask_cube=mask_arr,
-            input_checked=True,
-        )
-    else:  # asp
-        results = asp_clean(
-            residual_cube=residual_arr,
-            psf_cube=psf_arr,
-            model_cube=model_arr,
-            deconvolve_params=deconvolve_params,
-            processing_function_threads=processing_function_threads,
-            mask_cube=mask_arr,
-            input_checked=True,
-        )
+    from astroviper.processing_functions.imaging.deconvolvers.deconvolver_registry import (
+        DECONVOLVERS,
+    )
+
+    results = DECONVOLVERS[algorithm].deconvolve(
+        residual_cube=residual_arr,
+        psf_cube=psf_arr,
+        model_cube=model_arr,
+        deconvolve_params=deconvolve_params,
+        processing_function_threads=processing_function_threads,
+        mask_cube=mask_arr,
+        input_checked=True,
+    )
 
     iters = np.asarray(results["iterations_performed"])
     # Every Hogbom component is a point.

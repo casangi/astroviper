@@ -137,7 +137,14 @@ def check_model_update(config, *, mode, require_complete=False):
 
         # --- Single-term deconvolver compatibility ---
         # Högbom and Asp update only the constant term of a continuum model.
-        if deconvolver in ("hogbom", "asp") and n_taylor_terms != 1:
+        model_basis = None
+        if deconvolver is not None:
+            from astroviper.processing_functions.imaging.deconvolvers.deconvolver_registry import (
+                DECONVOLVERS,
+            )
+
+            model_basis = DECONVOLVERS[deconvolver].model_basis
+        if model_basis == "pixels" and n_taylor_terms != 1:
             raise ValueError(
                 f"Continuum {deconvolver} requires n_taylor_terms=1. "
                 "Use deconvolver='mtmfs' for 2 to 4 Taylor terms."
@@ -145,7 +152,7 @@ def check_model_update(config, *, mode, require_complete=False):
 
         # --- MT-MFS compatibility ---
         # The current continuum MT-MFS path supports two to four terms.
-        if deconvolver == "mtmfs" and not 2 <= n_taylor_terms <= 4:
+        if model_basis == "taylor_terms" and not 2 <= n_taylor_terms <= 4:
             raise ValueError("Continuum mtmfs requires n_taylor_terms between 2 and 4.")
 
     # ========================================================================
@@ -1427,15 +1434,16 @@ def check_deconvolver(deconvolver, *, mode):
     Restoration needs the algorithm name without the iteration controls and
     Taylor configuration required when actually updating a model.
     """
+    from astroviper.processing_functions.imaging.deconvolvers.deconvolver_registry import (
+        DECONVOLVERS,
+    )
+
     mode.require_supported()
-    if mode.imaging_kind == "continuum":
-        allowed_deconvolvers = ("hogbom", "asp", "mtmfs")
-    else:
-        allowed_deconvolvers = (
-            "hogbom",
-            "hogbom_many_threads",
-            "asp",
-        )
+    allowed_deconvolvers = tuple(
+        name
+        for name, deconvolver_class in DECONVOLVERS.items()
+        if mode.imaging_kind in deconvolver_class.imaging_kinds
+    )
 
     if deconvolver not in allowed_deconvolvers:
         raise ValueError(

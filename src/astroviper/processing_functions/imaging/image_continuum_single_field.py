@@ -3857,6 +3857,9 @@ def model_update_mtmfs_single_field(
     from astroviper.processing_functions.imaging.config_check.param_check_model_update import (
         check_model_products,
     )
+    from astroviper.processing_functions.imaging.deconvolvers.deconvolver_registry import (
+        DECONVOLVERS,
+    )
     from astroviper.utils.data_group_tools import (
         create_data_groups_in_and_out,
         modify_data_groups_xds,
@@ -3928,8 +3931,8 @@ def model_update_mtmfs_single_field(
 
     residual_data_group["max_sidelobe_point_spread_function"] = max_sidelobe_name
 
-    if deconvolver == "mtmfs":
-        return _model_update_native_mtmfs(
+    if DECONVOLVERS[deconvolver].model_basis == "taylor_terms":
+        return DECONVOLVERS[deconvolver].deconvolve(
             img_xds,
             cube_deconvolve_params,
             residual_name,
@@ -4713,6 +4716,9 @@ def restore_continuum_image(
     import numpy as np
     import pandas as pd
 
+    from astroviper.processing_functions.imaging.deconvolvers.deconvolver_registry import (
+        DECONVOLVERS,
+    )
     from astroviper.processing_functions.imaging.restore import (
         NO_FIT_BEAM,
         _divide_taylor_polynomials,
@@ -4776,11 +4782,9 @@ def restore_continuum_image(
                 f"PSF variable {psf_name!r} contains no Taylor-order planes."
             )
 
-    restoration_residual_da = residual_da
-    if deconvolver == "mtmfs":
-        restoration_residual_da = _mtmfs_principal_residual_for_restoration(
-            residual_da, psf_da
-        )
+    restoration_residual_da = DECONVOLVERS[deconvolver].prepare_restoration(
+        residual_da, psf_da
+    )
 
     # ------------------------------------------------------------------
     # Resolve the fitted restoring beam.
