@@ -12,11 +12,11 @@ import unittest
 
 import numpy as np
 
-from astroviper.processing_functions.imaging.degrid_visibility_grid import (
-    degrid_visibility_grid_single_field,
-)
 from astroviper.processing_functions.imaging.get_visibility_grid import (
     get_visibility_grid_single_field,
+)
+from astroviper.processing_functions.imaging.gridders.anti_alias.degrid_visibility_grid import (
+    degrid_visibility_grid_single_field,
 )
 from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
     create_prolate_spheroidal_kernel_1D,

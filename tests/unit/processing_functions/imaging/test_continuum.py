@@ -14,7 +14,7 @@ from astroviper.processing_functions.imaging.add_visibility_grid_continuum impor
 from astroviper.processing_functions.imaging.add_visibility_grid_continuum_mvc import (
     add_visibility_grid_mvc_single_field,
 )
-from astroviper.processing_functions.imaging.degrid_visibility_grid import (
+from astroviper.processing_functions.imaging.gridders.anti_alias.degrid_visibility_grid import (
     degrid_visibility_grid_single_field,
 )
 from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
@@ -325,7 +325,7 @@ def test_continuum_prediction_degrids_and_accumulates_each_taylor_plane(monkeypa
         )
 
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.degrid_visibility_grid."
+        "astroviper.processing_functions.imaging.gridders.anti_alias.degrid_visibility_grid."
         "degrid_visibility_grid_single_field",
         fake_degrid,
     )

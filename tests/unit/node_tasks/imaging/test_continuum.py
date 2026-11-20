@@ -896,7 +896,7 @@ def test_append_preparation_normalizes_by_the_gridder_of_its_parameters(
     kernel or an inverse FFT."""
     image = make_runaway_taylor_image()
     dft = importlib.import_module(
-        "astroviper.processing_functions.imaging.direct_fourier_transform"
+        "astroviper.processing_functions.imaging.gridders.direct_fourier_transform.direct_fourier_transform"
     )
     kernel = importlib.import_module(
         "astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel"
@@ -2778,7 +2778,7 @@ def test_preparation_checks_actual_taylor_layout_with_shared_predicate(
         lambda *args, **kwargs: config,
     )
     dft = importlib.import_module(
-        "astroviper.processing_functions.imaging.direct_fourier_transform"
+        "astroviper.processing_functions.imaging.gridders.direct_fourier_transform.direct_fourier_transform"
     )
     monkeypatch.setattr(dft, "normalize_dft_image", lambda *args, **kwargs: None)
 

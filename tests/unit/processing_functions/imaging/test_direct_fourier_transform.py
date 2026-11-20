@@ -1,7 +1,7 @@
 """Unit tests for the direct Fourier transform option of the single-field imager.
 
 ``gridder="direct_fourier_transform"`` replaces gridding and FFT by the exact
-transforms of :mod:`astroviper.processing_functions.imaging.direct_fourier_transform`,
+transforms of :mod:`astroviper.processing_functions.imaging.gridders.direct_fourier_transform.direct_fourier_transform`,
 whose convention is the measurement equation of ``simulate_processing_set``. Point
 sources simulated by ``simulate_processing_set`` (four correlations, polarized, the
 ALMA 12 m primary beam), with and without the w term, at an off-centre pixel of a small

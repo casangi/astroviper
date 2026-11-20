@@ -40,7 +40,7 @@ def residual_cycle_continuum_single_field(
     predicted from the correlation-basis Taylor model images that
     ``model_uv_xds`` then holds, and the residual Taylor terms are imaged, by
     the exact direct Fourier transforms over the unpadded image
-    (:mod:`~astroviper.processing_functions.imaging.direct_fourier_transform`):
+    (:mod:`~astroviper.processing_functions.imaging.gridders.direct_fourier_transform.direct_fourier_transform`):
     the products are the unnormalised Taylor images, which the calling
     workflow normalises instead of transforming them.
 

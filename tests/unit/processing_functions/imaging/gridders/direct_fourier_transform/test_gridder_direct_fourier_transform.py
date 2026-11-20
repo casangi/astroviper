@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from astroviper.processing_functions.imaging.direct_fourier_transform import (
+from astroviper.processing_functions.imaging.gridders.direct_fourier_transform.direct_fourier_transform import (
     _model_visibilities,
     image_direction_cosines,
     normalize_dft_image,

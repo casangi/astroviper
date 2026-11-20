@@ -2,7 +2,7 @@
 
 ``gridder="direct_fourier_transform"`` makes the Taylor residuals, the Taylor
 PSFs and the model visibilities of a continuum map task by the exact transforms of
-:mod:`astroviper.processing_functions.imaging.direct_fourier_transform`, whose
+:mod:`astroviper.processing_functions.imaging.gridders.direct_fourier_transform.direct_fourier_transform`, whose
 convention is the measurement equation of ``simulate_processing_set``. A polarized
 point source simulated on an off-centre pixel (four correlations, the ALMA 12 m
 primary beam, one channel or two channels 4 percent apart), with and without the w
@@ -29,7 +29,7 @@ import astroviper.distributed_applications as distributed_applications
 from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
     LINEAR_CORR_TO_STOKES,
 )
-from astroviper.processing_functions.imaging.direct_fourier_transform import (
+from astroviper.processing_functions.imaging.gridders.direct_fourier_transform.direct_fourier_transform import (
     normalize_dft_image,
 )
 from astroviper.processing_functions.imaging.image_continuum_single_field import (

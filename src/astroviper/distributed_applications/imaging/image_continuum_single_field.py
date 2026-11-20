@@ -2606,7 +2606,7 @@ def image_continuum_single_field(
     With ``gridder="direct_fourier_transform"`` MFS makes its Taylor
     residuals, its Taylor PSFs and its model visibilities by the exact
     direct Fourier transform, w term included, over the unpadded image
-    (:mod:`~astroviper.processing_functions.imaging.direct_fourier_transform`):
+    (:mod:`~astroviper.processing_functions.imaging.gridders.direct_fourier_transform.direct_fourier_transform`):
     the map tasks return the sums of the Taylor images, which are reduced and
     divided by the sum of the imaging weights, and the model is predicted
     from its Taylor images without an FFT. Every residual Taylor term, PSF

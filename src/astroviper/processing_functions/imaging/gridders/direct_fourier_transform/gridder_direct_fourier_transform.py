@@ -3,7 +3,7 @@
 It sums over the visibilities and the image pixels with the threaded C++
 kernels of ``gridders/direct_fourier_transform/direct_fourier_transform_cpp``,
 in the convention of
-:mod:`~astroviper.processing_functions.imaging.direct_fourier_transform`: no uv
+:mod:`~astroviper.processing_functions.imaging.gridders.direct_fourier_transform.direct_fourier_transform`: no uv
 grid, padding, FFT or correction.
 """
 
@@ -49,7 +49,7 @@ class GridderDirectFourierTransform(Gridder):
         array is float32 for ``complex64`` and float64 for ``complex128``. A
         polarization size other than the image's is refused.
         """
-        from astroviper.processing_functions.imaging.direct_fourier_transform import (
+        from astroviper.processing_functions.imaging.gridders.direct_fourier_transform.direct_fourier_transform import (
             _check_polarizations,
         )
         from astroviper.processing_functions.imaging.utils.imaging_polarization import (
@@ -153,7 +153,7 @@ class GridderDirectFourierTransform(Gridder):
         processing_function_threads,
     ):
         """Call ``kernel``, the C++ transform of the visibilities or of the weights."""
-        from astroviper.processing_functions.imaging.direct_fourier_transform import (
+        from astroviper.processing_functions.imaging.gridders.direct_fourier_transform.direct_fourier_transform import (
             _maps,
             image_direction_cosines,
         )
@@ -215,7 +215,7 @@ class GridderDirectFourierTransform(Gridder):
         the output data group at every call and refuses an image whose
         polarization axis differs from the measurement set's.
         """
-        from astroviper.processing_functions.imaging.direct_fourier_transform import (
+        from astroviper.processing_functions.imaging.gridders.direct_fourier_transform.direct_fourier_transform import (
             _maps,
             _model_visibilities,
             image_direction_cosines,
@@ -272,13 +272,13 @@ class GridderDirectFourierTransform(Gridder):
         fft_backend,
         complex_dtype,
     ):
-        """:meth:`Gridder.uv_to_image` by :func:`~astroviper.processing_functions.imaging.direct_fourier_transform.normalize_dft_image`.
+        """:meth:`Gridder.uv_to_image` by :func:`~astroviper.processing_functions.imaging.gridders.direct_fourier_transform.direct_fourier_transform.normalize_dft_image`.
 
         The accumulated arrays are the images of the roles of
         ``image_data_group_out_modified`` in the output data group; they are
         divided by their normalization in place.
         """
-        from astroviper.processing_functions.imaging.direct_fourier_transform import (
+        from astroviper.processing_functions.imaging.gridders.direct_fourier_transform.direct_fourier_transform import (
             normalize_dft_image,
         )
 

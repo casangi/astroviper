@@ -192,12 +192,12 @@ class GridderAntiAlias(Gridder):
         processing_function_threads,
         description,
     ):
-        """:meth:`Gridder.degrid` by :func:`~astroviper.processing_functions.imaging.degrid_visibility_grid.degrid_visibility_grid_single_field`.
+        """:meth:`Gridder.degrid` by :func:`~astroviper.processing_functions.imaging.gridders.anti_alias.degrid_visibility_grid.degrid_visibility_grid_single_field`.
 
         It allocates a missing output variable as complex128 zeros and refuses
         a frequency map or a grid that does not fit the measurement set.
         """
-        from astroviper.processing_functions.imaging.degrid_visibility_grid import (
+        from astroviper.processing_functions.imaging.gridders.anti_alias.degrid_visibility_grid import (
             degrid_visibility_grid_single_field,
         )
 

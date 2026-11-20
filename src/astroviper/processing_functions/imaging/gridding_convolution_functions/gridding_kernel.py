@@ -52,7 +52,7 @@ with.
 
 The gridder ``"direct_fourier_transform"`` uses no kernel: it replaces
 gridding and FFT by the exact direct Fourier transform with the w term
-(:mod:`~astroviper.processing_functions.imaging.direct_fourier_transform`).
+(:mod:`~astroviper.processing_functions.imaging.gridders.direct_fourier_transform.direct_fourier_transform`).
 
 Schema
 ------

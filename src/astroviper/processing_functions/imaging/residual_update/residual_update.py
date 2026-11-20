@@ -373,7 +373,7 @@ def residual_update_cube_single_field(
     the residual image are the exact direct Fourier transforms, w term
     included, of the model and of the residual visibilities over the unpadded
     image (no kernel, padding, FFT or correction; see
-    :mod:`~astroviper.processing_functions.imaging.direct_fourier_transform`
+    :mod:`~astroviper.processing_functions.imaging.gridders.direct_fourier_transform.direct_fourier_transform`
     for the convention); everything else is unchanged.
 
     Parameters
