@@ -49,6 +49,7 @@ def load_processing_set(
     frequency_coords,
     full_image_frequencies=None,
     frequency_boundaries=None,
+    observation_frequency_boundaries=None,
     instrument_polarization_basis="linear",
     data_group=None,
     load_correlated_data=True,
@@ -79,6 +80,9 @@ def load_processing_set(
         centre. Each pair gives the lowest and highest accepted float64
         frequency, both inclusive. Only task-local channel records are needed.
         When omitted, use the supplied image axis to infer channel widths.
+    observation_frequency_boundaries : dict, optional
+        Single-channel image boundaries keyed by observation name, computed
+        from each observation's full frequency axis before selection.
     full_image_frequencies : array-like, optional
         Original image-frequency axis used to validate task-local selections.
     instrument_polarization_basis : str, optional
@@ -109,13 +113,22 @@ def load_processing_set(
     -------
     xarray.DataTree
     """
+    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        attach_observation_frequency_boundaries,
+    )
+
+    def with_boundaries(ps_xdt):
+        return attach_observation_frequency_boundaries(
+            ps_xdt, observation_frequency_boundaries
+        )
+
     check_io_engine(io_engine)
     if lazy_input_data is not None:
         from astroviper.utils.measurement_set_v2_input import (
             load_processing_set_msv2,
         )
 
-        return load_processing_set_msv2(lazy_input_data)
+        return with_boundaries(load_processing_set_msv2(lazy_input_data))
 
     if data_group is None and (io_engine == "chunk" or not load_correlated_data):
         data_group = _stored_data_group(
@@ -130,32 +143,37 @@ def load_processing_set(
         )
         from astroviper.utils import chunk_io
 
-        return chunk_io.load_processing_set(
-            input_data_store,
-            sel_parms=data_selection,
-            data_group=data_group,
-            processing_set_data_group_name=processing_set_data_group_name,
-            frequency_coords=frequency_coords,
-            full_image_frequencies=full_image_frequencies,
-            frequency_boundaries=frequency_boundaries,
-            instrument_polarization_basis=instrument_polarization_basis,
-            processing_function_threads=processing_function_threads,
-            load_correlated_data=load_correlated_data,
-            map_frequencies=map_visibility_frequencies_to_image,
+        return with_boundaries(
+            chunk_io.load_processing_set(
+                input_data_store,
+                sel_parms=data_selection,
+                data_group=data_group,
+                processing_set_data_group_name=processing_set_data_group_name,
+                frequency_coords=frequency_coords,
+                full_image_frequencies=full_image_frequencies,
+                frequency_boundaries=frequency_boundaries,
+                observation_frequency_boundaries=observation_frequency_boundaries,
+                instrument_polarization_basis=instrument_polarization_basis,
+                processing_function_threads=processing_function_threads,
+                load_correlated_data=load_correlated_data,
+                map_frequencies=map_visibility_frequencies_to_image,
+            )
         )
 
     from xradio.measurement_set.load_processing_set import (
         load_processing_set as xradio_load_processing_set,
     )
 
-    return xradio_load_processing_set(
-        input_data_store,
-        sel_parms=data_selection,
-        data_group_name=processing_set_data_group_name,
-        drop_variables=(
-            None if load_correlated_data else [data_group["correlated_data"]]
-        ),
-        load_sub_datasets=False,
+    return with_boundaries(
+        xradio_load_processing_set(
+            input_data_store,
+            sel_parms=data_selection,
+            data_group_name=processing_set_data_group_name,
+            drop_variables=(
+                None if load_correlated_data else [data_group["correlated_data"]]
+            ),
+            load_sub_datasets=False,
+        )
     )
 
 

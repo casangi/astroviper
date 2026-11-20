@@ -711,6 +711,7 @@ def load_processing_set(
     map_frequencies,
     full_image_frequencies=None,
     frequency_boundaries=None,
+    observation_frequency_boundaries=None,
 ):
     """Reconstruct a minimal processing set for cube imaging from chunk blobs.
 
@@ -770,6 +771,9 @@ def load_processing_set(
         centre. Each pair gives the lowest and highest accepted float64
         frequency, both inclusive. Only task-local channel records are needed.
         When omitted, use the supplied image axis to infer channel widths.
+    observation_frequency_boundaries : dict, optional
+        Single-channel image boundaries keyed by observation name, computed
+        from each observation's full frequency axis before selection.
     full_image_frequencies : array-like, optional
         Original image-frequency axis used to validate task-local selections.
     map_frequencies : callable
@@ -870,6 +874,14 @@ def load_processing_set(
             )
             if frequency_boundaries is not None:
                 mapping_context["frequency_boundaries"] = frequency_boundaries
+            if observation_frequency_boundaries is not None:
+                if ms_name not in observation_frequency_boundaries:
+                    raise ValueError(
+                        f"Missing frequency boundaries for observation {ms_name!r}."
+                    )
+                mapping_context["frequency_boundaries"] = (
+                    observation_frequency_boundaries[ms_name]
+                )
             map_frequencies(
                 child_frequency_values, task_frequency_values, **mapping_context
             )
@@ -919,6 +931,10 @@ def load_processing_set(
                 coords[coord_name] = (c_dims, values)
 
         ds = xr.Dataset(data_vars=data_vars, coords=coords)
+        if observation_frequency_boundaries is not None:
+            ds.frequency.attrs["image_frequency_boundaries"] = (
+                observation_frequency_boundaries[ms_name]
+            )
         ds.attrs["data_groups"] = {processing_set_data_group_name: dict(data_group)}
         nodes[ms_name] = ds
 

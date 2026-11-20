@@ -409,3 +409,87 @@ def test_precomputed_boundary_payload_scales_with_owned_channels():
         assert len(local) == 1
         lengths.append(len(pickle.dumps(local)))
     assert lengths[0] == lengths[1]
+
+
+@pytest.mark.parametrize(
+    "observed",
+    [
+        [1.0e9, 1.1e9, 1.2e9, 2.0e9],
+        [2.0e9, 1.2e9, 1.1e9, 1.0e9],
+        [1.35e9, 1.45e9, 1.55e9, 1.65e9],
+        [1.7e9],
+        [1.5e9, 1.5e9],
+    ],
+)
+def test_single_image_channel_uses_full_observation_boundaries(observed):
+    import json
+
+    from graphviper.graph_tools.coordinate_utils import map_to_nearest_coordinate
+
+    observed = np.asarray(observed)
+    image = [1.5e9]
+    boundaries = json.loads(
+        json.dumps(calculate_frequency_boundaries(image, observed), allow_nan=False)
+    )
+    selected = observed[map_to_nearest_coordinate(observed, image) == 0]
+    if selected.size:
+        np.testing.assert_array_equal(
+            map_visibility_frequencies_to_image(
+                selected, image, frequency_boundaries=boundaries
+            ),
+            np.zeros(selected.size, dtype=np.int64),
+        )
+    lo, hi = boundaries[str(image[0])]
+    tolerance = 0.5 * np.diff(np.sort(observed)).max() if len(observed) > 1 else np.inf
+    with np.errstate(over="ignore"):
+        probes = (lo, hi, np.nextafter(lo, -np.inf), np.nextafter(hi, np.inf))
+    for probe in probes:
+        if not np.isfinite(probe):
+            continue
+        if abs(probe - image[0]) <= tolerance:
+            np.testing.assert_array_equal(
+                map_visibility_frequencies_to_image(
+                    [probe], image, frequency_boundaries=boundaries
+                ),
+                [0],
+            )
+        else:
+            with pytest.raises(ValueError, match="outside this task"):
+                map_visibility_frequencies_to_image(
+                    [probe], image, frequency_boundaries=boundaries
+                )
+
+
+def test_single_channel_observations_keep_distinct_intervals_after_slicing():
+    import xarray as xr
+
+    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        attach_observation_frequency_boundaries,
+        calculate_observation_frequency_boundaries,
+        get_frequency_boundaries,
+    )
+
+    full = {
+        "wide": xr.Dataset(coords={"frequency": [1.0e9, 1.1e9, 1.2e9, 2.0e9]}),
+        "narrow": xr.Dataset(coords={"frequency": [1.35e9, 1.45e9, 1.55e9, 1.65e9]}),
+    }
+    bounds = calculate_observation_frequency_boundaries([1.5e9], full)
+    assert bounds["wide"] != bounds["narrow"]
+    selected = {name: child.isel(frequency=slice(1, 3)) for name, child in full.items()}
+    attach_observation_frequency_boundaries(selected, bounds)
+    image = xr.Dataset(coords={"frequency": [1.5e9]})
+    for child in selected.values():
+        child = child.isel(frequency=slice(0, 1))
+        np.testing.assert_array_equal(
+            map_visibility_frequencies_to_image(
+                child.frequency.values,
+                image.frequency.values,
+                frequency_boundaries=get_frequency_boundaries(image, child),
+            ),
+            [0],
+        )
+    with pytest.raises(ValueError, match="outside this task"):
+        map_visibility_frequencies_to_image(
+            [1.2e9], [1.5e9], frequency_boundaries=bounds["narrow"]
+        )
+    assert calculate_observation_frequency_boundaries([1.0e9, 2.0e9], full) == {}

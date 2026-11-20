@@ -162,6 +162,19 @@ def _image(node_task_inputs, image_store, frequencies):
     kwargs = copy.deepcopy(node_task_inputs)
     kwargs["task_coords"]["frequency"]["data"] = np.asarray(frequencies, float)
     # This helper creates a new image axis, not a partition of the captured one.
+    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        calculate_frequency_boundaries,
+    )
+
+    coordinate = kwargs["task_coords"]["frequency"]
+    coordinate["frequency_boundaries"] = calculate_frequency_boundaries(frequencies)
+    if len(frequencies) == 1:
+        coordinate["observation_frequency_boundaries"] = {
+            name: calculate_frequency_boundaries(frequencies, [F0])
+            for name in kwargs["data_selection"]
+        }
+    else:
+        coordinate.pop("observation_frequency_boundaries", None)
     kwargs["image_frequency_attrs"]["full_image_frequencies"] = list(frequencies)
     kwargs["task_coords"]["frequency"]["slice"] = slice(0, len(frequencies))
     kwargs["image_store"] = str(image_store)

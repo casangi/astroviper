@@ -98,6 +98,7 @@ def _frequency_map(ms_xds, img_xds, chan_mode):
     """The image channel of every visibility channel."""
     if chan_mode == "cube":
         from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+            get_frequency_boundaries,
             map_visibility_frequencies_to_image,
         )
 
@@ -107,7 +108,7 @@ def _frequency_map(ms_xds, img_xds, chan_mode):
             full_image_frequencies=img_xds.frequency.attrs.get(
                 "full_image_frequencies"
             ),
-            frequency_boundaries=img_xds.frequency.attrs.get("frequency_boundaries"),
+            frequency_boundaries=get_frequency_boundaries(img_xds, ms_xds),
         )
     else:  # continuum: every channel onto image channel 0
         frequency_map = np.zeros(ms_xds.sizes["frequency"], dtype=np.int64)

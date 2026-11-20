@@ -3094,3 +3094,128 @@ def test_broad_image_channels_are_independent_of_task_partition(
         np.testing.assert_allclose(
             products[1][name], products[0][name], rtol=1e-6, atol=1e-9, err_msg=name
         )
+
+
+@pytest.mark.parametrize(
+    "mode,cache_mode",
+    [
+        ("cube", None),
+        ("psf_cube", None),
+        ("mfs", "recompute"),
+        ("mfs", "in_memory"),
+        ("mfs", "in_place"),
+        ("mvc", "recompute"),
+        ("mvc", "in_memory"),
+        ("mvc", "in_place"),
+    ],
+)
+@pytest.mark.parametrize("io_engine", ["chunk", "xradio"])
+def test_single_image_channel_retains_each_observations_full_axis_tolerance(
+    tmp_path, monkeypatch, mode, cache_mode, io_engine
+):
+    """The same selected channels require different tolerances for each child."""
+    import shutil
+    from pathlib import Path
+
+    import graphviper.graph_tools as graph_tools
+    import zarr
+    from xradio.image import load_image
+
+    from astroviper.distributed_applications.imaging import image_cube_single_field
+    from astroviper.distributed_applications.imaging.point_spread_function_cube_single_field import (
+        point_spread_function_cube_single_field,
+    )
+    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        calculate_frequency_boundaries,
+    )
+    from tests.unit.distributed_applications.imaging.test_image_cube_single_field import (
+        PC,
+        _simulate_point_source,
+    )
+
+    store = _simulate_point_source(tmp_path, n_channels=4)
+    original = next(iter(open_processing_set(store).children))
+    shutil.copytree(Path(store) / original, Path(store) / "second_observation")
+    axes = {
+        original: np.array([1.0, 1.1, 1.2, 2.0]) * 1.0e9,
+        "second_observation": np.array([1.35, 1.45, 1.55, 1.65]) * 1.0e9,
+    }
+    for name, axis in axes.items():
+        zarr.open_array(str(Path(store) / name / "frequency"), mode="r+")[:] = axis
+    zarr.consolidate_metadata(store)
+    assert len(open_processing_set(store).children) == 2
+    expected = {
+        name: calculate_frequency_boundaries([1.5e9], axis)
+        for name, axis in axes.items()
+    }
+    real_map = graph_tools.map
+    recorded = []
+
+    def check_task_context(**kwargs):
+        for task in kwargs["node_task_data_mapping"].values():
+            coordinate = task["task_coords"]["frequency"]
+            assert coordinate["frequency_boundaries"] is None
+            assert coordinate["observation_frequency_boundaries"] == expected
+            assert len(coordinate["data"]) == 1
+        recorded.append(True)
+        return real_map(**kwargs)
+
+    monkeypatch.setattr(graph_tools, "map", check_task_context)
+    path = str(tmp_path / f"single_{mode}.img.zarr")
+    params = dict(
+        ps_store=store,
+        image_store=path,
+        image_params={
+            "image_size": [64, 64],
+            "cell_size": np.deg2rad(np.array([-8.0, 8.0]) / 3600),
+            "phase_direction": PC,
+            "frequency_coords": [1.5e9],
+            "polarization_coords": ["I", "V"],
+            "time_coords": [0.0],
+            "fft_padding": 1.2,
+        },
+        imaging_weights_params={"weighting": "briggs", "robust": 0.5},
+        instrument_polarization_basis="circular",
+        processing_set_data_group_name="base",
+        single_precision_image=False,
+        n_mapping_parallelism={"frequency": 1},
+        io_engine=io_engine,
+        processing_function_threads=1,
+    )
+    if mode == "psf_cube":
+        point_spread_function_cube_single_field(**params)
+    else:
+        params["cycle_control_params"] = {
+            "max_iter": 2,
+            "max_cycles": 2,
+            "threshold": 0.0,
+            "gain": 0.1,
+            "psf_sidelobe_factor": 1.5,
+            "max_iter_per_cycle": 1,
+            "min_psf_fraction": 0.05,
+            "max_psf_fraction": 0.8,
+        }
+        if mode == "cube":
+            image_cube_single_field(**params)
+        else:
+            params["image_params"].update(reference_frequency=1.5e9, n_taylor_terms=1)
+            params["imaging_weights_params"].update(
+                weighting_scope="global", casa_weighting_implementation=True
+            )
+            image_continuum_single_field(
+                **params,
+                continuum_mode=mode,
+                deconvolver="hogbom",
+                restore=False,
+                visibility_memory_mode=cache_mode,
+                wideband_primary_beam_memory_mode=(
+                    cache_mode if mode == "mvc" else "recompute"
+                ),
+            )
+    assert recorded
+    image = load_image(path)
+    assert np.isfinite(image.POINT_SPREAD_FUNCTION.values).all()
+    assert np.max(np.abs(image.POINT_SPREAD_FUNCTION.values)) > 0.9
+    if mode != "psf_cube":
+        assert np.isfinite(image.SKY_RESIDUAL.values).all()
+        assert np.max(np.abs(image.SKY_RESIDUAL.values)) > 0.1

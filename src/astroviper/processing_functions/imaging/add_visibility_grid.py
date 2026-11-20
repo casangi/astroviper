@@ -311,6 +311,7 @@ def add_visibility_grid_single_field(
 
     if chan_mode == "cube":
         from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+            get_frequency_boundaries,
             map_visibility_frequencies_to_image,
         )
 
@@ -321,7 +322,7 @@ def add_visibility_grid_single_field(
             full_image_frequencies=img_xds.frequency.attrs.get(
                 "full_image_frequencies"
             ),
-            frequency_boundaries=img_xds.frequency.attrs.get("frequency_boundaries"),
+            frequency_boundaries=get_frequency_boundaries(img_xds, ms_xds),
         )
     else:  # continuum
         n_imag_chan = 1  # Single continuum image collapsed across all channels.

@@ -184,10 +184,24 @@ def calculate_frequency_boundaries(image_frequencies, visibility_frequencies=Non
         half_width = (
             0.5 * np.diff(np.sort(observed)).max() if observed.size > 1 else np.inf
         )
+        if np.isinf(half_width):
+            limit = np.finfo(np.float64).max
+            return {str(float(axis[0])): [-limit, limit]}
+        order = np.array([0])
+        # Compare distances with the fixed full-observation tolerance; rounded
+        # centre +/- half_width alone can include or exclude an adjacent float.
         return {
             str(float(axis[0])): [
-                float(axis[0] - half_width),
-                float(axis[0] + half_width),
+                float(
+                    _bisect_frequency_boundaries(
+                        axis, order, -np.inf, half_width=half_width
+                    )[0]
+                ),
+                float(
+                    _bisect_frequency_boundaries(
+                        axis, order, np.inf, half_width=half_width
+                    )[0]
+                ),
             ]
         }
 
@@ -282,9 +296,14 @@ def _map_with_frequency_boundaries(
     return order[positions].astype(np.int64)
 
 
-def _bisect_frequency_boundaries(axis, order, direction):
+def _bisect_frequency_boundaries(axis, order, direction, *, half_width=None):
     """Resolve long rounding plateaus in at most 64 float64-key bisections."""
     from graphviper.graph_tools.coordinate_utils import map_to_nearest_coordinate
+
+    def map_values(values):
+        if half_width is None:
+            return map_to_nearest_coordinate(values, axis)
+        return np.where(np.abs(values - axis[0]) <= half_width, 0, -1)
 
     sign = np.uint64(1 << 63)
 
@@ -305,7 +324,7 @@ def _bisect_frequency_boundaries(axis, order, direction):
     )
     rejected = keys(outer)
     # At the finite extremes, the end interval can already include the limit.
-    limit_owned = map_to_nearest_coordinate(outer, axis) == order
+    limit_owned = map_values(outer) == order
     accepted[limit_owned] = rejected[limit_owned]
     for _ in range(64):
         low = np.minimum(accepted, rejected)
@@ -314,8 +333,90 @@ def _bisect_frequency_boundaries(axis, order, direction):
         if not np.any(active):
             break
         middle = low[active] + (high[active] - low[active]) // np.uint64(2)
-        owned = map_to_nearest_coordinate(values(middle), axis) == order[active]
+        owned = map_values(values(middle)) == order[active]
         indices = np.flatnonzero(active)
         accepted[indices[owned]] = middle[owned]
         rejected[indices[~owned]] = middle[~owned]
     return values(accepted)
+
+
+def calculate_observation_frequency_boundaries(image_frequencies, ps_xdt):
+    """Prepare single-image-channel intervals from each full observation axis.
+
+    Only coordinate metadata are read. Multichannel images already have
+    observation-independent boundaries and return an empty mapping.
+
+    Parameters
+    ----------
+    image_frequencies : array-like
+        Full image-channel centres in Hz.
+    ps_xdt : mapping or xarray.DataTree
+        Full observations before task-level frequency selection.
+
+    Returns
+    -------
+    dict
+        Observation names mapped to their single-channel acceptance intervals.
+    """
+    if len(image_frequencies) != 1:
+        return {}
+    return {
+        name: calculate_frequency_boundaries(image_frequencies, child.frequency.values)
+        for name, child in ps_xdt.items()
+    }
+
+
+def attach_observation_frequency_boundaries(ps_xdt, boundaries):
+    """Retain each observation's driver-computed intervals across data slicing.
+
+    The processing set may already be selected or preloaded. Never infer a
+    replacement tolerance from its truncated coordinates.
+
+    Parameters
+    ----------
+    ps_xdt : mapping or xarray.DataTree
+        Selected observations whose frequency-coordinate attributes are updated.
+    boundaries : dict or None
+        Driver-computed acceptance intervals keyed by observation name.
+
+    Returns
+    -------
+    mapping or xarray.DataTree
+        The input processing set, with interval metadata attached in place.
+
+    Raises
+    ------
+    ValueError
+        A selected observation is missing its precomputed intervals.
+    """
+    if not boundaries:
+        return ps_xdt
+    for name, child in ps_xdt.items():
+        if name not in boundaries:
+            raise ValueError(f"Missing frequency boundaries for observation {name!r}.")
+        child.frequency.attrs = {
+            **child.frequency.attrs,
+            "image_frequency_boundaries": boundaries[name],
+        }
+    return ps_xdt
+
+
+def get_frequency_boundaries(img_xds, ms_xds):
+    """Use common image intervals or this observation's single-channel interval.
+
+    Parameters
+    ----------
+    img_xds : xarray.Dataset
+        Image with task-local frequencies and optional common intervals.
+    ms_xds : xarray.Dataset or xarray.DataTree
+        Observation carrying its own intervals on the frequency coordinate.
+
+    Returns
+    -------
+    dict or None
+        Applicable precomputed intervals, or None for legacy direct calls.
+    """
+    common = img_xds.frequency.attrs.get("frequency_boundaries")
+    if common is not None:
+        return common
+    return ms_xds.frequency.attrs.get("image_frequency_boundaries")

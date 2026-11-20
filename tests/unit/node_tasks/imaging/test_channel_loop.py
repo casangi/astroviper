@@ -843,3 +843,55 @@ def test_single_channel_task_keeps_precomputed_boundaries_for_science(
     image_cube_single_field(**params, input_data=ps)
     assert len(fake.calls) == 1
     np.testing.assert_array_equal(fake.calls[0]["vis_frequencies"]["ms_a"], observed)
+
+
+def test_preloaded_single_channel_task_keeps_observation_specific_boundaries(
+    tmp_path, monkeypatch
+):
+    import astroviper.processing_functions.imaging as pf_imaging
+    from astroviper.node_tasks.imaging.image_cube_single_field import (
+        image_cube_single_field,
+    )
+    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        calculate_frequency_boundaries,
+        get_frequency_boundaries,
+        map_visibility_frequencies_to_image,
+    )
+
+    axes = {
+        "ms_a": np.array([1.0, 1.1, 1.2, 2.0]) * 1.0e9,
+        "ms_b": np.array([1.35, 1.45, 1.55, 1.65]) * 1.0e9,
+    }
+    boundaries = {
+        name: calculate_frequency_boundaries([1.5e9], axis)
+        for name, axis in axes.items()
+    }
+    ps = _fake_processing_set({name: axis[1:3] for name, axis in axes.items()})
+    fake = _FakeScience([1])
+
+    def science(ps_xdt, image, *args, **kwargs):
+        for name, child in ps_xdt.items():
+            assert get_frequency_boundaries(image, child) == boundaries[name]
+            np.testing.assert_array_equal(
+                map_visibility_frequencies_to_image(
+                    child.frequency.values,
+                    image.frequency.values,
+                    frequency_boundaries=get_frequency_boundaries(image, child),
+                ),
+                [0, 0],
+            )
+        return fake(ps_xdt, image, *args, **kwargs)
+
+    monkeypatch.setattr(pf_imaging, "image_cube_single_field", science)
+    params = _task_inputs(tmp_path, n_chan=1)
+    params["task_coords"] = {
+        "frequency": {
+            "data": [1.5e9],
+            "frequency_boundaries": None,
+            "observation_frequency_boundaries": boundaries,
+        }
+    }
+    params["image_frequency_attrs"] = _image_frequency_attrs([1.5e9])
+    image_cube_single_field(**params, input_data=ps)
+    assert len(fake.calls) == 1
+    assert set(fake.calls[0]["vis_frequencies"]) == set(axes)

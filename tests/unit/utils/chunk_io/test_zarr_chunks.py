@@ -2003,3 +2003,50 @@ def test_load_single_broad_image_channel_preserves_global_boundaries(
             map_frequencies=map_visibility_frequencies_to_image,
             **context(full[2:3]),
         )
+
+
+@pytest.mark.parametrize("load_correlated_data", [False, True])
+def test_single_image_channel_loader_uses_each_observations_original_width(
+    tmp_path, load_correlated_data
+):
+    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        calculate_frequency_boundaries,
+    )
+
+    store = str(tmp_path / "single.ps.zarr")
+    axes = {
+        "wide": np.array([1.0, 1.1, 1.2, 2.0]) * 1.0e9,
+        "narrow": np.array([1.35, 1.45, 1.55, 1.65]) * 1.0e9,
+    }
+    for name, axis in axes.items():
+        _write_minimal_processing_set_child(store, name, axis)
+    boundaries = {
+        name: calculate_frequency_boundaries([1.5e9], axis)
+        for name, axis in axes.items()
+    }
+    loaded = load_processing_set(
+        store,
+        {name: {"frequency": slice(1, 3)} for name in axes},
+        _minimal_data_group(),
+        "base",
+        [1.5e9],
+        map_frequencies=map_visibility_frequencies_to_image,
+        observation_frequency_boundaries=boundaries,
+        load_correlated_data=load_correlated_data,
+    )
+    for name in axes:
+        np.testing.assert_array_equal(loaded[name].frequency, axes[name][1:3])
+        assert (
+            loaded[name].frequency.attrs["image_frequency_boundaries"]
+            == boundaries[name]
+        )
+    with pytest.raises(ValueError, match="outside this task"):
+        load_processing_set(
+            store,
+            {"wide": {"frequency": slice(1, 3)}},
+            _minimal_data_group(),
+            "base",
+            [1.5e9],
+            map_frequencies=map_visibility_frequencies_to_image,
+            observation_frequency_boundaries={"wide": boundaries["narrow"]},
+        )

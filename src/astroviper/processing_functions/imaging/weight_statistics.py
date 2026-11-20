@@ -408,6 +408,7 @@ def calculate_weight_statistics_single_field(
     import xarray as xr
 
     from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        get_frequency_boundaries,
         map_visibility_frequencies_to_image,
     )
 
@@ -436,7 +437,7 @@ def calculate_weight_statistics_single_field(
             full_image_frequencies=img_xds.frequency.attrs.get(
                 "full_image_frequencies"
             ),
-            frequency_boundaries=img_xds.frequency.attrs.get("frequency_boundaries"),
+            frequency_boundaries=get_frequency_boundaries(img_xds, ms_xdt),
         )
         samples_per_time = int(cross.sum()) * ms_xdt.sizes["frequency"] * len(order)
         times_per_block = max(1, BLOCK_SAMPLES // max(samples_per_time, 1))

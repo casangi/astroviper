@@ -119,6 +119,7 @@ def _visibility_to_image_frequency_maps(ps_xdt, img_xds):
     image channel.
     """
     from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        get_frequency_boundaries,
         map_visibility_frequencies_to_image,
     )
 
@@ -129,7 +130,7 @@ def _visibility_to_image_frequency_maps(ps_xdt, img_xds):
             full_image_frequencies=img_xds.frequency.attrs.get(
                 "full_image_frequencies"
             ),
-            frequency_boundaries=img_xds.frequency.attrs.get("frequency_boundaries"),
+            frequency_boundaries=get_frequency_boundaries(img_xds, ms_xdt),
         )
         for ms_name, ms_xdt in ps_xdt.items()
     }
@@ -1290,6 +1291,9 @@ def image_cube_single_field(
                 processing_set_data_group_name,
                 frequency_coords=task_coords["frequency"]["data"],
                 frequency_boundaries=img_xds.frequency.attrs["frequency_boundaries"],
+                observation_frequency_boundaries=task_coords["frequency"].get(
+                    "observation_frequency_boundaries"
+                ),
                 instrument_polarization_basis=instrument_polarization_basis,
                 data_group=data_group,
                 processing_function_threads=processing_function_threads,
@@ -1328,6 +1332,13 @@ def image_cube_single_field(
             "deconvolution": ImagingDict(),
             "image_statistics": {},
         }
+    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        attach_observation_frequency_boundaries,
+    )
+
+    ps_xdt = attach_observation_frequency_boundaries(
+        ps_xdt, task_coords["frequency"].get("observation_frequency_boundaries")
+    )
     T_load = time.time() - start
 
     # ---- Imaging cycle loops, one frequency channel at a time ----

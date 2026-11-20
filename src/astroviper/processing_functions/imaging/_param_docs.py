@@ -525,6 +525,10 @@ _FIND_CONTINUUM_ULTRA_PARAM_DOCS = {
 }
 
 IMAGING_PARAM_DOCS = {
+    "observation_frequency_boundaries": (
+        "Single-channel image boundaries keyed by observation name, computed\n"
+        "from each observation's full frequency axis before selection."
+    ),
     "frequency_boundaries": (
         "Precomputed image-channel acceptance intervals (Hz), keyed by channel\n"
         "centre. Each pair gives the lowest and highest accepted float64\n"

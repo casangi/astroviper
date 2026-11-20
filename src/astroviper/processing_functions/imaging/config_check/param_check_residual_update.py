@@ -524,14 +524,22 @@ def check_input_metadata(source, config, *, mode, measurement_set="input"):
             selected_frequency_mask,
         )
         from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+            calculate_frequency_boundaries,
             map_visibility_frequencies_to_image,
         )
 
         frequencies = np.asarray(source.frequency.values)
         selected = selected_frequency_mask(frequencies, image["frequency_coords"])
         if np.any(selected):
+            boundaries = source.frequency.attrs.get("image_frequency_boundaries")
+            if boundaries is None and len(image["frequency_coords"]) == 1:
+                boundaries = calculate_frequency_boundaries(
+                    image["frequency_coords"], frequencies
+                )
             map_visibility_frequencies_to_image(
-                frequencies[selected], image["frequency_coords"]
+                frequencies[selected],
+                image["frequency_coords"],
+                frequency_boundaries=boundaries,
             )
 
 

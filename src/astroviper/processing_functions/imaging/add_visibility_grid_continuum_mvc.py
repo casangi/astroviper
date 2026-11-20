@@ -139,6 +139,7 @@ def add_visibility_grid_mvc_single_field(
         padded_grid_size,
     )
     from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        get_frequency_boundaries,
         map_visibility_frequencies_to_image,
     )
     from astroviper.utils.data_group_tools import (
@@ -279,7 +280,7 @@ def add_visibility_grid_mvc_single_field(
         frequency_coord,
         image_frequency_coord,
         full_image_frequencies=img_xds.frequency.attrs.get("full_image_frequencies"),
-        frequency_boundaries=img_xds.frequency.attrs.get("frequency_boundaries"),
+        frequency_boundaries=get_frequency_boundaries(img_xds, ms_xds),
     )
     n_image_chan = image_frequency_coord.size
 

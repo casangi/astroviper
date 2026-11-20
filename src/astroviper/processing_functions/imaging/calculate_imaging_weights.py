@@ -1134,6 +1134,7 @@ def calculate_imaging_weights(
         grid_imaging_weights,
     )
     from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        get_frequency_boundaries,
         map_visibility_frequencies_to_image,
     )
     from astroviper.utils.data_group_tools import (
@@ -1222,7 +1223,7 @@ def calculate_imaging_weights(
             full_image_frequencies=img_xds.frequency.attrs.get(
                 "full_image_frequencies"
             ),
-            frequency_boundaries=img_xds.frequency.attrs.get("frequency_boundaries"),
+            frequency_boundaries=get_frequency_boundaries(img_xds, ms_xdt),
         )
 
         grid_imaging_weights(
@@ -1258,7 +1259,7 @@ def calculate_imaging_weights(
             full_image_frequencies=img_xds.frequency.attrs.get(
                 "full_image_frequencies"
             ),
-            frequency_boundaries=img_xds.frequency.attrs.get("frequency_boundaries"),
+            frequency_boundaries=get_frequency_boundaries(img_xds, ms_xdt),
         )
 
         imaging_weights = degrid_imaging_weights(
