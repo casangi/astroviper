@@ -40,9 +40,30 @@ DIMS = ("time", "baseline_id", "frequency", "polarization")
 
 def _equal(a, b):
     a, b = np.asarray(a), np.asarray(b)
-    if a.dtype.kind in "fc":
+    if a.dtype.kind == "c" or b.dtype.kind == "c":
+        return _equal(a.real, b.real) and _equal(a.imag, b.imag)
+    if a.dtype.kind == "f" or b.dtype.kind == "f":
         return np.array_equal(a, b, equal_nan=True)
     return np.array_equal(a, b)
+
+
+@pytest.mark.parametrize("dtype", ["complex64", "complex128"])
+@pytest.mark.parametrize(
+    "expected, corrupted",
+    [
+        (complex(float("nan"), float("inf")), complex(float("nan"), float("nan"))),
+        (complex(float("-inf"), float("nan")), complex(float("nan"), float("nan"))),
+        (complex(float("nan"), float("inf")), complex(float("nan"), float("-inf"))),
+        (complex(1, float("nan")), complex(2, float("nan"))),
+    ],
+)
+def test_equal_checks_both_complex_components(dtype, expected, corrupted):
+    """A NaN in one component must not hide corruption in the other."""
+    original = np.array([expected], dtype=dtype)
+    changed = np.array([corrupted], dtype=dtype)
+    assert _equal(original, original.copy())
+    assert not _equal(original, changed)
+    assert not _equal(changed, original)
 
 
 # --------------------------------------------------------------------------- #
@@ -86,8 +107,10 @@ def test_read_v3_sharded_multichannel(tmp_path, fsel):
         ("complex64", 0j),
         ("complex64", 2 - 3j),
         ("complex128", 2 - 3j),
+        ("complex64", complex(float("nan"), float("inf"))),
         ("complex128", complex(float("nan"), float("inf"))),
         ("complex64", complex(float("-inf"), float("nan"))),
+        ("complex128", complex(float("-inf"), float("nan"))),
         ("float32", float("nan")),
         ("float64", float("-inf")),
         ("int32", -7),
@@ -113,12 +136,12 @@ def test_read_encoded_fill_values(tmp_path, layout, dtype, fill):
     got, dims = read_array_region(path, {"frequency": slice(1, 7)}, out=out)
     assert got is out
     assert dims == ["frequency", "polarization"]
-    np.testing.assert_array_equal(got, arr[1:7, :])
+    assert _equal(got, arr[1:7, :])
     got, _ = read_array_region(
         path, {"frequency": slice(1, 7)}, out=out, chunk_mask=np.array(False)
     )
     assert got is out
-    np.testing.assert_array_equal(got, np.full(out.shape, fill, dtype=dtype))
+    assert _equal(got, np.full(out.shape, fill, dtype=dtype))
 
 
 @pytest.mark.parametrize("sharded", [False, True])
