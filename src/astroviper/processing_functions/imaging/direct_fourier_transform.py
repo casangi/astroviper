@@ -233,8 +233,9 @@ def add_dft_image_single_field(
     ------
     ValueError
         If the image and the measurement set have different numbers of
-        polarizations, or (from the kernel) if an image pixel lies beyond
-        ``l**2 + m**2 < 1``.
+        polarizations.
+    RuntimeError
+        From the kernel, if an image pixel lies beyond ``l**2 + m**2 < 1``.
     """
     from astroviper.processing_functions.imaging.gridders.direct_fourier_transform_cpp import (
         dft_image,
@@ -906,6 +907,8 @@ def add_dft_image_continuum_single_field(
         For fewer than one plane, a reference frequency that is not finite
         and positive, an existing output of another shape, or as
         :func:`add_dft_image_single_field`.
+    RuntimeError
+        As :func:`add_dft_image_single_field`.
     """
     if not input_checked:
         from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (
