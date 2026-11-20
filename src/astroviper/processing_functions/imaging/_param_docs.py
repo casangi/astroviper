@@ -719,9 +719,9 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
     ),
     "gcf_xds": (
         "The ``gcf_xds`` of the gridding kernel, from\n"
-        ":func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.make_gridding_kernel`,\n"
+        ":func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.make_gridding_kernel`,\n"
         "or from\n"
-        ":func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.as_gridding_kernel`\n"
+        ":func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.as_gridding_kernel`\n"
         "for a bare table of CASA's prolate spheroidal kernel of support 7."
     ),
     "primary_beam_params": (

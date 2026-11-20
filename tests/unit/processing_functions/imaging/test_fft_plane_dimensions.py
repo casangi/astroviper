@@ -5,12 +5,12 @@ import pytest
 import xarray as xr
 import xradio.image.image_xds  # noqa: F401
 
-from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
-    ifft_norm_img_xds,
-)
-from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
     CASA_GRIDDING_KERNEL_PARAMS,
     make_gridding_kernel,
+)
+from astroviper.processing_functions.imaging.normalization.normalize_image import (
+    ifft_norm_img_xds,
 )
 
 CASA_KERNEL = make_gridding_kernel(CASA_GRIDDING_KERNEL_PARAMS)
@@ -114,7 +114,7 @@ def _sky_image(axis):
 
 
 def _forward(image, axis, dtype, **kwargs):
-    from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
+    from astroviper.processing_functions.imaging.normalization.normalize_image import (
         fft_norm_continuum_img_xds,
         fft_norm_img_xds,
     )
@@ -294,7 +294,7 @@ def test_forward_uses_output_as_workspace_and_drops_unkept_sky(axis, monkeypatch
     import importlib
 
     module = importlib.import_module(
-        "astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder"
+        "astroviper.processing_functions.imaging.normalization.normalize_image"
     )
     original_fft = module.fft_lm_to_uv
     image = _sky_image(axis)
@@ -327,7 +327,7 @@ def test_gridding_kernel_is_required(function, given):
     import importlib
 
     module = importlib.import_module(
-        "astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder"
+        "astroviper.processing_functions.imaging.normalization.normalize_image"
     )
     if function == "ifft_norm_img_xds":
         image = _image("frequency", False)

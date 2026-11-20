@@ -6,7 +6,7 @@ The image is predicted with the imager's own prediction functions:
 and the gridder ``"direct_fourier_transform"`` (the exact measurement equation
 of the simulator, the w term included when the ``uvw`` hold it), ``"gridded"``
 with the anti-aliasing kernel of ``gridding_kernel_params``
-(:func:`~astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder.fft_norm_img_xds`
+(:func:`~astroviper.processing_functions.imaging.normalization.normalize_image.fft_norm_img_xds`
 and
 :func:`~astroviper.processing_functions.imaging.get_visibility_grid.get_visibility_grid_single_field`
 with the gridder ``"anti_alias"``), which is two dimensional: it has no w term.
@@ -58,7 +58,7 @@ def sky_image_visibilities(
         degridding with ``gridding_kernel_params`` (no w term).
     gridding_kernel_params : dict, optional
         Kernel of ``predict="gridded"`` (see
-        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.resolve_gridding_kernel_params`).
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.resolve_gridding_kernel_params`).
     fft_padding : float, optional
         FFT padding of ``predict="gridded"``.
     processing_function_threads : int, optional
@@ -182,14 +182,14 @@ def sky_image_visibilities(
             gridder="direct_fourier_transform",
         )
     else:
-        from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
-            fft_norm_img_xds,
-        )
         from astroviper.processing_functions.imaging.get_visibility_grid import (
             get_visibility_grid_single_field,
         )
-        from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
             make_gridding_kernel,
+        )
+        from astroviper.processing_functions.imaging.normalization.normalize_image import (
+            fft_norm_img_xds,
         )
 
         kernel = make_gridding_kernel(gridding_kernel_params, fft_padding)

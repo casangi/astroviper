@@ -19,7 +19,7 @@ from astroviper.distributed_applications.imaging import image_cube_single_field
 from astroviper.distributed_applications.imaging.point_spread_function_cube_single_field import (
     point_spread_function_cube_single_field,
 )
-from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
     DEFAULT_GRIDDING_KERNEL_PARAMS,
 )
 from astroviper.processing_functions.imaging.utils.imaging_dict import Key

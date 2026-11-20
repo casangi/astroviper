@@ -9,16 +9,16 @@ import pytest
 import scipy.fft
 import xarray as xr
 
-from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
+from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
+    CASA_GRIDDING_KERNEL_PARAMS,
+    correction_1D,
+    make_gridding_kernel,
+)
+from astroviper.processing_functions.imaging.normalization.normalize_image import (
     fft_lm_to_uv,
     fft_norm_img_xds,
     ifft_norm_img_xds,
     ifft_uv_to_lm,
-)
-from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-    CASA_GRIDDING_KERNEL_PARAMS,
-    correction_1D,
-    make_gridding_kernel,
 )
 
 
@@ -159,7 +159,7 @@ class FourCorrelationSkyTest(unittest.TestCase):
         return img_xds
 
     def _transform(self, labels):
-        from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
+        from astroviper.processing_functions.imaging.normalization.normalize_image import (
             ifft_norm_img_xds,
         )
 

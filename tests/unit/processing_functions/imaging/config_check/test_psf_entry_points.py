@@ -27,7 +27,7 @@ def test_mfs_dft_dispatch_preserves_configuration_and_skips_kernel(
         "astroviper.processing_functions.imaging.make_point_spread_function_continuum_single_field"
     )
     kernel = importlib.import_module(
-        "astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel"
+        "astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term"
     )
     check = Mock(wraps=config_check.check_residual_update)
     monkeypatch.setattr(config_check, "check_residual_update", check)

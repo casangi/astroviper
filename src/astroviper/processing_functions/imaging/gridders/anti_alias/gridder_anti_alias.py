@@ -3,7 +3,7 @@
 It grids with the separable kernel of the anti-alias term of ``gcf_xds`` (the
 C++ kernels of ``gridders/anti_alias/anti_alias_grid_cpp``) onto a padded uv grid, and
 transforms between the uv grid and the image with an FFT and the image plane
-correction of the kernel (``fft_normalize_anti_alias_gridder``).
+correction of the kernel (``normalization/normalize_image``).
 """
 
 from types import MappingProxyType
@@ -137,7 +137,7 @@ class GridderAntiAlias(Gridder):
         processing_function_threads,
     ):
         """Call ``kernel``, the C++ gridding of the visibilities or of the weights."""
-        from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
             anti_alias_kernel_arguments,
         )
         from astroviper.processing_functions.imaging.utils.fft_sizing import (
@@ -230,8 +230,8 @@ class GridderAntiAlias(Gridder):
         fft_backend,
         complex_dtype,
     ):
-        """:meth:`Gridder.uv_to_image` by :func:`~astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder.ifft_norm_img_xds`."""
-        from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
+        """:meth:`Gridder.uv_to_image` by :func:`~astroviper.processing_functions.imaging.normalization.normalize_image.ifft_norm_img_xds`."""
+        from astroviper.processing_functions.imaging.normalization.normalize_image import (
             ifft_norm_img_xds,
         )
 
@@ -268,9 +268,9 @@ class GridderAntiAlias(Gridder):
     ):
         """:meth:`Gridder.image_to_uv` by the FFT normalization functions.
 
-        :func:`~astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder.fft_norm_img_xds`
+        :func:`~astroviper.processing_functions.imaging.normalization.normalize_image.fft_norm_img_xds`
         transforms frequency planes and
-        :func:`~astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder.fft_norm_continuum_img_xds`
+        :func:`~astroviper.processing_functions.imaging.normalization.normalize_image.fft_norm_continuum_img_xds`
         Taylor planes.
 
         Raises
@@ -279,7 +279,7 @@ class GridderAntiAlias(Gridder):
             If ``plane_dim`` is not ``"frequency"`` or ``"taylor_term"``, or
             is ``"taylor_term"`` with a ``new_polarization_basis``.
         """
-        from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
+        from astroviper.processing_functions.imaging.normalization.normalize_image import (
             fft_norm_continuum_img_xds,
             fft_norm_img_xds,
         )

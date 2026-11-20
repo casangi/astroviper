@@ -14,7 +14,7 @@ def test_kernel_resolver_delegates_without_rewriting_input(monkeypatch):
     checks = importlib.import_module(
         "astroviper.processing_functions.imaging.config_check._gridding"
     )
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
         resolve_gridding_kernel_params,
     )
 

@@ -8,13 +8,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
-    coordinates,
-    create_prolate_spheroidal_correcting_image_1D,
-    create_prolate_spheroidal_kernel_1D,
-    prolate_spheroidal_function,
-)
-from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
     CASA_GRIDDING_KERNEL_PARAMS,
     CORRECTION_FLOOR,
     DEFAULT_GRIDDING_KERNEL_PARAMS,
@@ -28,6 +22,12 @@ from astroviper.processing_functions.imaging.gridding_convolution_functions.grid
     make_gridding_kernel,
     map_error,
     resolve_gridding_kernel_params,
+)
+from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
+    coordinates,
+    create_prolate_spheroidal_correcting_image_1D,
+    create_prolate_spheroidal_kernel_1D,
+    prolate_spheroidal_function,
 )
 from astroviper.processing_functions.imaging.gridding_convolution_functions.kernel_lookup import (
     stencil_lookup,
@@ -757,7 +757,7 @@ def test_least_misfit_table_is_the_same_in_another_process():
 
     code = (
         "from astroviper.processing_functions.imaging.gridding_convolution_functions."
-        "gridding_kernel import make_gridding_kernel; import hashlib; "
+        "anti_alias_term import make_gridding_kernel; import hashlib; "
         "k = make_gridding_kernel({'type': 'least_misfit', 'support': 7, "
         "'oversampling': 100, 'interpolation': 'linear'}, 1.2); "
         "print(hashlib.sha256(k['ANTI_ALIAS'].values.tobytes()).hexdigest())"

@@ -133,7 +133,7 @@ def normalize_dft_image(
 
     Every image plane is divided by its sum of imaging weights (a plane
     without weights by 1), in place, as
-    :func:`~astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder.ifft_norm_img_xds`
+    :func:`~astroviper.processing_functions.imaging.normalization.normalize_image.ifft_norm_img_xds`
     normalises the gridded image.
 
     Parameters

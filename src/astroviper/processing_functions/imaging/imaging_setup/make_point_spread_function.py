@@ -234,9 +234,9 @@ def add_uv_sampling_grid_single_field(
         ``frequency`` coordinate.
     gcf_xds : xr.Dataset
         The ``gcf_xds`` of the gridding kernel, from
-        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.make_gridding_kernel`,
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.make_gridding_kernel`,
         or from
-        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.as_gridding_kernel`
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.as_gridding_kernel`
         for a bare table of CASA's prolate spheroidal kernel of support 7.
     img_xds : xr.Dataset
         Image dataset that accumulates the UV-sampling grid.  The arrays
@@ -485,7 +485,7 @@ def make_point_spread_function_single_field(
     from astroviper.processing_functions.imaging.gridders.gridder_registry import (
         GRIDDERS,
     )
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
         make_gridding_kernel,
     )
     from astroviper.processing_functions.imaging.utils import drop_auto_correlations

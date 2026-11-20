@@ -19,9 +19,9 @@ from xradio.measurement_set import open_processing_set
 import astroviper.distributed_applications as distributed_applications
 from astroviper.processing_functions.imaging._param_docs import IMAGING_PARAM_DOCS
 from astroviper.processing_functions.imaging.gridding_convolution_functions import (
-    gridding_kernel,
+    anti_alias_term,
 )
-from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
     CASA_GRIDDING_KERNEL_PARAMS,
     DEFAULT_GRIDDING_KERNEL_PARAMS,
     anti_alias_kernel_arguments,
@@ -357,13 +357,13 @@ def _spy_kernels(monkeypatch):
 
         monkeypatch.setattr(anti_alias_grid_cpp, name, spy)
 
-    correction_1D = gridding_kernel.correction_1D
+    correction_1D = anti_alias_term.correction_1D
 
     def correction_spy(gcf_xds, n_pixels):
         calls["correction"].append(_params(gcf_xds))
         return correction_1D(gcf_xds, n_pixels)
 
-    monkeypatch.setattr(gridding_kernel, "correction_1D", correction_spy)
+    monkeypatch.setattr(anti_alias_term, "correction_1D", correction_spy)
     return calls
 
 

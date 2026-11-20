@@ -32,11 +32,11 @@ from tests.unit.processing_functions.imaging.degrid_test_datasets import (
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "gridders"))
 from reference_gridders import anti_alias_degrid_reference
 
+from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
+    as_gridding_kernel,
+)
 from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
     create_prolate_spheroidal_kernel_1D,
-)
-from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-    as_gridding_kernel,
 )
 
 

@@ -44,9 +44,9 @@ def degrid_visibility_grid_single_field(
         registered ``weight_imaging`` array supplies its shape and dimensions.
     gcf_xds : xarray.Dataset
         The ``gcf_xds`` of the gridding kernel, from
-        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.make_gridding_kernel`,
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.make_gridding_kernel`,
         or from
-        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.as_gridding_kernel`
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.as_gridding_kernel`
         for a bare table of CASA's prolate spheroidal kernel of support 7.
     img_xds : xarray.Dataset
         Image geometry supplying direction-cell sizes and unpadded image shape.
@@ -187,7 +187,7 @@ def degrid_visibility_grid_single_field(
     from astroviper.processing_functions.imaging.gridders.anti_alias.anti_alias_grid_cpp import (
         anti_alias_degrid,
     )
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
         anti_alias_kernel_arguments,
     )
 

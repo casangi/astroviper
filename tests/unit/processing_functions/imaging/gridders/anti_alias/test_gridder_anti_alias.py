@@ -15,11 +15,6 @@ import pytest
 import xarray as xr
 import xradio.image.image_xds  # noqa: F401  (registers xr_img)
 
-from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
-    fft_norm_continuum_img_xds,
-    fft_norm_img_xds,
-    ifft_norm_img_xds,
-)
 from astroviper.processing_functions.imaging.gridders.anti_alias.anti_alias_grid_cpp import (
     anti_alias_grid,
     anti_alias_grid_uv_sampling,
@@ -31,9 +26,14 @@ from astroviper.processing_functions.imaging.gridders.anti_alias.gridder_anti_al
     GridderAntiAlias,
 )
 from astroviper.processing_functions.imaging.gridders.gridder_base import Gridder
-from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
     anti_alias_kernel_arguments,
     make_gridding_kernel,
+)
+from astroviper.processing_functions.imaging.normalization.normalize_image import (
+    fft_norm_continuum_img_xds,
+    fft_norm_img_xds,
+    ifft_norm_img_xds,
 )
 from astroviper.processing_functions.imaging.utils.fft_sizing import padded_grid_size
 from astroviper.processing_functions.imaging.utils.frequency_mapping import (

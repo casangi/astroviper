@@ -4,7 +4,7 @@ The gridder and the degridder convolve every visibility with a separable
 kernel they read from a sampled table (``oversampling`` samples per uv cell
 over the half width of the kernel), and the image is divided by the kernel's
 Fourier transform afterwards (the correction, see
-:func:`~astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder.ifft_norm_img_xds`).
+:func:`~astroviper.processing_functions.imaging.normalization.normalize_image.ifft_norm_img_xds`).
 This module holds the parameters that select the kernel, the factory the
 imaging functions use, which makes the kernel's ``gcf_xds`` (see Schema
 below), and the functions that make the correction from it.

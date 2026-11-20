@@ -17,7 +17,7 @@ from astroviper.processing_functions.imaging.add_visibility_grid_continuum_mvc i
 from astroviper.processing_functions.imaging.gridders.anti_alias.degrid_visibility_grid import (
     degrid_visibility_grid_single_field,
 )
-from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
     as_gridding_kernel,
     make_gridding_kernel,
 )
@@ -2238,7 +2238,7 @@ def test_prepare_mfs_model_transforms_and_fourier_converts_all_terms(
         return dataset
 
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder."
+        "astroviper.processing_functions.imaging.normalization.normalize_image."
         "fft_norm_continuum_img_xds",
         fake_fft,
     )
@@ -2316,7 +2316,7 @@ def test_prepare_mvc_model_evaluates_taylor_terms_and_channel_beams(
         return dataset
 
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder."
+        "astroviper.processing_functions.imaging.normalization.normalize_image."
         "fft_norm_img_xds",
         fake_fft,
     )
@@ -2420,7 +2420,7 @@ def test_residual_update_wraps_setup_cycle_and_local_mvc_ifft(
         return dataset
 
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder."
+        "astroviper.processing_functions.imaging.normalization.normalize_image."
         "ifft_norm_img_xds",
         fake_ifft,
     )

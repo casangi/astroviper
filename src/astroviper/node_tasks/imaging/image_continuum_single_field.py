@@ -2626,7 +2626,7 @@ def _prepare_continuum_image(
     from astroviper.processing_functions.imaging.gridders.gridder_registry import (
         GRIDDERS,
     )
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
         make_gridding_kernel,
     )
     from astroviper.processing_functions.imaging.image_continuum_single_field import (

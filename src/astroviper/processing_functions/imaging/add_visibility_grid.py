@@ -228,9 +228,9 @@ def add_visibility_grid_single_field(
         ``weight_imaging``) and a ``frequency`` coordinate.
     gcf_xds : xr.Dataset
         The ``gcf_xds`` of the gridding kernel, from
-        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.make_gridding_kernel`,
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.make_gridding_kernel`,
         or from
-        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.as_gridding_kernel`
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.as_gridding_kernel`
         for a bare table of CASA's prolate spheroidal kernel of support 7;
         its table, support and oversampling go to the C++
         ``anti_alias_grid`` kernel.

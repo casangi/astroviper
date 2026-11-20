@@ -15,13 +15,13 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
-    create_prolate_spheroidal_kernel_1D,
-)
-from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
     CASA_GRIDDING_KERNEL_PARAMS,
     as_gridding_kernel,
     correction,
+)
+from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
+    create_prolate_spheroidal_kernel_1D,
 )
 from astroviper.processing_functions.imaging.gridding_convolution_functions.kernel_lookup import (
     stencil_values,
@@ -440,7 +440,7 @@ def test_residual_of_the_true_model_is_the_degrid_error(gridding_kernel_params, 
     """The residual visibilities of the true model are the map error of the kernel applied."""
     from xradio.image import make_empty_sky_image
 
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
         make_gridding_kernel,
     )
     from astroviper.processing_functions.imaging.utils.fft_sizing import (

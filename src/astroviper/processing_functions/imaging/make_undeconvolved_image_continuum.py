@@ -75,9 +75,9 @@ def make_undeconvolved_image_continuum_single_field(
         beam prescription.
     gcf_xds : xarray.Dataset
         The ``gcf_xds`` of the gridding kernel, from
-        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.make_gridding_kernel`,
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.make_gridding_kernel`,
         or from
-        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.as_gridding_kernel`
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.as_gridding_kernel`
         for a bare table of CASA's prolate spheroidal kernel of support 7.
     n_taylor_terms : int or None, optional
         Number of residual Taylor orders; defaults to ``image_params``.

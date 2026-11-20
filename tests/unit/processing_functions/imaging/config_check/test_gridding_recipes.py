@@ -8,7 +8,7 @@ import pytest
 from astroviper.processing_functions.imaging.config_check._gridding import (
     check_gridding_kernel_parameters,
 )
-from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
     CASA_GRIDDING_KERNEL_PARAMS,
     DEFAULT_GRIDDING_KERNEL_PARAMS,
     resolve_gridding_kernel_params,

@@ -171,9 +171,9 @@ def ifft_norm_img_xds(
         dtype.
     gcf_xds : xarray.Dataset
         The ``gcf_xds`` of the kernel the grids were made with (from
-        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.make_gridding_kernel`,
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.make_gridding_kernel`,
         or
-        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.as_gridding_kernel`
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.as_gridding_kernel`
         for a bare kernel table). Required: there is no default kernel.
 
     Returns
@@ -219,7 +219,7 @@ def ifft_norm_img_xds(
         overwrite=overwrite,
     )
 
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
         correction_1D,
     )
 
@@ -460,9 +460,9 @@ def fft_norm_img_xds(
     gcf_xds : xarray.Dataset
         The ``gcf_xds`` of the kernel the model visibilities are degridded
         with (from
-        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.make_gridding_kernel`,
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.make_gridding_kernel`,
         or
-        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.as_gridding_kernel`
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.as_gridding_kernel`
         for a bare kernel table). Required: there is no default kernel.
     new_polarization_basis : {"linear", "circular"}, optional
         The basis whose correlations the Stokes planes of the image are
@@ -865,7 +865,7 @@ def fft_norm_continuum_img_xds(
         The ``gcf_xds`` of the gridding kernel whose correction function the
         image is divided by before the transform, the one the model visibilities
         are degridded with (from
-        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.make_gridding_kernel`).
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.make_gridding_kernel`).
         Required: there is no default kernel.
 
     Returns
@@ -940,7 +940,7 @@ def _fft_norm_image_planes(
         overwrite=overwrite,
     )
 
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
         correction_1D,
     )
     from astroviper.processing_functions.imaging.utils.fft_sizing import (

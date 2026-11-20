@@ -534,7 +534,7 @@ def residual_update_cube_single_field(
     from astroviper.processing_functions.imaging.gridders.gridder_registry import (
         GRIDDERS,
     )
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
         make_gridding_kernel,
     )
 
@@ -782,9 +782,9 @@ def make_visibility_model_single_field(
         ``"direct_fourier_transform"``).
     gcf_xds : xarray.Dataset
         The ``gcf_xds`` of the gridding kernel, from
-        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.make_gridding_kernel`,
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.make_gridding_kernel`,
         or from
-        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.as_gridding_kernel`
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.as_gridding_kernel`
         for a bare table of CASA's prolate spheroidal kernel of support 7.
     ms_data_group_in_name : str, optional
         Measurement-set data group being imaged (the caller's

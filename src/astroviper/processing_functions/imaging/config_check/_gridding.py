@@ -109,7 +109,7 @@ def check_gridding_kernel_parameters(params):
         return
     require_mapping("gridding_kernel_params", params)
 
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
         CASA_GRIDDING_KERNEL_PARAMS,
         DEFAULT_GRIDDING_KERNEL_PARAMS,
     )
@@ -148,7 +148,7 @@ def check_kernel_padding(fft_padding):
     fft_padding : float
         Finite scalar padding factor of at least 1.05.
     """
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
         MIN_DESIGN_PADDING,
     )
 
@@ -172,7 +172,7 @@ def check_gridding_kernel(params, *, fft_padding=None):
     if params is not None:
         require_mapping("gridding_kernel_params", params)
 
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
         make_gridding_kernel,
     )
 
@@ -191,7 +191,7 @@ def check_kernel_options(kernel_type, interpolation):
     interpolation : {'nearest', 'linear'}
         Lookup interpolation used for the kernel table.
     """
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
         KERNEL_TYPES,
     )
 

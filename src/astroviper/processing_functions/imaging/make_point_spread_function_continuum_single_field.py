@@ -89,9 +89,9 @@ def add_uv_sampling_grid_continuum_single_field(
         weights.
     gcf_xds : xarray.Dataset
         The ``gcf_xds`` of the gridding kernel, from
-        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.make_gridding_kernel`,
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.make_gridding_kernel`,
         or from
-        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.as_gridding_kernel`
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.as_gridding_kernel`
         for a bare table of CASA's prolate spheroidal kernel of support 7;
         its table, support and oversampling go to the C++
         ``anti_alias_grid_uv_sampling`` kernel.
@@ -470,7 +470,7 @@ def make_point_spread_function_mvc_single_field(
     from astroviper.processing_functions.imaging.gridders.anti_alias.gridder_anti_alias import (
         GridderAntiAlias,
     )
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
         make_gridding_kernel,
     )
     from astroviper.processing_functions.imaging.imaging_setup.make_point_spread_function import (
@@ -708,7 +708,7 @@ def make_point_spread_function_continuum_single_field(
     from astroviper.processing_functions.imaging.gridders.gridder_registry import (
         GRIDDERS,
     )
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
         make_gridding_kernel,
     )
     from astroviper.processing_functions.imaging.utils import drop_auto_correlations

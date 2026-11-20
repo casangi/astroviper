@@ -145,7 +145,7 @@ via the cycle control functions on `cycle_control_state`:
 - Undeconvolved (dirty/residual) image gridding: `residual_update/make_undeconvolved_image.py`
   (`make_undeconvolved_image_single_field`).
 - Degridding (model uv grid → vis): `get_visibility_grid.py`.
-- FFT + normalization: `fft_normalize_anti_alias_gridder.py`.
+- FFT + normalization: `normalization/normalize_image.py`.
 - Primary beam: `primary_beam/make_primary_beam.py`
   (`make_primary_beam_single_field`, evaluated with
   `simulation/antenna_beams.py::symmetric_beam_response`).

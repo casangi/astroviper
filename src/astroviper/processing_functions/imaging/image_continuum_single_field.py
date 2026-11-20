@@ -768,7 +768,7 @@ def prepare_model_uv_continuum_single_field(
     from astroviper.processing_functions.imaging.gridders.gridder_registry import (
         GRIDDERS,
     )
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
         make_gridding_kernel,
     )
 
@@ -1162,7 +1162,7 @@ def prepare_model_uv_mvc_single_field(
     from astroviper.processing_functions.imaging.gridders.anti_alias.gridder_anti_alias import (
         GridderAntiAlias,
     )
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
         make_gridding_kernel,
     )
     from astroviper.utils.data_group_tools import modify_data_groups_xds
@@ -2806,7 +2806,7 @@ def residual_update_continuum_single_field(
         from astroviper.processing_functions.imaging.gridders.anti_alias.gridder_anti_alias import (
             GridderAntiAlias,
         )
-        from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
             make_gridding_kernel,
         )
 

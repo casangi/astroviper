@@ -126,7 +126,7 @@ _SOLVE_LOCK = threading.Lock()
 # checked at every load. A solve depends on the BLAS rounding (its build and
 # threads): on one machine the default table solved in two processes is the same
 # bit for bit, solved with one BLAS thread it differs by up to 7e-12 (measured).
-# The default kernel (gridding_kernel.DEFAULT_GRIDDING_KERNEL_PARAMS at
+# The default kernel (anti_alias_term.DEFAULT_GRIDDING_KERNEL_PARAMS at
 # fft_padding 1.2) therefore reads its table, so that every process and platform
 # grids with the same kernel: numpy.save of
 # _solve_least_misfit_kernel_1D(300, 9, "linear", 0.5 / 1.2, 4, 96, 30, 1e-5)[0]

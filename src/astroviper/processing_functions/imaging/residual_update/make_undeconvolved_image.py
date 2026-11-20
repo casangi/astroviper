@@ -22,7 +22,7 @@ def make_undeconvolved_image_single_field(
 
     Drops auto-correlations and grids the visibilities (``VISIBILITY`` /
     ``VISIBILITY_NORMALIZATION``).  Together with the inverse FFT
-    (:func:`~astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder.ifft_norm_img_xds`)
+    (:func:`~astroviper.processing_functions.imaging.normalization.normalize_image.ifft_norm_img_xds`)
     this produces the undeconvolved (dirty/residual) image.  A gridder that
     accumulates into the image itself (``"direct_fourier_transform"``) makes
     the ``SKY_RESIDUAL`` and its ``VISIBILITY_NORMALIZATION`` instead, after
@@ -56,9 +56,9 @@ def make_undeconvolved_image_single_field(
         require padding at least 1.05; CASA's fixed kernel permits 1.0.
     gcf_xds : xarray.Dataset
         The ``gcf_xds`` of the gridding kernel, from
-        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.make_gridding_kernel`,
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.make_gridding_kernel`,
         or from
-        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.as_gridding_kernel`
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.as_gridding_kernel`
         for a bare table of CASA's prolate spheroidal kernel of support 7.
     model_exists : bool
         Accepted for call-site compatibility with the imaging cycle loop;

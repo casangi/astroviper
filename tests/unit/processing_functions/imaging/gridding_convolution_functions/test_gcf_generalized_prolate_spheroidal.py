@@ -4,6 +4,15 @@ kernel type)."""
 import numpy as np
 import pytest
 
+from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
+    CORRECTION_FLOOR,
+    KERNEL_TYPES,
+    correction,
+    correction_1D,
+    kept_half_width,
+    make_gridding_kernel,
+    resolve_gridding_kernel_params,
+)
 from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_exponential_semicircle import (
     aliasing_error,
     exponential_semicircle_parameters,
@@ -20,15 +29,6 @@ from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_
 )
 from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
     prolate_spheroidal_function,
-)
-from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-    CORRECTION_FLOOR,
-    KERNEL_TYPES,
-    correction,
-    correction_1D,
-    kept_half_width,
-    make_gridding_kernel,
-    resolve_gridding_kernel_params,
 )
 from astroviper.processing_functions.imaging.gridding_convolution_functions.kernel_lookup import (
     stencil_values,

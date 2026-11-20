@@ -30,7 +30,7 @@ from astroviper.processing_functions.image_analysis.transform_polarization_basis
 from astroviper.processing_functions.imaging.add_visibility_grid_continuum import (
     add_visibility_grid_continuum_single_field,
 )
-from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
     make_gridding_kernel,
     map_error,
 )

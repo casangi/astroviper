@@ -115,9 +115,9 @@ class Gridder(metaclass=Interface):
             size and the cell size.
         gcf_xds : xarray.Dataset
             The ``gcf_xds`` of the gridding kernel, from
-            :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.make_gridding_kernel`,
+            :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.make_gridding_kernel`,
             or from
-            :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.as_gridding_kernel`
+            :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.as_gridding_kernel`
             for a bare table of CASA's prolate spheroidal kernel of support 7.
         weights : numpy.ndarray
             float64, C-contiguous, shaped like the visibilities
@@ -201,9 +201,9 @@ class Gridder(metaclass=Interface):
             size and the cell size.
         gcf_xds : xarray.Dataset
             The ``gcf_xds`` of the gridding kernel, from
-            :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.make_gridding_kernel`,
+            :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.make_gridding_kernel`,
             or from
-            :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.as_gridding_kernel`
+            :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.as_gridding_kernel`
             for a bare table of CASA's prolate spheroidal kernel of support 7.
         grid : numpy.ndarray
             The model, ``(time, plane, polarization)`` followed by two
@@ -280,9 +280,9 @@ class Gridder(metaclass=Interface):
             require padding at least 1.05; CASA's fixed kernel permits 1.0.
         gcf_xds : xarray.Dataset
             The ``gcf_xds`` of the gridding kernel, from
-            :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.make_gridding_kernel`,
+            :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.make_gridding_kernel`,
             or from
-            :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.as_gridding_kernel`
+            :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.as_gridding_kernel`
             for a bare table of CASA's prolate spheroidal kernel of support 7.
         image_data_group_in_name : str
             Image data group of the accumulated arrays; not read by a gridder
@@ -363,9 +363,9 @@ class Gridder(metaclass=Interface):
             require padding at least 1.05; CASA's fixed kernel permits 1.0.
         gcf_xds : xarray.Dataset
             The ``gcf_xds`` of the gridding kernel, from
-            :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.make_gridding_kernel`,
+            :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.make_gridding_kernel`,
             or from
-            :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.as_gridding_kernel`
+            :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.as_gridding_kernel`
             for a bare table of CASA's prolate spheroidal kernel of support 7.
         plane_dim : {"frequency", "taylor_term"}
             The plane dimension of the images.

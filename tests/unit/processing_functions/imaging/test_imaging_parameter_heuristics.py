@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
     DEFAULT_GRIDDING_KERNEL_PARAMS,
     make_gridding_kernel,
 )

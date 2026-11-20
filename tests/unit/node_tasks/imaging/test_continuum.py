@@ -899,7 +899,7 @@ def test_append_preparation_normalizes_by_the_gridder_of_its_parameters(
         "astroviper.processing_functions.imaging.gridders.direct_fourier_transform.direct_fourier_transform"
     )
     kernel = importlib.import_module(
-        "astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel"
+        "astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term"
     )
 
     def no_kernel(*args, **kwargs):

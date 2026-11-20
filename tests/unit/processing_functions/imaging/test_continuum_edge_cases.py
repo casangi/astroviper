@@ -10,7 +10,7 @@ import xradio.image.image_xds  # noqa: F401
 from astroviper.processing_functions.imaging.add_visibility_grid_continuum_mvc import (
     add_visibility_grid_mvc_single_field,
 )
-from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
     as_gridding_kernel,
 )
 from astroviper.processing_functions.imaging.image_continuum_single_field import (

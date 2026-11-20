@@ -20,11 +20,11 @@ from astroviper.processing_functions.imaging.add_visibility_grid import (
 from astroviper.processing_functions.imaging.get_visibility_grid import (
     get_visibility_grid_single_field,
 )
+from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
+    as_gridding_kernel,
+)
 from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
     create_prolate_spheroidal_kernel_1D,
-)
-from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-    as_gridding_kernel,
 )
 from astroviper.processing_functions.imaging.imaging_setup.make_point_spread_function import (
     add_uv_sampling_grid_single_field,
