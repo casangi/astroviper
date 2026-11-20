@@ -765,8 +765,8 @@ def create_empty_data_variables_on_disk(
         is the *inner* chunk shape. ``None`` (default) uses the defaults on
         every dimension.
     image_sharding : dict, optional
-        If set (and Zarr v3), create each array as a Zarr v3 **sharded** array
-        with shard shape ``{dimension_name: shard_size}``: a shard must be a
+        If set, create each array as a Zarr v3 **sharded** array, in a Zarr
+        format 3 store, with shard shape ``{dimension_name: shard_size}``: a shard must be a
         multiple of the chunk on its dimension (a shard larger than the axis is
         clipped to it), and a dimension not listed gets one shard per node task
         chunk on a parallelized dimension and the whole axis otherwise. The
@@ -776,19 +776,31 @@ def create_empty_data_variables_on_disk(
         (metadata-server relief) and is written by
         :func:`astroviper.utils.chunk_io.write_zarr_sharded`.
         ``None`` (default) keeps the original one-file-per-chunk layout.
+
+    Raises
+    ------
+    ValueError
+        If ``image_sharding`` is set for a Zarr format 2 store, or the chunking
+        or sharding fails :func:`validate_image_chunking_and_sharding`.
     """
     import os
 
     import numpy as np
     import zarr
 
-    _ZARR_V3 = int(zarr.__version__.split(".")[0]) >= 3
     group = zarr.open_group(zarr_store, mode="r+")
+    # The format of the store: zarr-python 3 also adds arrays to a format 2
+    # store (an MSv4 written by an older XRADIO).
+    _ZARR_V3 = group.metadata.zarr_format == 3
 
     validate_image_chunking_and_sharding(
         image_chunking, image_sharding, shape_dict, parallel_coords
     )
-    sharded = bool(image_sharding) and _ZARR_V3
+    if image_sharding and not _ZARR_V3:
+        raise ValueError(
+            f"image_sharding needs a Zarr format 3 store; {zarr_store} is format 2."
+        )
+    sharded = bool(image_sharding)
 
     if _ZARR_V3 and compressor is not None:
         compressor = _to_zarr_v3_codec(compressor)
@@ -812,7 +824,11 @@ def create_empty_data_variables_on_disk(
 
         dtype = np.dtype(dv_def["dtype"])
         extra_attrs = dv_def.get("attrs", {})
-        if extra_attrs.get("dtype") == "bool":
+        if extra_attrs.get("dtype") == "bool" or (
+            not _ZARR_V3 and dtype.kind not in ("f", "c")
+        ):
+            # A format 2 fill value is a CF _FillValue to xarray, which would
+            # mask the zeros of an integer and turn it into floats.
             fill_value = None
         elif dtype.kind in ("f", "c"):
             fill_value = np.nan
@@ -856,13 +872,13 @@ def create_empty_data_variables_on_disk(
                 dimension_names=list(dv_def["dims"]),
             )
         else:
-            sky = group.require_dataset(
+            sky = group.require_array(
                 dv_name,
                 shape=shape,
-                chunks=chunks,
+                chunks=tuple(chunks),
                 dtype=dtype,
                 fill_value=fill_value,
-                compressor=compressor,
+                compressors=compressor,
             )
             sky.attrs["_ARRAY_DIMENSIONS"] = dv_def["dims"]
 
