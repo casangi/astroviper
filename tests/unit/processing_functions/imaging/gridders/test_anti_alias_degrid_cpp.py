@@ -465,10 +465,6 @@ class TestAntiAliasDegridCpp(unittest.TestCase):
             )
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestDegridKernelInterpolation(unittest.TestCase):
     """The linear interpolation of the kernel table (interpolation=1)."""
 
@@ -559,3 +555,75 @@ class TestDegridOtherSupports(unittest.TestCase):
                     )
                     np.testing.assert_allclose(cpp, ref, rtol=0, atol=1e-12)
                     self.assertGreater(np.count_nonzero(cpp), 0)
+
+
+def test_anti_degrid_native_alignment_contract(unaligned_array):
+    """Use external unaligned buffers in place and retain equivalent dtype support."""
+    import numpy as np
+
+    from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
+        anti_alias_degrid,
+    )
+
+    uvw = np.zeros((1, 1, 3))
+    freq = np.array([1e9])
+    imap = np.zeros(1, dtype=np.int64)
+    uv = np.array([16, 16])
+    dlm = np.array([1e-4, 1e-4])
+    base = dict(
+        grid=np.ones((1, 1, 1, 16, 16), dtype=np.complex128),
+        vis_data=np.ones((1, 1, 1, 1), dtype=np.complex128),
+        uvw=uvw,
+        frequency_coord=freq,
+        frequency_map=imap,
+        time_map=imap,
+        pol_map=imap,
+        cgk_1D=np.ones(8),
+        n_uv=uv,
+        delta_lm=dlm,
+        support=3,
+        oversampling=2,
+        interpolation=0,
+        processing_function_threads=1,
+    )
+    kwargs = base
+    reference = {
+        k: v.copy() if isinstance(v, np.ndarray) else v for k, v in kwargs.items()
+    }
+    anti_alias_degrid(**reference)
+    for key, value in kwargs.items():
+        if not isinstance(value, np.ndarray) or value.dtype.alignment == 1:
+            continue
+        for offset in range(1, value.dtype.alignment):
+            trial = {
+                k: v.copy() if isinstance(v, np.ndarray) else v
+                for k, v in kwargs.items()
+            }
+            trial[key] = unaligned_array(value, offset)
+            anti_alias_degrid(**trial)
+            for name, expected in reference.items():
+                if isinstance(expected, np.ndarray):
+                    np.testing.assert_array_equal(trial[name], expected)
+            assert trial[key].base[0] == 0xA5
+            assert trial[key].base[-1] == 0xA5
+
+    import pickle
+
+    reference = {
+        k: v.copy() if isinstance(v, np.ndarray) else v for k, v in kwargs.items()
+    }
+    trial = {
+        k: v.copy().view(pickle.loads(pickle.dumps(v.dtype)))
+        if isinstance(v, np.ndarray)
+        else v
+        for k, v in kwargs.items()
+    }
+    anti_alias_degrid(**reference)
+    anti_alias_degrid(**trial)
+    for key, value in reference.items():
+        if isinstance(value, np.ndarray):
+            np.testing.assert_array_equal(trial[key], value)
+
+
+if __name__ == "__main__":
+    unittest.main()

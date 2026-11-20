@@ -5,6 +5,7 @@
 // instead of the casacore initial-model snapshot.
 
 #include "../include/mtmfs_clean.hpp"
+#include "scalar_buffer.hpp"
 
 #include <algorithm>
 #include <array>
@@ -36,12 +37,12 @@ PeakResult<T> find_max_abs_mask_box(const T* a, const T* w, int nx, int ny, cons
     T mn = 0, mx = 0;
     int mnI = 0, mnJ = 0, mxI = 0, mxJ = 0;
     if (box.i0 == 0 && box.j0 == 0 && box.i1 == nx - 1 && box.j1 == ny - 1)
-        mn = mx = a[0] * w[0];
+        mn = mx = astroviper::scalar_load(a, 0) * astroviper::scalar_load(w, 0);
     for (int j = box.j0; j <= box.j1; ++j) {
         const T* arow = a + static_cast<std::size_t>(j) * nx;
         const T* wrow = w + static_cast<std::size_t>(j) * nx;
         for (int i = box.i0; i <= box.i1; ++i) {
-            const T v = arow[i] * wrow[i];
+            const T v = astroviper::scalar_load(arow, i) * astroviper::scalar_load(wrow, i);
             if (v > mx) { mx = v; mxI = i; mxJ = j; }
             if (v < mn) { mn = v; mnI = i; mnJ = j; }
         }
@@ -167,13 +168,14 @@ void extract_patch(const T* full, int nx, int ny, int cx, int cy, int sup_x, int
             const int fy = cy - sup_y / 2 + j;
             const int fx = cx - sup_x / 2 + i;
             if (fy < 0 || fy >= ny || fx < 0 || fx >= nx) continue;
-            out[static_cast<std::size_t>(j) * sup_x + i] = full[static_cast<std::size_t>(fy) * nx + fx];
+            out[static_cast<std::size_t>(j) * sup_x + i] = astroviper::scalar_load(full, static_cast<std::size_t>(fy) * nx + fx);
         }
 }
 
 template <typename T>
 bool all_finite(const T* a, std::size_t n) {
-    return std::all_of(a, a + n, [](T v) { return std::isfinite(v); });
+    for (std::size_t i = 0; i < n; ++i) if (!std::isfinite(astroviper::scalar_load(a, i))) return false;
+    return true;
 }
 
 template <typename T>
@@ -251,7 +253,7 @@ struct Work {
             psf_peak_y = ny / 2;
             for (int j = blc1; j < trc1; ++j)
                 for (int i = blc0; i < trc0; ++i) {
-                    const T a = std::abs(p0[static_cast<std::size_t>(j) * nx + i]);
+                    const T a = std::abs(astroviper::scalar_load(p0, static_cast<std::size_t>(j) * nx + i));
                     if (a > max_val) {
                         max_val = a;
                         psf_peak_x = i;
@@ -644,7 +646,7 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
                         const std::size_t kp =
                             static_cast<std::size_t>(blc_psf[1] + dy) * w.psf_support_x + (blc_psf[0] + dx);
                         const T add = scale_sub[kp] * loopgain * coeff;
-                        mdl[km] += add;
+                        astroviper::scalar_add(mdl, km, add);
                         dlt[km] += add;
                         if (t == 0) flux += add;
                     }
@@ -700,7 +702,7 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
                 backward_c2r<T>(work.data(), smooth_mod.data(), nx, ny);
                 recenter_convolution<T>(smooth_mod.data(), nx, ny, scratch.data(), 1);
                 T* d = residual + static_cast<std::ptrdiff_t>(t1) * residual_term_stride;
-                for (std::size_t k = 0; k < nimg; ++k) d[k] -= smooth_mod[k];
+                for (std::size_t k = 0; k < nimg; ++k) astroviper::scalar_sub(d, k, smooth_mod[k]);
             }
         }
     }
@@ -723,12 +725,12 @@ void principal_solution(T* residual, const double* inverse_hessian, int nterms, 
         throw std::invalid_argument("inverse_hessian must be finite");
     std::vector<T> in(nterms);
     for (std::size_t k = 0; k < n; ++k) {
-        for (int t = 0; t < nterms; ++t) in[t] = residual[static_cast<std::size_t>(t) * n + k];
+        for (int t = 0; t < nterms; ++t) in[t] = astroviper::scalar_load(residual, static_cast<std::size_t>(t) * n + k);
         for (int t1 = 0; t1 < nterms; ++t1) {
             T acc = static_cast<T>(0);
             for (int t2 = 0; t2 < nterms; ++t2)
-                acc += static_cast<T>(inverse_hessian[static_cast<std::size_t>(t1) * nterms + t2]) * in[t2];
-            residual[static_cast<std::size_t>(t1) * n + k] = acc;
+                acc += static_cast<T>(astroviper::scalar_load(inverse_hessian, static_cast<std::size_t>(t1) * nterms + t2)) * in[t2];
+            astroviper::scalar_store(residual, static_cast<std::size_t>(t1) * n + k, acc);
         }
     }
 }

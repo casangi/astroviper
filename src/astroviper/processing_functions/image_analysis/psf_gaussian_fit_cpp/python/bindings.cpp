@@ -1,3 +1,4 @@
+#include "array_dtype.hpp"
 // pybind11 bindings for the CASA-compatible PSF Gaussian fit.
 //
 // Follows the AstroVIPER pybind11 memory contract: typed py::array_t without
@@ -5,6 +6,7 @@
 // in place into a caller-owned array, GIL released around the C++ work.
 
 #include <pybind11/pybind11.h>
+#include "scalar_buffer.hpp"
 #include <pybind11/numpy.h>
 
 #include <stdexcept>
@@ -22,8 +24,14 @@ int fit_psf_beam_impl(
     double delta_x,
     double delta_y,
     double psfcutoff,
-    py::array_t<double, py::array::c_style> beams,
+    py::array beams,
     int n_threads) {
+    if (!beams.dtype().equal(py::dtype::of<double>()))
+        throw std::invalid_argument(astroviper::dtype_error(beams, "beams", "float64"));
+    if (!(beams.flags() & py::array::c_style))
+        throw std::invalid_argument("beams must be C-contiguous (modified in place)");
+    if (!beams.writeable())
+        throw std::invalid_argument("beams must be writeable (modified in place)");
     if (psf.ndim() != 3)
         throw std::invalid_argument("psf must be [n_plane, nx, ny].");
     const std::size_t n_plane = static_cast<std::size_t>(psf.shape(0));
@@ -35,7 +43,7 @@ int fit_psf_beam_impl(
         throw std::invalid_argument("beams must be [n_plane, 3] float64.");
 
     const T* psf_ptr = psf.data();
-    double* beams_ptr = beams.mutable_data();
+    double* beams_ptr = static_cast<double*>(beams.mutable_data());
 
     int n_fallback = 0;
     {
@@ -49,7 +57,7 @@ int fit_psf_beam_impl(
             // promotes its Float lattice to Double for the fitter).
             std::vector<double> promoted(n_plane * nx * ny);
             for (std::size_t k = 0; k < promoted.size(); ++k)
-                promoted[k] = static_cast<double>(psf_ptr[k]);
+                promoted[k] = static_cast<double>(astroviper::scalar_load(psf_ptr, k));
             n_fallback = astroviper::psf_gaussian_fit::fit_planes(
                 promoted.data(), n_plane, nx, ny, delta_x, delta_y, psfcutoff,
                 beams_ptr, n_threads);

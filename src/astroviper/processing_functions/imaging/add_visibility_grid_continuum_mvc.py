@@ -139,6 +139,7 @@ def add_visibility_grid_mvc_single_field(
         padded_grid_size,
     )
     from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        get_frequency_boundaries,
         map_visibility_frequencies_to_image,
     )
     from astroviper.utils.data_group_tools import (
@@ -276,7 +277,10 @@ def add_visibility_grid_mvc_single_field(
         )
 
     frequency_map = map_visibility_frequencies_to_image(
-        frequency_coord, image_frequency_coord
+        frequency_coord,
+        image_frequency_coord,
+        full_image_frequencies=img_xds.frequency.attrs.get("full_image_frequencies"),
+        frequency_boundaries=get_frequency_boundaries(img_xds, ms_xds),
     )
     n_image_chan = image_frequency_coord.size
 
@@ -347,6 +351,8 @@ def add_visibility_grid_mvc_single_field(
     # Create or validate output arrays.
     # ------------------------------------------------------------------
     if visibility_name not in img_xds:
+        # Keep coordinate metadata (especially the unpartitioned frequency
+        # axis) when the first child allocates outputs for later children.
         visibility_coords = {
             "time": img_xds.coords["time"],
             "frequency": img_xds.coords["frequency"],
@@ -371,14 +377,7 @@ def add_visibility_grid_mvc_single_field(
                 "u",
                 "v",
             ),
-            coords={
-                "time": img_xds.coords["time"],
-                "frequency": (
-                    "frequency",
-                    image_frequency_coord,
-                ),
-                "polarization": img_xds.coords["polarization"],
-            },
+            coords=visibility_coords,
         )
 
         img_xds[normalization_name] = xr.DataArray(
@@ -392,12 +391,8 @@ def add_visibility_grid_mvc_single_field(
                 "polarization",
             ),
             coords={
-                "time": img_xds.coords["time"],
-                "frequency": (
-                    "frequency",
-                    image_frequency_coord,
-                ),
-                "polarization": img_xds.coords["polarization"],
+                dim: visibility_coords[dim]
+                for dim in ("time", "frequency", "polarization")
             },
         )
 

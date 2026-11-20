@@ -45,6 +45,8 @@ import numcodecs
 import numpy as np
 from xarray.backends import BackendArray
 
+from astroviper.utils.param_docs import shares_param_docs
+
 # Zarr v3 ``data_type`` -> little-endian NumPy dtype string.
 _V3_DTYPE = {
     "bool": "|b1",
@@ -695,6 +697,7 @@ def _read_arrays_concurrently(reads, processing_function_threads):
     return results
 
 
+@shares_param_docs
 def load_processing_set(
     input_data_store,
     sel_parms,
@@ -706,6 +709,9 @@ def load_processing_set(
     load_correlated_data=True,
     *,
     map_frequencies,
+    full_image_frequencies=None,
+    frequency_boundaries=None,
+    observation_frequency_boundaries=None,
 ):
     """Reconstruct a minimal processing set for cube imaging from chunk blobs.
 
@@ -741,19 +747,38 @@ def load_processing_set(
         (e.g. ``{"correlated_data": "VISIBILITY", "uvw": "UVW", ...}``), passed
         down from the distributed graph.
     processing_set_data_group_name : str
-        Name to register the data group under in ``attrs["data_groups"]``.
+        Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
     frequency_coords : array-like
         Frequency values for this task's channels (``task_coords["frequency"]["data"]``).
     instrument_polarization_basis : str
-        ``"linear"`` or ``"circular"``; used to label the polarization axis.
+        Correlation (instrument) polarization basis the gridding is performed in:
+        ``"linear"`` or ``"circular"``. The residual update grids and degrids the
+        correlations of this basis and the model update deconvolves in the
+        Stokes basis, in which the image is written. The Stokes planes requested
+        in ``image_params["polarization_coords"]`` fix the correlations that are
+        loaded and gridded: the two parallel hands give ``I, Q`` (linear) or
+        ``I, V`` (circular), all four correlations give ``I, Q, U, V``. A sample
+        is used only if none of its loaded correlations is flagged.
     processing_function_threads : int, optional
-        Maximum number of threads used to read this MS's arrays concurrently.
-        Default ``1`` (serial).  File reads and the numcodecs decode both
-        release the GIL, so threading overlaps the per-array I/O latency.
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
     load_correlated_data : bool, optional
         If false, omit the observed correlated-data array. This is used by
         cached-grid MFS residual updates, which require only UVW, flags, and
         imaging weights to predict and grid the model contribution.
+    frequency_boundaries : dict, optional
+        Precomputed image-channel acceptance intervals (Hz), keyed by channel
+        centre. Each pair gives the lowest and highest accepted float64
+        frequency, both inclusive. Only task-local channel records are needed.
+        When omitted, use the supplied image axis to infer channel widths.
+    observation_frequency_boundaries : dict, optional
+        Single-channel image boundaries keyed by observation name, computed
+        from each observation's full frequency axis before selection.
+    full_image_frequencies : array-like, optional
+        Original, unpartitioned image-frequency axis (Hz), retained for legacy
+        callers. Mapping and boundary checks use this axis, with observations
+        required to belong to the local image-frequency subset. Precomputed
+        ``frequency_boundaries`` take precedence when supplied.
     map_frequencies : callable
         ``map_frequencies(visibility_frequencies, task_frequencies)`` returns
         the index of the task frequency each selected channel is imaged onto
@@ -845,7 +870,24 @@ def load_processing_set(
         # use: execution blocks converted to LSRK have channel centres a few
         # kHz apart, so their frequencies never equal the image's exactly.
         try:
-            map_frequencies(child_frequency_values, task_frequency_values)
+            mapping_context = (
+                {"full_image_frequencies": full_image_frequencies}
+                if full_image_frequencies is not None
+                else {}
+            )
+            if frequency_boundaries is not None:
+                mapping_context["frequency_boundaries"] = frequency_boundaries
+            if observation_frequency_boundaries is not None:
+                if ms_name not in observation_frequency_boundaries:
+                    raise ValueError(
+                        f"Missing frequency boundaries for observation {ms_name!r}."
+                    )
+                mapping_context["frequency_boundaries"] = (
+                    observation_frequency_boundaries[ms_name]
+                )
+            map_frequencies(
+                child_frequency_values, task_frequency_values, **mapping_context
+            )
         except ValueError as exc:
             raise ValueError(
                 f"Selected frequencies for {ms_name!r} do not map onto the task "
@@ -892,6 +934,10 @@ def load_processing_set(
                 coords[coord_name] = (c_dims, values)
 
         ds = xr.Dataset(data_vars=data_vars, coords=coords)
+        if observation_frequency_boundaries is not None:
+            ds.frequency.attrs["image_frequency_boundaries"] = (
+                observation_frequency_boundaries[ms_name]
+            )
         ds.attrs["data_groups"] = {processing_set_data_group_name: dict(data_group)}
         nodes[ms_name] = ds
 

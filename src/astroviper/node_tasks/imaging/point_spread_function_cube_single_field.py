@@ -278,6 +278,13 @@ def point_spread_function_cube_single_field(
         time_coords=image_params["time_coords"],
         do_sky_coords=False,
     )
+    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        task_frequency_boundaries,
+    )
+
+    img_xds.frequency.attrs["frequency_boundaries"] = task_frequency_boundaries(
+        task_coords, image_params
+    )
     T_make_empty_image = time.time() - start
 
     start = time.time()
@@ -292,11 +299,22 @@ def point_spread_function_cube_single_field(
             data_selection,
             processing_set_data_group_name,
             frequency_coords=task_coords["frequency"]["data"],
+            frequency_boundaries=img_xds.frequency.attrs["frequency_boundaries"],
+            observation_frequency_boundaries=task_coords["frequency"].get(
+                "observation_frequency_boundaries"
+            ),
             instrument_polarization_basis=instrument_polarization_basis,
             data_group=data_group,
             load_correlated_data=load_correlated_data,
             processing_function_threads=processing_function_threads,
         )
+    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        attach_observation_frequency_boundaries,
+    )
+
+    ps_xdt = attach_observation_frequency_boundaries(
+        ps_xdt, task_coords["frequency"].get("observation_frequency_boundaries")
+    )
     T_load = time.time() - start
 
     n_chan = img_xds.sizes["frequency"]
@@ -307,13 +325,20 @@ def point_spread_function_cube_single_field(
     T_weight_statistics = 0.0
     for chan_index in range(n_chan):
         ps_chan = _select_processing_set_channel(ps_xdt, frequency_maps, chan_index)
-        if ps_chan is None:
+        use_whole_chunk = ps_chan is None
+        if use_whole_chunk:
             logger.debug(
                 f"Image channel {chan_index} of task {task_id} has no visibility "
                 "channels; making its point spread function from the full chunk."
             )
             ps_chan = _whole_processing_set_channel(ps_xdt)
         img_chan = _select_image_channel(img_xds, chan_index)
+        if use_whole_chunk:
+            # Match cube imaging's existing empty-channel fallback: it grids
+            # the whole chunk, including channels owned by other image planes.
+            img_chan.frequency.attrs = dict(img_chan.frequency.attrs)
+            img_chan.frequency.attrs.pop("full_image_frequencies", None)
+            img_chan.frequency.attrs.pop("frequency_boundaries", None)
 
         img_chan, timing_chan = imaging_setup_single_field(
             ps_chan,
@@ -375,6 +400,11 @@ def point_spread_function_cube_single_field(
 
     psf_xds = xr.concat(psf_channels, dim="frequency")
     psf_channels = None
+    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        without_frequency_mapping_metadata,
+    )
+
+    psf_xds = without_frequency_mapping_metadata(psf_xds)
 
     start = time.time()
     if image_store is not None:
