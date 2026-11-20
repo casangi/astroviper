@@ -21,6 +21,7 @@
 // rows of nx/2 + 1 values); the other half is its complex conjugate. Every
 // 2-D transform takes the number of threads pocketfft may use.
 
+#include "scalar_buffer.hpp"
 #include <complex>
 #include <cstddef>
 #include <vector>
@@ -70,7 +71,7 @@ inline std::vector<cd> fft1d_forward(const std::vector<double>& x) {
 // 2-D forward transform of a real image, unnormalized.
 inline std::vector<cd> rfft2_forward(const double* data, int nx, int ny) {
     std::vector<cd> spec(static_cast<std::size_t>(nx) * ny);
-    for (std::size_t i = 0; i < spec.size(); ++i) spec[i] = cd(data[i], 0.0);
+    for (std::size_t i = 0; i < spec.size(); ++i) spec[i] = cd(astroviper::scalar_load(data, i), 0.0);
     detail::c2c_2d(spec.data(), nx, ny, true);
     return spec;
 }
@@ -100,8 +101,22 @@ inline void rfft2_half(const double* data, int nx, int ny, std::vector<cd>& spec
                                         static_cast<std::ptrdiff_t>(sizeof(double))};
     const pocketfft::stride_t stride_out{static_cast<std::ptrdiff_t>(hx * sizeof(cd)),
                                          static_cast<std::ptrdiff_t>(sizeof(cd))};
-    pocketfft::r2c(shape, stride_in, stride_out, pocketfft::shape_t{0, 1}, pocketfft::FORWARD,
-                   data, spec.data(), 1.0, nthreads);
+    if (astroviper::naturally_aligned<double>(data)) {
+        pocketfft::r2c(shape, stride_in, stride_out, pocketfft::shape_t{0, 1}, pocketfft::FORWARD,
+                       data, spec.data(), 1.0, nthreads);
+    } else {
+        // Reuse the required spectrum and pack only one FFT row at a time.
+        std::vector<double> row(nx);
+        for (int y = 0; y < ny; ++y) {
+            std::memcpy(row.data(), reinterpret_cast<const unsigned char*>(data) + static_cast<std::size_t>(y) * nx * sizeof(double), nx * sizeof(double));
+            pocketfft::r2c(pocketfft::shape_t{static_cast<std::size_t>(nx)}, pocketfft::stride_t{sizeof(double)},
+                           pocketfft::stride_t{sizeof(cd)}, std::size_t{0}, pocketfft::FORWARD,
+                           row.data(), spec.data() + static_cast<std::size_t>(y) * hx, 1.0, nthreads);
+        }
+        pocketfft::c2c(pocketfft::shape_t{static_cast<std::size_t>(ny), static_cast<std::size_t>(hx)},
+                       stride_out, stride_out, pocketfft::shape_t{0}, pocketfft::FORWARD,
+                       spec.data(), spec.data(), 1.0, nthreads);
+    }
 }
 
 inline std::vector<cd> rfft2_half(const double* data, int nx, int ny, std::size_t nthreads = 1) {

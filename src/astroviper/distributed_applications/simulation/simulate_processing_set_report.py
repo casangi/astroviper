@@ -46,8 +46,8 @@ def simulate_processing_set_report(
 
     The processing section is the one of every distributed application
     (:func:`~astroviper.utils.report.add_processing_section`). The results
-    section, worked out from the processing set written and the sky
-    components:
+    section, worked out from the MSv4 written (``return_dict["ms_name"]``)
+    and the sky components:
 
     - a summary of the array and the observation, with the shortest and
       longest baseline;
@@ -72,7 +72,7 @@ def simulate_processing_set_report(
     return_dict : dict
         The return dict of ``simulate_processing_set``.
     ps_store : str
-        The processing set it wrote.
+        The processing set it wrote into.
     report : str, optional
         ``"html"`` (default), ``"pdf"`` or ``"notebook"``.
     sky_components : list of dict, optional
@@ -121,7 +121,7 @@ def simulate_processing_set_report(
     files_directory = report_files_directory(ps_store)
     ps_xdt = open_processing_set(ps_store)
     try:
-        observation = _observation(ps_xdt)
+        observation = _observation(ps_xdt, return_dict["ms_name"])
     finally:
         release_data_tree(ps_xdt)
     stamp = datetime.datetime.now().isoformat(timespec="seconds")
@@ -175,14 +175,16 @@ def simulate_processing_set_report(
     return path
 
 
-def _observation(ps_xdt):
-    """What the report needs of the (first) measurement set of ``ps_xdt``."""
+def _observation(ps_xdt, ms_name):
+    """What the report needs of the measurement set ``ms_name`` of ``ps_xdt``."""
     from astroviper.utils.telescope_layout import observatory_position
 
-    ms_name, ms_xdt = next(iter(ps_xdt.items()))
+    ms_xdt = ps_xdt[ms_name]
     ms_xds = ms_xdt.ds
     antenna_xds = ms_xdt["antenna_xds"].ds
-    combined = ps_xdt.xr_ps.get_combined_field_and_source_xds()
+    combined = ps_xdt.xr_ps.query(
+        name=ms_name
+    ).xr_ps.get_combined_field_and_source_xds()
     phase_direction = combined.FIELD_PHASE_CENTER_DIRECTION.sel(
         field_name=combined.attrs["center_field_name"]
     ).values

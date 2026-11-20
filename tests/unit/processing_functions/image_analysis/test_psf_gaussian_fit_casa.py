@@ -120,3 +120,40 @@ def test_pipeline_fitting_method(tmp_path):
             image_data_group_out_name="residual",
             fitting_method="bogus",
         )
+
+
+def test_psf_fit_native_alignment_contract(unaligned_array):
+    """Use external unaligned buffers in place and retain equivalent dtype support."""
+    import numpy as np
+    from astroviper.processing_functions.image_analysis.psf_gaussian_fit_cpp._psf_gaussian_fit_ext import (
+        fit_psf_beam,
+    )
+
+    x, y = np.mgrid[-16:16, -16:16]
+    gaussian = np.exp(-(x * x + y * y) / 8)[None, None, None]
+    kwargs = dict(
+        psf=gaussian.reshape(1, 32, 32),
+        delta_x=1e-4,
+        delta_y=1e-4,
+        psfcutoff=0.35,
+        beams=np.zeros((1, 3)),
+    )
+    reference = {
+        k: v.copy() if isinstance(v, np.ndarray) else v for k, v in kwargs.items()
+    }
+    fit_psf_beam(**reference)
+    for key, value in kwargs.items():
+        if not isinstance(value, np.ndarray) or value.dtype.alignment == 1:
+            continue
+        for offset in range(1, value.dtype.alignment):
+            trial = {
+                k: v.copy() if isinstance(v, np.ndarray) else v
+                for k, v in kwargs.items()
+            }
+            trial[key] = unaligned_array(value, offset)
+            fit_psf_beam(**trial)
+            for name, expected in reference.items():
+                if isinstance(expected, np.ndarray):
+                    np.testing.assert_array_equal(trial[name], expected)
+            assert trial[key].base[0] == 0xA5
+            assert trial[key].base[-1] == 0xA5

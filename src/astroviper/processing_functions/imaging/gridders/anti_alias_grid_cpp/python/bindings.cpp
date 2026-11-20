@@ -1,4 +1,6 @@
+#include "array_dtype.hpp"
 #include <pybind11/pybind11.h>
+#include "scalar_buffer.hpp"
 #include <pybind11/numpy.h>
 #include <complex>
 #include <cstdint>
@@ -43,7 +45,7 @@ static void require_c_contiguous(const py::buffer_info& info, const char* name) 
 // ---------------------------------------------------------------------------
 void anti_alias_grid_bind(
     py::array                                                        grid,          // (m_time, m_chan, m_pol, m_u, m_v)  complex64 or complex128, writable
-    py::array_t<double,  py::array::c_style>                         normalization, // (m_time, m_chan, m_pol)             float64     writable
+    py::array normalization, // (m_time, m_chan, m_pol)             float64     writable
     py::array_t<cdbl,    py::array::c_style>                         vis_data,      // (n_time, n_baseline, n_chan, n_pol) complex128
     py::array_t<double,  py::array::c_style>                         uvw,           // (n_time, n_baseline, 3)            float64
     py::array_t<double,  py::array::c_style>                         frequency_coord, // (n_vis_chan,)                    float64
@@ -60,7 +62,10 @@ void anti_alias_grid_bind(
     int processing_function_threads
 ) {
     auto grid_info  = grid.request();
-    auto norm_info  = normalization.request();
+    astroviper::require_dtype<double>(normalization, "normalization");
+    if (!normalization.writeable())
+        throw std::runtime_error("normalization must be writeable (modified in place)");
+    auto norm_info  = normalization.request(true);
     auto vis_info   = vis_data.request();
     auto uvw_info   = uvw.request();
     auto wt_info    = weight.request();
@@ -86,12 +91,10 @@ void anti_alias_grid_bind(
     const py::dtype dt_c64  = py::dtype::of<cflt>();
     const py::dtype dt_c128 = py::dtype::of<cdbl>();
     const py::dtype grid_dtype = grid.dtype();
-    const bool grid_is_c64  = grid_dtype.is(dt_c64);
-    const bool grid_is_c128 = grid_dtype.is(dt_c128);
+    const bool grid_is_c64  = grid_dtype.equal(dt_c64);
+    const bool grid_is_c128 = grid_dtype.equal(dt_c128);
     if (!grid_is_c64 && !grid_is_c128)
-        throw std::runtime_error(
-            "grid must be complex64 or complex128 (no implicit conversion is "
-            "performed; the array is modified in place)");
+        throw std::runtime_error(astroviper::dtype_error(grid, "grid", "complex64 or complex128"));
 
     const int m_time_g  = static_cast<int>(grid_info.shape[0]);
     const int m_chan_g  = static_cast<int>(grid_info.shape[1]);
@@ -104,12 +107,14 @@ void anti_alias_grid_bind(
     const int n_vis_chan = static_cast<int>(frequency_map.shape(0));
     const int n_pol      = static_cast<int>(pol_map.shape(0));
 
-    auto dlm = delta_lm.unchecked<1>();
+    if (delta_lm.ndim() != 1 || delta_lm.shape(0) != 2)
+        throw std::runtime_error("delta_lm must have shape (2,)");
+    astroviper::ScalarBuffer<const double, false> dlm(delta_lm.data());
 
     // Capture raw pointers before releasing the GIL; py::array_t accessors
     // require it, but the underlying numpy buffers remain valid for the
     // duration of the call because Python owns the arrays.
-    double*       norm_ptr          = normalization.mutable_data();
+    double*       norm_ptr          = static_cast<double*>(normalization.mutable_data());
     const cdbl*   vis_ptr           = static_cast<const cdbl*>(vis_info.ptr);
     const double* uvw_ptr           = static_cast<const double*>(uvw_info.ptr);
     const double* freq_ptr          = frequency_coord.data();
@@ -118,8 +123,8 @@ void anti_alias_grid_bind(
     const int64_t* pol_map_ptr      = pol_map.data();
     const double* wt_ptr            = static_cast<const double*>(wt_info.ptr);
     const double* cgk_ptr           = cgk_1D.data();
-    const double  dl                = dlm(0);
-    const double  dm                = dlm(1);
+    const double  dl                = dlm[0];
+    const double  dm                = dlm[1];
 
     if (grid_is_c128) {
         cdbl* grid_ptr = static_cast<cdbl*>(grid_info.ptr);
@@ -149,7 +154,7 @@ void anti_alias_grid_bind(
 // ---------------------------------------------------------------------------
 void anti_alias_grid_uv_sampling_bind(
     py::array                                                        grid,
-    py::array_t<double,  py::array::c_style>                         normalization,
+    py::array normalization,
     py::array_t<double,  py::array::c_style>                         uvw,
     py::array_t<double,  py::array::c_style>                         frequency_coord,
     py::array_t<int64_t, py::array::c_style>                         frequency_map,
@@ -164,6 +169,7 @@ void anti_alias_grid_uv_sampling_bind(
     int interpolation,
     int processing_function_threads
 ) {
+    astroviper::require_dtype<double>(normalization, "normalization");
     auto grid_info = grid.request();
     auto norm_info = normalization.request();
     auto uvw_info  = uvw.request();
@@ -187,12 +193,10 @@ void anti_alias_grid_uv_sampling_bind(
     const py::dtype dt_c64  = py::dtype::of<cflt>();
     const py::dtype dt_c128 = py::dtype::of<cdbl>();
     const py::dtype grid_dtype = grid.dtype();
-    const bool grid_is_c64  = grid_dtype.is(dt_c64);
-    const bool grid_is_c128 = grid_dtype.is(dt_c128);
+    const bool grid_is_c64  = grid_dtype.equal(dt_c64);
+    const bool grid_is_c128 = grid_dtype.equal(dt_c128);
     if (!grid_is_c64 && !grid_is_c128)
-        throw std::runtime_error(
-            "grid must be complex64 or complex128 (no implicit conversion is "
-            "performed; the array is modified in place)");
+        throw std::runtime_error(astroviper::dtype_error(grid, "grid", "complex64 or complex128"));
 
     const int m_time_g  = static_cast<int>(grid_info.shape[0]);
     const int m_chan_g  = static_cast<int>(grid_info.shape[1]);
@@ -205,9 +209,11 @@ void anti_alias_grid_uv_sampling_bind(
     const int n_vis_chan = static_cast<int>(frequency_map.shape(0));
     const int n_pol      = static_cast<int>(pol_map.shape(0));
 
-    auto dlm = delta_lm.unchecked<1>();
+    if (delta_lm.ndim() != 1 || delta_lm.shape(0) != 2)
+        throw std::runtime_error("delta_lm must have shape (2,)");
+    astroviper::ScalarBuffer<const double, false> dlm(delta_lm.data());
 
-    double*       norm_ptr          = normalization.mutable_data();
+    double*       norm_ptr          = static_cast<double*>(normalization.mutable_data());
     const double* uvw_ptr           = static_cast<const double*>(uvw_info.ptr);
     const double* freq_ptr          = frequency_coord.data();
     const int64_t* freq_map_ptr     = frequency_map.data();
@@ -215,8 +221,8 @@ void anti_alias_grid_uv_sampling_bind(
     const int64_t* pol_map_ptr      = pol_map.data();
     const double* wt_ptr            = static_cast<const double*>(wt_info.ptr);
     const double* cgk_ptr           = cgk_1D.data();
-    const double  dl                = dlm(0);
-    const double  dm                = dlm(1);
+    const double  dl                = dlm[0];
+    const double  dm                = dlm[1];
 
     if (grid_is_c128) {
         cdbl* grid_ptr = static_cast<cdbl*>(grid_info.ptr);
@@ -292,20 +298,16 @@ void anti_alias_degrid_bind(
     const py::dtype dt_c128 = py::dtype::of<cdbl>();
 
     const py::dtype grid_dtype = grid.dtype();
-    const bool grid_is_c64  = grid_dtype.is(dt_c64);
-    const bool grid_is_c128 = grid_dtype.is(dt_c128);
+    const bool grid_is_c64  = grid_dtype.equal(dt_c64);
+    const bool grid_is_c128 = grid_dtype.equal(dt_c128);
     if (!grid_is_c64 && !grid_is_c128)
-        throw std::runtime_error(
-            "grid must be complex64 or complex128 (no implicit conversion is "
-            "performed)");
+        throw std::runtime_error(astroviper::dtype_error(grid, "grid", "complex64 or complex128"));
 
     const py::dtype vis_dtype = vis_data.dtype();
-    const bool vis_is_c64  = vis_dtype.is(dt_c64);
-    const bool vis_is_c128 = vis_dtype.is(dt_c128);
+    const bool vis_is_c64  = vis_dtype.equal(dt_c64);
+    const bool vis_is_c128 = vis_dtype.equal(dt_c128);
     if (!vis_is_c64 && !vis_is_c128)
-        throw std::runtime_error(
-            "vis_data must be complex64 or complex128 (no implicit conversion "
-            "is performed; the array is modified in place)");
+        throw std::runtime_error(astroviper::dtype_error(vis_data, "vis_data", "complex64 or complex128"));
 
     const int m_time_g = static_cast<int>(grid_info.shape[0]);
     const int m_chan_g = static_cast<int>(grid_info.shape[1]);
@@ -318,7 +320,9 @@ void anti_alias_degrid_bind(
     const int n_vis_chan = static_cast<int>(frequency_map.shape(0));
     const int n_pol      = static_cast<int>(pol_map.shape(0));
 
-    auto dlm = delta_lm.unchecked<1>();
+    if (delta_lm.ndim() != 1 || delta_lm.shape(0) != 2)
+        throw std::runtime_error("delta_lm must have shape (2,)");
+    astroviper::ScalarBuffer<const double, false> dlm(delta_lm.data());
 
     const void*    grid_ptr_raw  = grid_info.ptr;
     void*          vis_ptr_raw   = vis_info.ptr;
@@ -328,8 +332,8 @@ void anti_alias_degrid_bind(
     const int64_t* time_map_ptr  = time_map.data();
     const int64_t* pol_map_ptr   = pol_map.data();
     const double*  cgk_ptr       = cgk_1D.data();
-    const double   dl            = dlm(0);
-    const double   dm            = dlm(1);
+    const double   dl            = dlm[0];
+    const double   dm            = dlm[1];
 
     // Dispatch on (grid dtype) x (vis dtype). The grid/vis_info.ptr alias the
     // Python-owned buffers directly; no copy occurs.

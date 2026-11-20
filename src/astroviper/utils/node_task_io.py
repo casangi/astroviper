@@ -9,6 +9,8 @@ or FITS image are read through XRADIO by both engines. Writes go through
 import json
 import os
 
+from astroviper.utils.param_docs import shares_param_docs
+
 IO_ENGINES = ("chunk", "xradio")
 
 
@@ -37,6 +39,7 @@ def _stored_data_group(input_data_store, ms_name, processing_set_data_group_name
     return attrs["data_groups"][processing_set_data_group_name]
 
 
+@shares_param_docs
 def load_processing_set(
     io_engine,
     input_data_store,
@@ -44,6 +47,9 @@ def load_processing_set(
     processing_set_data_group_name,
     *,
     frequency_coords,
+    full_image_frequencies=None,
+    frequency_boundaries=None,
+    observation_frequency_boundaries=None,
     instrument_polarization_basis="linear",
     data_group=None,
     load_correlated_data=True,
@@ -55,26 +61,50 @@ def load_processing_set(
     Parameters
     ----------
     io_engine : {"chunk", "xradio"}
-        ``"chunk"``: :func:`astroviper.utils.chunk_io.load_processing_set`
-        (the data group's variables only, coordinates reconstructed);
-        ``"xradio"``: XRADIO's ``load_processing_set`` without sub-datasets.
+        I/O engine of the node tasks. ``"chunk"`` reads and writes Zarr chunk
+        blobs (and FITS data blocks) directly by byte offset
+        (:mod:`astroviper.utils.chunk_io`); ``"xradio"`` reads with XRADIO's
+        loaders and xarray and writes with zarr-python. A Measurement Set v2
+        and CASA or FITS images are read through XRADIO by both. Default
+        ``"chunk"``.
     input_data_store : str
         Path of the processing-set Zarr store.
     data_selection : dict
         ``{ms_name: {dimension: selector}}`` of the task.
     processing_set_data_group_name : str
-        Data group to load.
+        Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
     frequency_coords : array-like
         Frequencies of the task's image channels (chunk engine).
+    frequency_boundaries : dict, optional
+        Precomputed image-channel acceptance intervals (Hz), keyed by channel
+        centre. Each pair gives the lowest and highest accepted float64
+        frequency, both inclusive. Only task-local channel records are needed.
+        When omitted, use the supplied image axis to infer channel widths.
+    observation_frequency_boundaries : dict, optional
+        Single-channel image boundaries keyed by observation name, computed
+        from each observation's full frequency axis before selection.
+    full_image_frequencies : array-like, optional
+        Original, unpartitioned image-frequency axis (Hz), retained for legacy
+        callers. Mapping and boundary checks use this axis, with observations
+        required to belong to the local image-frequency subset. Precomputed
+        ``frequency_boundaries`` take precedence when supplied.
     instrument_polarization_basis : str, optional
-        ``"linear"`` or ``"circular"`` (chunk engine).
+        Correlation (instrument) polarization basis the gridding is performed in:
+        ``"linear"`` or ``"circular"``. The residual update grids and degrids the
+        correlations of this basis and the model update deconvolves in the
+        Stokes basis, in which the image is written. The Stokes planes requested
+        in ``image_params["polarization_coords"]`` fix the correlations that are
+        loaded and gridded: the two parallel hands give ``I, Q`` (linear) or
+        ``I, V`` (circular), all four correlations give ``I, Q, U, V``. A sample
+        is used only if none of its loaded correlations is flagged.
     data_group : dict, optional
         Role->variable mapping of the data group; read from the first MSv4 of
         ``data_selection`` when ``None`` and needed.
     load_correlated_data : bool, optional
         If false, the correlated data are not read.
     processing_function_threads : int, optional
-        Threads of the chunk loader.
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
     lazy_input_data : dict, optional
         Lazily indexed selection of a Measurement Set v2
         (:func:`~astroviper.utils.measurement_set_v2_input.add_lazy_input_data`);
@@ -86,13 +116,22 @@ def load_processing_set(
     -------
     xarray.DataTree
     """
+    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        attach_observation_frequency_boundaries,
+    )
+
+    def with_boundaries(ps_xdt):
+        return attach_observation_frequency_boundaries(
+            ps_xdt, observation_frequency_boundaries
+        )
+
     check_io_engine(io_engine)
     if lazy_input_data is not None:
         from astroviper.utils.measurement_set_v2_input import (
             load_processing_set_msv2,
         )
 
-        return load_processing_set_msv2(lazy_input_data)
+        return with_boundaries(load_processing_set_msv2(lazy_input_data))
 
     if data_group is None and (io_engine == "chunk" or not load_correlated_data):
         data_group = _stored_data_group(
@@ -107,30 +146,37 @@ def load_processing_set(
         )
         from astroviper.utils import chunk_io
 
-        return chunk_io.load_processing_set(
-            input_data_store,
-            sel_parms=data_selection,
-            data_group=data_group,
-            processing_set_data_group_name=processing_set_data_group_name,
-            frequency_coords=frequency_coords,
-            instrument_polarization_basis=instrument_polarization_basis,
-            processing_function_threads=processing_function_threads,
-            load_correlated_data=load_correlated_data,
-            map_frequencies=map_visibility_frequencies_to_image,
+        return with_boundaries(
+            chunk_io.load_processing_set(
+                input_data_store,
+                sel_parms=data_selection,
+                data_group=data_group,
+                processing_set_data_group_name=processing_set_data_group_name,
+                frequency_coords=frequency_coords,
+                full_image_frequencies=full_image_frequencies,
+                frequency_boundaries=frequency_boundaries,
+                observation_frequency_boundaries=observation_frequency_boundaries,
+                instrument_polarization_basis=instrument_polarization_basis,
+                processing_function_threads=processing_function_threads,
+                load_correlated_data=load_correlated_data,
+                map_frequencies=map_visibility_frequencies_to_image,
+            )
         )
 
     from xradio.measurement_set.load_processing_set import (
         load_processing_set as xradio_load_processing_set,
     )
 
-    return xradio_load_processing_set(
-        input_data_store,
-        sel_parms=data_selection,
-        data_group_name=processing_set_data_group_name,
-        drop_variables=(
-            None if load_correlated_data else [data_group["correlated_data"]]
-        ),
-        load_sub_datasets=False,
+    return with_boundaries(
+        xradio_load_processing_set(
+            input_data_store,
+            sel_parms=data_selection,
+            data_group_name=processing_set_data_group_name,
+            drop_variables=(
+                None if load_correlated_data else [data_group["correlated_data"]]
+            ),
+            load_sub_datasets=False,
+        )
     )
 
 

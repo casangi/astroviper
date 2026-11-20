@@ -1,4 +1,5 @@
 #include "../include/anti_alias_degrid.hpp"
+#include "scalar_buffer.hpp"
 #include "../include/kernel_lookup.hpp"
 
 #include <algorithm>
@@ -34,8 +35,8 @@ void anti_alias_degrid(
     //   uv_scale[1, i] = -(freq[i] * delta_m * m_v) / c
     std::vector<double> uv_scale_u(n_vis_chan), uv_scale_v(n_vis_chan);
     for (int i = 0; i < n_vis_chan; ++i) {
-        uv_scale_u[i] = -(frequency_coord[i] * delta_l * m_u) / c;
-        uv_scale_v[i] = -(frequency_coord[i] * delta_m * m_v) / c;
+        uv_scale_u[i] = -(astroviper::scalar_load(frequency_coord, i) * delta_l * m_u) / c;
+        uv_scale_v[i] = -(astroviper::scalar_load(frequency_coord, i) * delta_m * m_v) / c;
     }
 
     const int support_center = support / 2;
@@ -62,7 +63,7 @@ void anti_alias_degrid(
     // so each worker writes to a disjoint slice of vis_data — no atomics
     // needed. The grid is read only.
     auto process_time_baseline = [&](int i_time, int i_baseline) {
-        const int a_time    = time_map[i_time];
+        const int a_time    = astroviper::scalar_load(time_map, i_time);
         const int vis_t_off = i_time * vis_time_stride;
         const int uvw_t_off = i_time * uvw_time_stride;
 
@@ -73,10 +74,10 @@ void anti_alias_degrid(
         std::vector<double> conv_u(support), conv_v(support);
 
         for (int i_chan = 0; i_chan < n_vis_chan; ++i_chan) {
-            const int a_chan = frequency_map[i_chan];
+            const int a_chan = astroviper::scalar_load(frequency_map, i_chan);
 
-            const double u = uvw[uvw_b_off + 0] * uv_scale_u[i_chan];
-            const double v = uvw[uvw_b_off + 1] * uv_scale_v[i_chan];
+            const double u = astroviper::scalar_load(uvw, uvw_b_off + 0) * uv_scale_u[i_chan];
+            const double v = astroviper::scalar_load(uvw, uvw_b_off + 1) * uv_scale_v[i_chan];
 
             if (std::isnan(u) || std::isnan(v)) continue;
 
@@ -116,12 +117,12 @@ void anti_alias_degrid(
 
                 // Read existing sample (cast to double precision) to honour
                 // the NaN-skip contract regardless of vis_data dtype.
-                const VisT current_in = vis_data[vis_idx];
+                const VisT current_in = astroviper::scalar_load(vis_data, vis_idx);
                 if (std::isnan(static_cast<double>(current_in.real())) ||
                     std::isnan(static_cast<double>(current_in.imag())))
                     continue;
 
-                const int a_pol = pol_map[i_pol];
+                const int a_pol = astroviper::scalar_load(pol_map, i_pol);
 
                 const int grid_base = a_time * grid_time_stride
                                     + a_chan  * grid_chan_stride
@@ -145,7 +146,7 @@ void anti_alias_degrid(
 
                         // Widen the (possibly single-precision) grid cell to
                         // complex<double> so the accumulation stays double.
-                        const std::complex<double> grid_value = grid_row[v_indx];
+                        const std::complex<double> grid_value = astroviper::scalar_load(grid_row, v_indx);
                         degrid_value += conv * grid_value;
                         norm += conv;
                     }
@@ -153,9 +154,9 @@ void anti_alias_degrid(
 
                 if (norm > 0.0) {
                     const std::complex<double> result = degrid_value / norm;
-                    vis_data[vis_idx] = VisT(
+                    astroviper::scalar_store(vis_data, vis_idx, VisT(
                         static_cast<VisElem>(result.real()),
-                        static_cast<VisElem>(result.imag()));
+                        static_cast<VisElem>(result.imag())));
                 }
             }
         }
