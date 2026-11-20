@@ -13,6 +13,7 @@ only the shard index and the compressed chunks of a selection.
 from __future__ import annotations
 
 import errno
+import json
 import os
 import threading
 import time
@@ -118,6 +119,51 @@ def test_read_encoded_fill_values(tmp_path, layout, dtype, fill):
     )
     assert got is out
     np.testing.assert_array_equal(got, np.full(out.shape, fill, dtype=dtype))
+
+
+@pytest.mark.parametrize("sharded", [False, True])
+@pytest.mark.parametrize("fully_written", [False, True])
+@pytest.mark.parametrize(
+    "dtype, encoded",
+    [
+        ("float16", "0x7e00"),
+        ("float32", "0x7fc00000"),
+        ("float64", "0x7ff8000000000000"),
+        ("float32", "0x80000000"),
+        ("float64", "0x3ff8000000000000"),
+        ("complex64", ["0x7fc00000", "0x7f800000"]),
+        ("complex128", ["0xfff0000000000000", "0x7ff8000000000000"]),
+    ],
+)
+def test_read_hex_fill_values(tmp_path, sharded, fully_written, dtype, encoded):
+    """Hex fills must not block stored chunks; missing chunks match Zarr."""
+    path = tmp_path / "hex_fill"
+    kwargs = {"shards": (4, 2)} if sharded else {}
+    arr = zarr.create_array(
+        str(path),
+        shape=(6, 2),
+        chunks=(2, 2),
+        dtype=dtype,
+        dimension_names=("frequency", "polarization"),
+        **kwargs,
+    )
+    arr[: (6 if fully_written else 2), :] = 3
+    meta_path = path / "zarr.json"
+    meta = json.loads(meta_path.read_text())
+    meta["fill_value"] = encoded
+    meta_path.write_text(json.dumps(meta))
+    expected = zarr.open_array(str(path), mode="r")[:]
+    out = np.empty((6, 2), dtype=dtype)
+    got, _ = read_array_region(str(path), {}, out=out)
+    assert got is out
+    for actual_part, expected_part in [
+        (got.real, expected.real),
+        (got.imag, expected.imag),
+    ]:
+        np.testing.assert_array_equal(actual_part, expected_part)
+        np.testing.assert_array_equal(
+            np.signbit(actual_part), np.signbit(expected_part)
+        )
 
 
 def _write_minimal_processing_set_child(store, ms_name, frequencies, offset=0):
@@ -605,7 +651,8 @@ def test_write_roundtrip(tmp_path, compressor, processing_function_threads):
     "dtype, fill",
     [("float32", float("nan")), ("complex64", 2 - 3j), ("complex128", 2 - 3j)],
 )
-def test_write_roundtrip_edge_chunk(tmp_path, dtype, fill):
+@pytest.mark.parametrize("hex_fill", [False, True])
+def test_write_roundtrip_edge_chunk(tmp_path, dtype, fill, hex_fill):
     """Last chunk is partial (5 channels, chunk size 2): pad to full chunk."""
     freq_chunks = [list(range(2)), list(range(2)), list(range(1))]
     store = _make_image_store(tmp_path, None, freq_chunks)
@@ -618,6 +665,17 @@ def test_write_roundtrip_edge_chunk(tmp_path, dtype, fill):
         dimension_names=("time", "frequency", "polarization", "l", "m"),
         overwrite=True,
     )
+    if hex_fill:
+        from pathlib import Path
+
+        meta_path = Path(store) / "SKY_RESIDUAL" / "zarr.json"
+        meta = json.loads(meta_path.read_text())
+        meta["fill_value"] = (
+            ["0x7fc00000", "0x00000000"]
+            if dtype.startswith("complex")
+            else "0x7fc00000"
+        )
+        meta_path.write_text(json.dumps(meta))
     vals = np.random.default_rng(5).standard_normal((1, 1, 2, 16, 16)).astype(dtype)
     img = xr.Dataset(
         {"SKY_RESIDUAL": (["time", "frequency", "polarization", "l", "m"], vals)}

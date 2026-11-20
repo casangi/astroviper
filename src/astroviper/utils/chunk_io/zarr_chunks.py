@@ -101,14 +101,31 @@ def _np_dtype(meta_dtype):
     return np.dtype(meta_dtype)
 
 
+def _decode_float_fill_value(fill):
+    """Decode one JSON float, including Zarr v3 big-endian IEEE hex bits."""
+    if isinstance(fill, str) and fill.startswith("0x"):
+        formats = {4: ">e", 8: ">f", 16: ">d"}
+        fmt = formats.get(len(fill) - 2)
+        if fmt is None:
+            raise ValueError(
+                f"Invalid hexadecimal float fill {fill!r}: expected 4, 8 or 16 hex digits."
+            )
+        return struct.unpack(fmt, bytes.fromhex(fill[2:]))[0]
+    return float(fill)
+
+
 def _decode_fill_value(fill, dtype):
     """Decode numeric JSON fill metadata to one scalar, without array copies."""
     if fill is None:
         return None
     if dtype.kind == "c" and isinstance(fill, (list, tuple)):
-        # Both Zarr formats encode complex fills as [real, imaginary].
-        # float also decodes the JSON strings NaN, Infinity and -Infinity.
-        fill = complex(float(fill[0]), float(fill[1]))
+        # Decode each component independently, preserving NaNs, infinities and
+        # signed zeros without complex arithmetic or data-sized temporaries.
+        fill = complex(
+            _decode_float_fill_value(fill[0]), _decode_float_fill_value(fill[1])
+        )
+    elif dtype.kind == "f":
+        fill = _decode_float_fill_value(fill)
     return dtype.type(fill) if dtype.kind in "biufc" else fill
 
 
