@@ -6,7 +6,7 @@ Coverage:
     their definitions (w term and 1/n included), every output dtype
   * the samples skipped (non-finite uvw, NaN or zero weight, NaN visibility)
     and the normalization (sum of the weights of the samples imaged, zero
-    visibilities included)
+    visibilities included); an image without pixels
   * accumulation over calls; the NaN-skip contract of the prediction
   * results independent of the thread count (bit for bit) and repeatable
   * binding input validation; unpickled arrays (Dask) are taken in place
@@ -309,6 +309,22 @@ def test_zero_visibility_counts_in_the_normalization():
     dft_image_uv_sampling(psf, psf_normalization, *_uv_sampling_args(inp))
     np.testing.assert_array_equal(normalization, psf_normalization)
     np.testing.assert_array_equal(image / normalization[..., None, None], 1.0)
+
+
+@pytest.mark.parametrize("n_l, n_m", [(3, 0), (0, 0), (0, 3)])
+def test_an_image_without_pixels_sums_only_the_normalization(n_l, n_m):
+    """An image with no row or no column (n_m = 0 divided by zero) gets the
+    normalization of any image of the samples."""
+    inp = _inputs(n_l=n_l, n_m=n_m)
+    one_pixel = _inputs(n_l=1, n_m=1)  # the same samples
+    image, normalization = _empty(inp)
+    dft_image(image, normalization, *_image_args(inp))
+    expected_image, expected = _empty(one_pixel)
+    dft_image(expected_image, expected, *_image_args(one_pixel))
+    np.testing.assert_array_equal(normalization, expected)
+    psf, psf_normalization = _empty(inp, dtype=np.float64)
+    dft_image_uv_sampling(psf, psf_normalization, *_uv_sampling_args(inp))
+    np.testing.assert_array_equal(psf_normalization, expected)
 
 
 def test_calls_accumulate():
