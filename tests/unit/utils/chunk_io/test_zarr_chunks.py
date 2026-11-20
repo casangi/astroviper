@@ -854,6 +854,78 @@ def test_write_roundtrip_edge_chunk(tmp_path, dtype, fill, hex_fill):
     assert _equal(back, vals)
 
 
+@pytest.mark.parametrize("layout", ["v2", "v3", "sharded"])
+@pytest.mark.parametrize("dtype", ["complex64", "complex128"])
+@pytest.mark.parametrize(
+    "fill",
+    [2 - 3j, complex(float("nan"), float("nan")), complex(float("nan"), float("inf"))],
+)
+def test_complex_uv_edge_padding(tmp_path, layout, dtype, fill):
+    """Partial u/v edge chunks retain complex fills in all storage layouts."""
+    from astroviper.utils.chunk_io.zarr_chunks import precreate_sharded_files
+
+    path = tmp_path / "VISIBILITY"
+    dims = ("time", "frequency", "polarization", "u", "v")
+    shape = (1, 1, 1, 3, 5)
+    chunks = (1, 1, 1, 2, 2)
+    kwargs = {"dimension_names": dims}
+    if layout == "v2":
+        kwargs = {"zarr_format": 2}
+    elif layout == "sharded":
+        kwargs["shards"] = (1, 1, 1, 4, 4)
+    arr = zarr.create_array(
+        str(path),
+        shape=shape,
+        chunks=chunks,
+        dtype=dtype,
+        fill_value=fill,
+        compressors=None,
+        **kwargs,
+    )
+    if layout == "v2":
+        arr.attrs["_ARRAY_DIMENSIONS"] = list(dims)
+    elif layout == "sharded":
+        # The fixed-slot writer requires the CRC-free index used by the
+        # production image/cache creation path. No data have been written yet.
+        meta_path = path / "zarr.json"
+        meta = json.loads(meta_path.read_text())
+        meta["codecs"][0]["configuration"]["index_codecs"] = [
+            {"name": "bytes", "configuration": {"endian": "little"}}
+        ]
+        meta_path.write_text(json.dumps(meta))
+        precreate_sharded_files(str(path))
+
+    values = np.full((1, 1, 1, 1, 1), 7 - 11j, dtype=dtype)
+    image = xr.Dataset({"VISIBILITY": (dims, values)})
+    task_coords = {"u": {"slice": slice(2, 3)}, "v": {"slice": slice(4, 5)}}
+    writer = write_zarr_sharded if layout == "sharded" else write_zarr
+    writer(str(tmp_path), ["visibility"], task_coords, image)
+
+    expected = np.full(shape, fill, dtype=dtype)
+    expected[..., 2:3, 4:5] = values
+    back = zarr.open_array(str(path), mode="r")[:]
+    ours, _ = read_array_region(str(path), {})
+    assert _equal(back, expected)
+    assert _equal(ours, expected)
+
+    # Inspect padding beyond BOTH logical u/v edges, which ordinary array
+    # reads omit. Each file is uncompressed; sharded blobs use an index offset.
+    if layout == "sharded":
+        with (path / "c/0/0/0/0/1").open("rb") as fh:
+            fh.seek(-4 * 16, os.SEEK_END)
+            index = np.frombuffer(fh.read(4 * 16), dtype="<u8").reshape(4, 2)
+            offset, length = map(int, index[2])  # Inner u/v position (1, 0).
+            fh.seek(offset)
+            blob = fh.read(length)
+    else:
+        key = "0.0.0.1.2" if layout == "v2" else "c/0/0/0/1/2"
+        blob = (path / key).read_bytes()
+    padded = np.frombuffer(blob, dtype=dtype).reshape(chunks)
+    expected_padding = np.full(chunks, fill, dtype=dtype)
+    expected_padding[..., :1, :1] = values
+    assert _equal(padded, expected_padding)
+
+
 @pytest.mark.parametrize("processing_function_threads", [1, 4])
 @pytest.mark.parametrize(
     "compressor",
