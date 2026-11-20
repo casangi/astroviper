@@ -235,6 +235,61 @@ def test_big_endian_shard_index_rejected(tmp_path):
         _read_array_meta(str(path))
 
 
+@pytest.mark.parametrize(
+    "dtype, fill",
+    [("S3", b"ab"), ("S4", b"\xff\x00ab"), ("V4", np.void(b"\xff\x00ab"))],
+)
+def test_v2_base64_fills_read_and_edge_padding(tmp_path, dtype, fill):
+    """Decode byte fills for missing/masked chunks and actual edge padding."""
+    path = tmp_path / "SKY_RESIDUAL"
+    dtype = np.dtype(dtype)
+    arr = zarr.create_array(
+        str(path),
+        zarr_format=2,
+        shape=(5,),
+        chunks=(2,),
+        dtype=dtype,
+        fill_value=fill,
+        compressors=None,
+    )
+    arr.attrs["_ARRAY_DIMENSIONS"] = ["frequency"]
+    arr[:2] = dtype.type(b"xy")
+    out = np.empty(5, dtype=dtype)
+    got, dims = read_array_region(str(path), {}, out=out)
+    assert got is out
+    assert dims == ["frequency"]
+    np.testing.assert_array_equal(got, arr[:])
+    got, _ = read_array_region(str(path), {}, out=out, chunk_mask=np.array(False))
+    np.testing.assert_array_equal(got, np.full(5, fill, dtype=dtype))
+
+    values = np.array([dtype.type(b"end")], dtype=dtype)
+    image = xr.Dataset({"SKY_RESIDUAL": (["frequency"], values)})
+    write_zarr(
+        str(tmp_path),
+        ["sky_residual"],
+        {"frequency": {"slice": slice(4, 5)}},
+        image,
+    )
+    np.testing.assert_array_equal(zarr.open_array(str(path), mode="r")[4:], values)
+    # Inspect the full uncompressed edge chunk: its second cell is padding,
+    # beyond the array extent and therefore invisible in a normal Zarr read.
+    edge = np.frombuffer((path / "2").read_bytes(), dtype=dtype)
+    expected = np.full(2, fill, dtype=dtype)
+    expected[0] = values[0]
+    np.testing.assert_array_equal(edge, expected)
+
+
+@pytest.mark.parametrize("zarr_format", [2, 3])
+def test_base64_fill_decoding_is_format_and_dtype_specific(zarr_format):
+    """Unicode stays literal; the v2 rule must not alter v3 byte metadata."""
+    from astroviper.utils.chunk_io.zarr_chunks import _decode_fill_value
+
+    assert _decode_fill_value("YWI=", np.dtype("U4"), zarr_format=zarr_format) == "YWI="
+    if zarr_format == 3:
+        assert _decode_fill_value("YWI=", np.dtype("S4"), zarr_format=3) == "YWI="
+    assert _decode_fill_value(None, np.dtype("S4"), zarr_format=zarr_format) is None
+
+
 def _write_minimal_processing_set_child(store, ms_name, frequencies, offset=0):
     """Write one tiny child used by direct-loader frequency-selection tests."""
     frequencies = np.asarray(frequencies, dtype=np.float64)

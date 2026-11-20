@@ -35,6 +35,7 @@ here serve both inputs.
 
 from __future__ import annotations
 
+import base64
 import errno
 import json
 import os
@@ -114,10 +115,12 @@ def _decode_float_fill_value(fill):
     return float(fill)
 
 
-def _decode_fill_value(fill, dtype):
-    """Decode numeric JSON fill metadata to one scalar, without array copies."""
+def _decode_fill_value(fill, dtype, *, zarr_format):
+    """Decode JSON numeric/v2 byte fills to a scalar, without array copies."""
     if fill is None:
         return None
+    if zarr_format == 2 and dtype.kind in "SV":
+        return dtype.type(base64.b64decode(fill, validate=True))
     if dtype.kind == "c" and isinstance(fill, (list, tuple)):
         # Decode each component independently, preserving NaNs, infinities and
         # signed zeros without complex arithmetic or data-sized temporaries.
@@ -168,7 +171,7 @@ def _read_array_meta(array_path):
             "codecs": codecs,
             "sharding": sharding["configuration"] if sharding else None,
             "fill_value": _decode_fill_value(
-                m.get("fill_value"), _np_dtype(m["data_type"])
+                m.get("fill_value"), _np_dtype(m["data_type"]), zarr_format=3
             ),
             "bool_encoded": m.get("attributes", {}).get("dtype") == "bool",
         }
@@ -189,7 +192,9 @@ def _read_array_meta(array_path):
         "compressor": m.get("compressor"),
         "filters": m.get("filters"),
         "order": m.get("order", "C"),
-        "fill_value": _decode_fill_value(m.get("fill_value"), np.dtype(m["dtype"])),
+        "fill_value": _decode_fill_value(
+            m.get("fill_value"), np.dtype(m["dtype"]), zarr_format=2
+        ),
         "bool_encoded": attrs.get("dtype") == "bool",
     }
 
