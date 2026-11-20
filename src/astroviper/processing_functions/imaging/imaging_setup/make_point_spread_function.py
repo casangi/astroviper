@@ -346,7 +346,7 @@ def make_point_spread_function_single_field(
 
     This is the once-per-chunk PSF builder; the per-cycle visibility grid is made
     separately by
-    :func:`~astroviper.processing_functions.imaging.make_undeconvolved_image.make_undeconvolved_image_single_field`.
+    :func:`~astroviper.processing_functions.imaging.residual_update.make_undeconvolved_image.make_undeconvolved_image_single_field`.
     The Gaussian beam fit of the PSF is performed afterwards by
     :func:`~astroviper.processing_functions.image_analysis.point_spread_function_gaussian_fit.point_spread_function_gaussian_fit`.
 

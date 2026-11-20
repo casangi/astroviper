@@ -137,7 +137,7 @@ def _target_files():
         "processing_functions/imaging/config_check/param_check_model_update.py",
         "processing_functions/imaging/config_check/param_check_driver_workflow.py",
         "processing_functions/imaging/imaging_setup/make_point_spread_function.py",
-        "processing_functions/imaging/make_undeconvolved_image.py",
+        "processing_functions/imaging/residual_update/make_undeconvolved_image.py",
         "processing_functions/imaging/degrid_visibility_grid.py",
         "processing_functions/imaging/gridders/gridder_base.py",
         "processing_functions/imaging/direct_fourier_transform.py",

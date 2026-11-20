@@ -677,7 +677,7 @@ def residual_update_cube_single_field(
     # Grid the (residual) visibilities into the undeconvolved image grid. The
     # PSF / UV-sampling grid is built once in imaging_setup_single_field, so only
     # the visibility grid is made here.
-    from astroviper.processing_functions.imaging.make_undeconvolved_image import (
+    from astroviper.processing_functions.imaging.residual_update.make_undeconvolved_image import (
         make_undeconvolved_image_single_field,
     )
 

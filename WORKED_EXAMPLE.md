@@ -142,7 +142,7 @@ via the cycle control functions on `cycle_control_state`:
   `add_uv_sampling_grid_single_field` / `add_uv_sampling_grid_mosaic` gridders
   that build the PSF numerator — gridding the imaging weights *is* the first
   step of forming the PSF).
-- Undeconvolved (dirty/residual) image gridding: `make_undeconvolved_image.py`
+- Undeconvolved (dirty/residual) image gridding: `residual_update/make_undeconvolved_image.py`
   (`make_undeconvolved_image_single_field`).
 - Degridding (model uv grid → vis): `get_visibility_grid.py`.
 - FFT + normalization: `fft_normalize_anti_alias_gridder.py`.
