@@ -432,9 +432,9 @@ def test_binding_validation():
         dft_image(image[0], normalization, *args)
     with pytest.raises(RuntimeError, match="normalization must have shape"):
         dft_image(image, normalization[:, :1], *args)
-    with pytest.raises(RuntimeError, match="normalization must be float64"):
+    with pytest.raises(RuntimeError, match="normalization.*expected native float64"):
         dft_image(image, normalization.astype(np.float32), *args)
-    with pytest.raises(RuntimeError, match="image must be"):
+    with pytest.raises(RuntimeError, match="image has wrong dtype"):
         dft_image(image.real.astype(np.int64), normalization, *args)
     read_only = image.copy()
     read_only.setflags(write=False)
@@ -462,11 +462,13 @@ def test_binding_validation():
     with pytest.raises(TypeError):
         dft_image(image, normalization, *_image_args(bad))
     vis = np.zeros(inp["vis_data"].shape, dtype=np.complex128)
-    with pytest.raises(RuntimeError, match="vis_data must be complex64 or complex128"):
+    with pytest.raises(
+        RuntimeError, match="vis_data.*expected native complex64 or complex128"
+    ):
         dft_predict(image, vis.real.copy(), *_predict_args(inp))
-    with pytest.raises(RuntimeError, match="model must be"):
+    with pytest.raises(RuntimeError, match="model has wrong dtype"):
         dft_predict(image.real.astype(np.int32), vis, *_predict_args(inp))
-    with pytest.raises(RuntimeError, match="image must be float32 or float64"):
+    with pytest.raises(RuntimeError, match="image.*expected native float32 or float64"):
         dft_image_uv_sampling(image, normalization, *_uv_sampling_args(inp))
 
 

@@ -1,3 +1,4 @@
+#include "array_dtype.hpp"
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include "scalar_buffer.hpp"
@@ -24,9 +25,7 @@ template <typename T>
 static py::buffer_info check_array(py::array& arr, const char* name, int ndim,
                                    const std::vector<py::ssize_t>& shape,
                                    bool writable) {
-    if (!arr.dtype().equal(py::dtype::of<T>()))
-        throw std::runtime_error(std::string(name) + " has wrong dtype; expected " +
-                                 py::cast<std::string>(py::dtype::of<T>().attr("name")));
+    astroviper::require_dtype<T>(arr, name);
     if (!(arr.flags() & py::array::c_style))
         throw std::runtime_error(std::string(name) +
                                  " must be C-contiguous (no copy is made)");
@@ -196,7 +195,7 @@ static py::dict clean_dispatch(py::array residual, py::array psf, py::array mode
                                   asp_scale_normalization_method, verbose, max_iter_divergence,
                                   divergence_rms_factor, divergence_peak_factor,
                                   processing_function_threads, asp_stop_after_hogbom_run, options);
-    throw std::runtime_error("residual must be float32 or float64");
+    throw std::runtime_error(astroviper::dtype_error(residual, "residual", "float32 or float64"));
 }
 
 template <typename T>
@@ -218,8 +217,7 @@ static py::dict cube_impl(py::array residual, py::array psf, py::array model,
     py::buffer_info ri = check_array<T>(residual, "residual", 5, shp, true);
     py::buffer_info mi = check_array<T>(model, "model", 5, shp, true);
 
-    if (!psf.dtype().equal(py::dtype::of<T>()))
-        throw std::runtime_error("psf has wrong dtype");
+    astroviper::require_dtype<T>(psf, "psf");
     if (psf.ndim() != 5)
         throw std::runtime_error("psf must be a 5D array");
     if (psf.shape(0) != nt || psf.shape(1) != nf || psf.shape(3) != ny ||
@@ -388,7 +386,7 @@ static py::dict clean_cube_dispatch(py::array residual, py::array psf,
                                  asp_scale_normalization_method, processing_function_threads,
                                  max_iter_divergence, divergence_rms_factor,
                                  divergence_peak_factor, asp_stop_after_hogbom_run, options);
-    throw std::runtime_error("residual must be float32 or float64");
+    throw std::runtime_error(astroviper::dtype_error(residual, "residual", "float32 or float64"));
 }
 
 // Test helper: PSF Gaussian width estimate (mean FWHM in pixels). The PSF is

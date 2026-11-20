@@ -1,3 +1,4 @@
+#include "array_dtype.hpp"
 #include <pybind11/pybind11.h>
 #include "scalar_buffer.hpp"
 #include <pybind11/numpy.h>
@@ -31,12 +32,7 @@ static py::buffer_info validate_inplace_array(py::array& arr,
                                               const char* name,
                                               int ny, int nx,
                                               bool require_writable) {
-    if (!arr.dtype().equal(py::dtype::of<T>())) {
-        throw std::runtime_error(
-            std::string(name) + " has wrong dtype; expected " +
-            py::cast<std::string>(py::dtype::of<T>().attr("name")) +
-            " but got " + py::cast<std::string>(arr.dtype().attr("name")));
-    }
+    astroviper::require_dtype<T>(arr, name);
     if (!(arr.flags() & py::array::c_style)) {
         throw std::runtime_error(
             std::string(name) + " must be C-contiguous (no copy will be made)");
@@ -69,12 +65,7 @@ static py::buffer_info validate_inplace_cube(py::array& arr,
                                              int nt, int nf, int np_dim,
                                              int ny, int nx,
                                              bool require_writable) {
-    if (!arr.dtype().equal(py::dtype::of<T>())) {
-        throw std::runtime_error(
-            std::string(name) + " has wrong dtype; expected " +
-            py::cast<std::string>(py::dtype::of<T>().attr("name")) +
-            " but got " + py::cast<std::string>(arr.dtype().attr("name")));
-    }
+    astroviper::require_dtype<T>(arr, name);
     if (!(arr.flags() & py::array::c_style)) {
         throw std::runtime_error(
             std::string(name) + " must be C-contiguous (no copy will be made)");
@@ -114,12 +105,7 @@ template<typename U>
 static py::buffer_info validate_per_plane_array(py::array& arr,
                                                 const char* name,
                                                 int nt, int nf, int np_dim) {
-    if (!arr.dtype().equal(py::dtype::of<U>())) {
-        throw std::runtime_error(
-            std::string(name) + " has wrong dtype; expected " +
-            py::cast<std::string>(py::dtype::of<U>().attr("name")) +
-            " but got " + py::cast<std::string>(arr.dtype().attr("name")));
-    }
+    astroviper::require_dtype<U>(arr, name);
     if (!(arr.flags() & py::array::c_style)) {
         throw std::runtime_error(
             std::string(name) + " must be C-contiguous");
@@ -233,7 +219,7 @@ static py::tuple maximg_dispatch(py::array image, py::array mask) {
     } else if (dt.equal(py::dtype::of<double>())) {
         return maximg_impl<double>(image, mask);
     } else {
-        throw std::runtime_error("image must be float32 or float64");
+        throw std::runtime_error(astroviper::dtype_error(image, "image", "float32 or float64"));
     }
 }
 
@@ -264,9 +250,7 @@ py::dict hclean_impl(
     bool record_iteration_history
 ) {
     // First, read dirty_image shape so we can cross-validate the others.
-    if (!dirty_image.dtype().equal(py::dtype::of<T>())) {
-        throw std::runtime_error("dirty_image has wrong dtype");
-    }
+    astroviper::require_dtype<T>(dirty_image, "dirty_image");
     if (dirty_image.ndim() != 2) {
         throw std::runtime_error("dirty_image must be 2D [ny, nx]");
     }
@@ -443,9 +427,7 @@ py::dict hclean_cube_impl(
     bool record_iteration_history,
     bool many_threads
 ) {
-    if (!residual_cube.dtype().equal(py::dtype::of<T>())) {
-        throw std::runtime_error("residual_cube has wrong dtype");
-    }
+    astroviper::require_dtype<T>(residual_cube, "residual_cube");
     if (residual_cube.ndim() != 5) {
         throw std::runtime_error(
             "residual_cube must be a 5D array [time, frequency, polarization, y, x]");
@@ -464,9 +446,7 @@ py::dict hclean_cube_impl(
         /*require_writable=*/true);
 
     // PSF may broadcast on polarization axis.
-    if (!psf_cube.dtype().equal(py::dtype::of<T>())) {
-        throw std::runtime_error("psf_cube has wrong dtype");
-    }
+    astroviper::require_dtype<T>(psf_cube, "psf_cube");
     if (psf_cube.ndim() != 5) {
         throw std::runtime_error(
             "psf_cube must be a 5D array [time, frequency, polarization, y, x]");
@@ -685,8 +665,7 @@ static py::dict clean_dispatch(
             max_iter_divergence, divergence_rms_factor, divergence_peak_factor,
             record_iteration_history);
     } else {
-        throw std::runtime_error(
-            "dirty_image must be float32 or float64");
+        throw std::runtime_error(astroviper::dtype_error(dirty_image, "dirty_image", "float32 or float64"));
     }
 }
 
@@ -733,8 +712,7 @@ static py::dict clean_cube_dispatch(
             record_iteration_history,
             /*many_threads=*/false);
     } else {
-        throw std::runtime_error(
-            "residual_cube must be float32 or float64");
+        throw std::runtime_error(astroviper::dtype_error(residual_cube, "residual_cube", "float32 or float64"));
     }
 }
 
@@ -783,8 +761,7 @@ static py::dict clean_cube_many_threads_dispatch(
             record_iteration_history,
             /*many_threads=*/true);
     } else {
-        throw std::runtime_error(
-            "residual_cube must be float32 or float64");
+        throw std::runtime_error(astroviper::dtype_error(residual_cube, "residual_cube", "float32 or float64"));
     }
 }
 

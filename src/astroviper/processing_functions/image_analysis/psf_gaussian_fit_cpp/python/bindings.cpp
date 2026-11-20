@@ -1,3 +1,4 @@
+#include "array_dtype.hpp"
 // pybind11 bindings for the CASA-compatible PSF Gaussian fit.
 //
 // Follows the AstroVIPER pybind11 memory contract: typed py::array_t without
@@ -26,7 +27,7 @@ int fit_psf_beam_impl(
     py::array beams,
     int n_threads) {
     if (!beams.dtype().equal(py::dtype::of<double>()))
-        throw std::invalid_argument("beams must be native float64 (modified in place; no conversion)");
+        throw std::invalid_argument(astroviper::dtype_error(beams, "beams", "float64"));
     if (!(beams.flags() & py::array::c_style))
         throw std::invalid_argument("beams must be C-contiguous (modified in place)");
     if (!beams.writeable())

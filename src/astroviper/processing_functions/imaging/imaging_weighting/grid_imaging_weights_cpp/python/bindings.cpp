@@ -1,3 +1,4 @@
+#include "array_dtype.hpp"
 #include "scalar_buffer.hpp"
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
@@ -145,13 +146,8 @@ void grid_imaging_weights_bind(
     const bool grid_is_f64 =
         grid.dtype().equal(py::dtype::of<double>());
     if (!grid_is_f32 && !grid_is_f64)
-        throw std::runtime_error(
-            "grid must be float32 or float64 (no implicit conversion is "
-            "performed; the array is modified in place)");
-    if (!sum_weight.dtype().equal(py::dtype::of<double>()))
-        throw std::runtime_error(
-            "sum_weight must be native float64 (no implicit conversion is "
-            "performed; the array is modified in place)");
+        throw std::runtime_error(astroviper::dtype_error(grid, "grid", "float32 or float64"));
+    astroviper::require_dtype<double>(sum_weight, "sum_weight");
 
     const int n_chan_g = checked_int_dimension(grid_info.shape[0], "grid channel");
     const int n_pol_g = checked_int_dimension(grid_info.shape[1], "grid polarization");
@@ -279,13 +275,8 @@ void degrid_imaging_weights_bind(
     const bool grid_is_f64 =
         grid_imaging_weight.dtype().equal(py::dtype::of<double>());
     if (!grid_is_f32 && !grid_is_f64)
-        throw std::runtime_error(
-            "grid_imaging_weight must be float32 or float64 (no implicit "
-            "conversion is performed)");
-    if (!imaging_weight.dtype().equal(py::dtype::of<double>()))
-        throw std::runtime_error(
-            "imaging_weight must be native float64 (no implicit conversion is "
-            "performed; the array is modified in place)");
+        throw std::runtime_error(astroviper::dtype_error(grid_imaging_weight, "grid_imaging_weight", "float32 or float64"));
+    astroviper::require_dtype<double>(imaging_weight, "imaging_weight");
 
     const int n_chan_g = checked_int_dimension(grid_info.shape[0], "grid channel");
     const int n_pol_g = checked_int_dimension(grid_info.shape[1], "grid polarization");

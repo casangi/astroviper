@@ -1,3 +1,4 @@
+#include "array_dtype.hpp"
 #include <pybind11/pybind11.h>
 #include "scalar_buffer.hpp"
 #include <pybind11/numpy.h>
@@ -118,9 +119,7 @@ static void check_image(const py::buffer_info& image_info, const py::buffer_info
     require_writable(image_info, "image");
     require_writable(norm_info, "normalization");
     if (!normalization.dtype().equal(py::dtype::of<double>()))
-        throw std::runtime_error(
-            "normalization must be float64 (no implicit conversion is performed; the array is "
-            "modified in place)");
+        throw std::runtime_error(astroviper::dtype_error(normalization, "normalization", "float64"));
 }
 
 void dft_image_bind(
@@ -191,9 +190,7 @@ void dft_image_bind(
     } else if (dtype.equal(py::dtype::of<cflt>())) {
         run(cflt{});
     } else {
-        throw std::runtime_error(
-            "image must be float32, float64, complex64 or complex128 (no implicit conversion is "
-            "performed; the array is modified in place)");
+        throw std::runtime_error(astroviper::dtype_error(image, "image", "float32, float64, complex64 or complex128"));
     }
 }
 
@@ -255,9 +252,7 @@ void dft_image_uv_sampling_bind(
     } else if (dtype.equal(py::dtype::of<float>())) {
         run(float{});
     } else {
-        throw std::runtime_error(
-            "image must be float32 or float64 (no implicit conversion is performed; the array "
-            "is modified in place)");
+        throw std::runtime_error(astroviper::dtype_error(image, "image", "float32 or float64"));
     }
 }
 
@@ -307,9 +302,7 @@ void dft_predict_bind(
     const bool vis_is_c128 = vis_dtype.equal(py::dtype::of<cdbl>());
     const bool vis_is_c64 = vis_dtype.equal(py::dtype::of<cflt>());
     if (!vis_is_c128 && !vis_is_c64)
-        throw std::runtime_error(
-            "vis_data must be complex64 or complex128 (no implicit conversion is performed; the "
-            "array is modified in place)");
+        throw std::runtime_error(astroviper::dtype_error(vis_data, "vis_data", "complex64 or complex128"));
 
     const void* model_ptr = model_info.ptr;
     void* vis_ptr = vis_info.ptr;
@@ -348,9 +341,7 @@ void dft_predict_bind(
     } else if (model_dtype.equal(py::dtype::of<cflt>())) {
         dispatch_vis(cflt{});
     } else {
-        throw std::runtime_error(
-            "model must be float32, float64, complex64 or complex128 (no implicit conversion is "
-            "performed)");
+        throw std::runtime_error(astroviper::dtype_error(model, "model", "float32, float64, complex64 or complex128"));
     }
 }
 
