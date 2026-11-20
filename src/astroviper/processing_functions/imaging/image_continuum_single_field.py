@@ -4716,16 +4716,16 @@ def restore_continuum_image(
     import numpy as np
     import pandas as pd
 
-    from astroviper.processing_functions.imaging.model_update.deconvolvers.deconvolver_registry import (
-        DECONVOLVERS,
-    )
-    from astroviper.processing_functions.imaging.restore import (
+    from astroviper.processing_functions.imaging.imaging_conclude.restore import (
         NO_FIT_BEAM,
         _divide_taylor_polynomials,
         _restore_image_arrays,
         _restored_beam_variable,
         fill_planes_without_fit,
         resolve_restoration_product,
+    )
+    from astroviper.processing_functions.imaging.model_update.deconvolvers.deconvolver_registry import (
+        DECONVOLVERS,
     )
     from astroviper.utils.data_group_tools import (
         create_data_groups_in_and_out,

@@ -155,7 +155,7 @@ def calculate_visibilities(
     gaussian_source_shape : np.ndarray, [n_gaussian, 3], radians, optional
         ``[major, minor, position angle]`` FWHM shape of each Gaussian source,
         in the convention of the imaging clean beam
-        (:func:`astroviper.processing_functions.imaging.restore.elliptical_gaussian_uv_taper`).
+        (:func:`astroviper.processing_functions.imaging.imaging_conclude.restore.elliptical_gaussian_uv_taper`).
     disk_source_flux : np.ndarray, [n_disk, n_time | 1, n_frequency | 1, 4], Jy, optional
         Integrated flux of each limb-darkened disk source in the four
         instrumental correlations; singleton time/frequency axes broadcast.
@@ -198,7 +198,7 @@ def calculate_visibilities(
     multiplied by the analytic visibility of its unit-flux sky profile
     (:func:`~astroviper.processing_functions.simulation.sky_components.component_uv_response`;
     for Gaussians that is the imaging restore module's
-    :func:`~astroviper.processing_functions.imaging.restore.elliptical_gaussian_uv_taper`
+    :func:`~astroviper.processing_functions.imaging.imaging_conclude.restore.elliptical_gaussian_uv_taper`
     at ``w = 0``), so it shares the beam response, phase and kernel
     implementations of the point sources and its integrated flux equals its
     ``flux``.  All responses are evaluated at the source-frame

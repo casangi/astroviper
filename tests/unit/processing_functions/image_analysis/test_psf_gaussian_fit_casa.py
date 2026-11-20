@@ -7,7 +7,7 @@ from astroviper.processing_functions.image_analysis.psf_gaussian_fit_cpp import 
     casa_psf_fit_available,
     fit_psf_beam,
 )
-from astroviper.processing_functions.imaging.restore import (
+from astroviper.processing_functions.imaging.imaging_conclude.restore import (
     _elliptical_gaussian_kernel,
 )
 

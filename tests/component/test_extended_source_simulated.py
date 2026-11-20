@@ -94,11 +94,11 @@ from astroviper.distributed_applications.imaging import (
     image_continuum_single_field,
     image_cube_single_field,
 )
-from astroviper.processing_functions.imaging.model_update import model_update
-from astroviper.processing_functions.imaging.restore import (
+from astroviper.processing_functions.imaging.imaging_conclude.restore import (
     _clean_beam_kernel_ft,
     _convolve_with_clean_beam,
 )
+from astroviper.processing_functions.imaging.model_update import model_update
 from astroviper.processing_functions.imaging.utils.cycle_control import (
     IMAGING_THRESHOLD,
     MODEL_UPDATE_MAX_ITER_PER_CYCLE,

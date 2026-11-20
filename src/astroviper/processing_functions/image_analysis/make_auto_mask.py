@@ -228,7 +228,7 @@ def _update_plane_mask(
     stop : bool
         Do not update the mask of this plane again.
     """
-    from astroviper.processing_functions.imaging.restore import (
+    from astroviper.processing_functions.imaging.imaging_conclude.restore import (
         _elliptical_gaussian_kernel,
     )
 

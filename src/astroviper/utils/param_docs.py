@@ -118,7 +118,7 @@ def _target_files():
         "processing_functions/image_analysis/common_beam.py",
         "processing_functions/image_analysis/make_auto_mask.py",
         "processing_functions/imaging/image_cube_single_field.py",
-        "processing_functions/imaging/restore.py",
+        "processing_functions/imaging/imaging_conclude/restore.py",
         "processing_functions/imaging/imaging_setup/imaging_weighting/calculate_imaging_weights.py",
         "processing_functions/imaging/image_continuum_single_field.py",
         "processing_functions/imaging/imaging_setup/imaging_setup.py",

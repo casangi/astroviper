@@ -873,7 +873,7 @@ def _spy_on_the_loop(monkeypatch, on_record=None, on_model_update=None):
     )
     model_update = importlib.import_module(f"{imaging}.model_update.model_update")
     utils = importlib.import_module(f"{imaging}.utils")
-    restore = importlib.import_module(f"{imaging}.restore")
+    restore = importlib.import_module(f"{imaging}.imaging_conclude.restore")
     original_ru = residual_update.residual_update_cube_single_field
     original_record = utils.build_residual_imaging_dict
     original_mu = model_update.model_update_cube_single_field

@@ -13,7 +13,9 @@ rotation to the source frame).
 import numpy as np
 import pytest
 
-from astroviper.processing_functions.imaging.restore import elliptical_gaussian_uv_taper
+from astroviper.processing_functions.imaging.imaging_conclude.restore import (
+    elliptical_gaussian_uv_taper,
+)
 from astroviper.processing_functions.simulation import (
     elliptical_gaussian_uv_response,
     gaussian_ring_image,

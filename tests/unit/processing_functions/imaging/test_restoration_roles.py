@@ -9,7 +9,7 @@ from dask import delayed
 from astroviper.processing_functions.imaging.image_continuum_single_field import (
     restore_continuum_image,
 )
-from astroviper.processing_functions.imaging.restore import (
+from astroviper.processing_functions.imaging.imaging_conclude.restore import (
     resolve_restoration_product,
     restore_image,
 )

@@ -38,6 +38,10 @@ from astroviper.processing_functions.imaging.image_continuum_single_field import
     residual_update_continuum_single_field,
     restore_continuum_image,
 )
+from astroviper.processing_functions.imaging.imaging_conclude.restore import (
+    NO_FIT_BEAM,
+    _divide_taylor_polynomials,
+)
 from astroviper.processing_functions.imaging.imaging_setup.imaging_setup import (
     _convert_primary_beam_to_reference_frequency,
     _mfs_channel_imaging_weight_sums,
@@ -48,10 +52,6 @@ from astroviper.processing_functions.imaging.make_point_spread_function_continuu
 from astroviper.processing_functions.imaging.residual_cycle_continuum_single_field import (
     make_visibility_model_continuum_single_field,
     residual_cycle_continuum_single_field,
-)
-from astroviper.processing_functions.imaging.restore import (
-    NO_FIT_BEAM,
-    _divide_taylor_polynomials,
 )
 from astroviper.processing_functions.imaging.utils import Key
 from astroviper.utils.continuum_cache import MVC_LOCAL_BEAM_STATIC_VARIABLES
@@ -350,7 +350,7 @@ def test_continuum_prediction_degrids_and_accumulates_each_taylor_plane(monkeypa
 
 def test_primary_beam_correction_restores_every_taylor_term():
     """PB correction uses the model-first convention for every Taylor term."""
-    from astroviper.processing_functions.imaging.restore import (
+    from astroviper.processing_functions.imaging.imaging_conclude.restore import (
         _clean_beam_kernel_ft,
         primary_beam_corrected_plane,
     )
@@ -520,7 +520,9 @@ def test_spectral_index_error_is_finite_when_taylor_one_is_zero():
 
 def test_mfs_restoration_divides_primary_beam_taylor_polynomial_before_restore():
     """MFS restores intrinsic coefficients obtained from J(x) = A(x) I(x)."""
-    from astroviper.processing_functions.imaging.restore import _restore_image_arrays
+    from astroviper.processing_functions.imaging.imaging_conclude.restore import (
+        _restore_image_arrays,
+    )
 
     image = make_continuum_image()
     image = image.drop_dims("taylor_term").assign_coords(taylor_term=np.arange(3))
@@ -648,7 +650,9 @@ def _apply(planes, transform):
 
 
 def _target_kernel_and_transform():
-    from astroviper.processing_functions.imaging.restore import _clean_beam_kernel_ft
+    from astroviper.processing_functions.imaging.imaging_conclude.restore import (
+        _clean_beam_kernel_ft,
+    )
     from tests.unit.processing_functions.imaging.test_restore import (
         _correcting_transform,
     )
@@ -843,7 +847,9 @@ def test_mfs_target_that_does_not_contain_the_psf_beam_keeps_the_residual(
     residual; one warning names the planes."""
     import toolviper.utils.logger as logger
 
-    from astroviper.processing_functions.imaging.restore import _restore_image_arrays
+    from astroviper.processing_functions.imaging.imaging_conclude.restore import (
+        _restore_image_arrays,
+    )
 
     messages = []
     monkeypatch.setattr(logger, "warning", messages.append)

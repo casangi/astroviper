@@ -16,7 +16,7 @@ import xarray as xr
 from xradio.measurement_set import open_processing_set
 
 from astroviper.distributed_applications.imaging import image_continuum_single_field
-from astroviper.processing_functions.imaging.restore import (
+from astroviper.processing_functions.imaging.imaging_conclude.restore import (
     _divide_taylor_polynomials,
     _elliptical_gaussian_kernel,
 )

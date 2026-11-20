@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from astroviper.processing_functions.imaging.correct_sky_by_primary_beam import (
+from astroviper.processing_functions.imaging.imaging_conclude.primary_beam_correction import (
     correct_sky_by_primary_beam,
 )
 
@@ -75,7 +75,9 @@ def _add_model_and_residual(img_xds, flux=2.0, source=(20, 8)):
 
 
 def test_exact_for_a_point_source():
-    from astroviper.processing_functions.imaging.restore import restore_image
+    from astroviper.processing_functions.imaging.imaging_conclude.restore import (
+        restore_image,
+    )
 
     img_xds = _add_model_and_residual(_make_restored_image())
     primary_beam = img_xds["PRIMARY_BEAM"].values

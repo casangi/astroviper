@@ -18,7 +18,7 @@ from astroviper.processing_functions.image_analysis.make_auto_mask import (
     _smooth_and_cut,
     make_auto_mask,
 )
-from astroviper.processing_functions.imaging.restore import (
+from astroviper.processing_functions.imaging.imaging_conclude.restore import (
     _elliptical_gaussian_kernel,
 )
 

@@ -58,7 +58,7 @@ SIMULATION_PARAM_DOCS = {
     "gaussian_source_shape": (
         "``[major, minor, position angle]`` FWHM shape of each Gaussian source, in\n"
         "the imaging clean-beam convention\n"
-        "(:func:`astroviper.processing_functions.imaging.restore.elliptical_gaussian_uv_taper`)."
+        "(:func:`astroviper.processing_functions.imaging.imaging_conclude.restore.elliptical_gaussian_uv_taper`)."
     ),
     "disk_source_flux": (
         "Integrated flux of each limb-darkened disk source in the four\n"

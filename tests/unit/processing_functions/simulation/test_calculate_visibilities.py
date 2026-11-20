@@ -591,7 +591,7 @@ class TestGaussianSources:
         # visibilities of the same sky position recovers it; at w = 0 that
         # response is exactly the imaging restore module's taper (the single
         # source of truth for the Gaussian parametrisation).
-        from astroviper.processing_functions.imaging.restore import (
+        from astroviper.processing_functions.imaging.imaging_conclude.restore import (
             elliptical_gaussian_uv_taper,
         )
         from astroviper.processing_functions.simulation.calculate_visibilities import (

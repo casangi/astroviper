@@ -1317,7 +1317,9 @@ def test_coral_cleans_a_faint_source_by_its_significance_with_a_clean_mask():
 
 
 def test_restoration_reports_incomplete_backend_result(monkeypatch):
-    module = importlib.import_module("astroviper.processing_functions.imaging.restore")
+    module = importlib.import_module(
+        "astroviper.processing_functions.imaging.imaging_conclude.restore"
+    )
 
     def broken_restore(*args, **kwargs):
         return {}, {"apparent": 0.0, "primary_beam_corrected": 0.0}

@@ -1,4 +1,4 @@
-"""Unit tests for :mod:`astroviper.processing_functions.imaging.restore`.
+"""Unit tests for :mod:`astroviper.processing_functions.imaging.imaging_conclude.restore`.
 
 The tests build synthetic image datasets (no downloaded data) and check that
 ``restore_image``:
@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from astroviper.processing_functions.imaging.restore import (
+from astroviper.processing_functions.imaging.imaging_conclude.restore import (
     _clean_beam_kernel_ft,
     _convolve_with_clean_beam,
     _elliptical_gaussian_kernel,
@@ -344,7 +344,7 @@ class TestEllipticalGaussianUvTaper:
     """The analytic uv taper is the Fourier transform of the image-plane kernel."""
 
     def test_matches_fft_of_kernel(self):
-        from astroviper.processing_functions.imaging.restore import (
+        from astroviper.processing_functions.imaging.imaging_conclude.restore import (
             elliptical_gaussian_uv_taper,
         )
 
@@ -361,7 +361,7 @@ class TestEllipticalGaussianUvTaper:
         np.testing.assert_allclose(kernel_ft, taper, atol=1e-8)
 
     def test_unit_at_origin_and_even(self):
-        from astroviper.processing_functions.imaging.restore import (
+        from astroviper.processing_functions.imaging.imaging_conclude.restore import (
             elliptical_gaussian_uv_taper,
         )
 
@@ -1059,7 +1059,7 @@ def test_target_equal_within_the_tolerance_scales_the_residual(
     """D is zero after clipping: H is the area ratio, applied without a
     transform, to the residual and to the residual divided by the primary
     beam."""
-    import astroviper.processing_functions.imaging.restore as restore
+    import astroviper.processing_functions.imaging.imaging_conclude.restore as restore
 
     def no_transform(*args):
         raise AssertionError("the correcting transform was evaluated")
@@ -1171,7 +1171,7 @@ def test_planes_without_a_fit_take_the_tclean_beam():
     """With no fit in any plane the given beam, tclean's circle of 1e-6 arcsec
     at 0 degrees, else the beams as they are; the beams themselves when every
     plane has a fit."""
-    from astroviper.processing_functions.imaging.restore import (
+    from astroviper.processing_functions.imaging.imaging_conclude.restore import (
         NO_FIT_BEAM,
         fill_planes_without_fit,
     )

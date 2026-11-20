@@ -446,8 +446,8 @@ def test_the_psf_is_freed_before_the_restore(monkeypatch):
     import gc
     import weakref
 
+    import astroviper.processing_functions.imaging.imaging_conclude.restore as restore
     import astroviper.processing_functions.imaging.imaging_setup.make_point_spread_function as mpsf
-    import astroviper.processing_functions.imaging.restore as restore
 
     made, alive = [], []
     original_make = mpsf.make_subtraction_point_spread_function_single_field

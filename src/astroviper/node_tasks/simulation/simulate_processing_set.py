@@ -101,7 +101,7 @@ def simulate_processing_set(
     gaussian_source_shape : np.ndarray, [n_gaussian, 3], radians, optional
         ``[major, minor, position angle]`` FWHM shape of each Gaussian source, in
         the imaging clean-beam convention
-        (:func:`astroviper.processing_functions.imaging.restore.elliptical_gaussian_uv_taper`).
+        (:func:`astroviper.processing_functions.imaging.imaging_conclude.restore.elliptical_gaussian_uv_taper`).
     disk_source_flux : np.ndarray, [n_disk, n_time | 1, n_frequency | 1, 4], Jy, optional
         Integrated flux of each limb-darkened disk source in the four
         instrumental correlations; singleton time/frequency axes broadcast.

@@ -123,7 +123,7 @@ via the cycle control functions on `cycle_control_state`:
   `imaging_dict`. The loop ends only at the stop test, so the last residual
   update produces the written residual image.
 - When `restore=True` (off by default), a final `restore_image(...)` step
-  (`processing_functions/imaging/restore.py`) convolves the model with the clean
+  (`processing_functions/imaging/imaging_conclude/restore.py`) convolves the model with the clean
   beam (the per-frequency Gaussian fit to the PSF, in the `residual` data group)
   and adds the residual, writing `SKY_RESTORED`. The distributed application auto-adds
   `"sky_restored"` to `image_data_variables_keep` so it is created/written.
@@ -152,7 +152,7 @@ via the cycle control functions on `cycle_control_state`:
 - Polarization: `image_analysis/transform_polarization_basis.py`
   (stokes ↔ linear).
 - PSF fit: `image_analysis/point_spread_function_gaussian_fit.py`.
-- Restore: `restore.py` (`restore_image`) — clean-beam-convolved model plus
+- Restore: `imaging_conclude/restore.py` (`restore_image`) — clean-beam-convolved model plus
   residual (FFT convolution, clean beam built from the residual group's
   `beam_fit_params_point_spread_function`).
 - Deconvolvers: `model_update/deconvolve.py` dispatch → `model_update/deconvolvers/hogbom` (C++),

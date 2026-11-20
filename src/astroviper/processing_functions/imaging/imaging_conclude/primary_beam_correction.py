@@ -32,7 +32,7 @@ def correct_sky_by_primary_beam(
     ``impbcor`` blank below ``pblimit``); there the correction amplifies noise
     without bound.
 
-    :func:`~astroviper.processing_functions.imaging.restore.restore_image`
+    :func:`~astroviper.processing_functions.imaging.imaging_conclude.restore.restore_image`
     makes the same corrected image in its own pass when asked to, which is
     what the imaging cycle uses; this function serves an image that has been
     restored already.
@@ -81,8 +81,8 @@ def correct_sky_by_primary_beam(
     See Also
     --------
     astroviper.processing_functions.imaging.primary_beam.make_primary_beam.make_primary_beam_single_field
-    astroviper.processing_functions.imaging.restore.restore_image
-    astroviper.processing_functions.imaging.restore.primary_beam_corrected_plane
+    astroviper.processing_functions.imaging.imaging_conclude.restore.restore_image
+    astroviper.processing_functions.imaging.imaging_conclude.restore.primary_beam_corrected_plane
     """
     import time
 
@@ -90,7 +90,7 @@ def correct_sky_by_primary_beam(
     import pandas as pd
     import xarray as xr
 
-    from astroviper.processing_functions.imaging.restore import (
+    from astroviper.processing_functions.imaging.imaging_conclude.restore import (
         _clean_beam_kernel_ft,
         primary_beam_corrected_plane,
     )

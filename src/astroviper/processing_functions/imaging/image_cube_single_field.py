@@ -1407,7 +1407,9 @@ def image_cube_single_field(
     # blanking cutoff when set, else the CASA pblimit default of 0.2.
     timing["T_correct_sky_by_primary_beam"] = 0.0
     if restore:
-        from astroviper.processing_functions.imaging.restore import restore_image
+        from astroviper.processing_functions.imaging.imaging_conclude.restore import (
+            restore_image,
+        )
 
         img_xds, restore_return_df = restore_image(
             img_xds,

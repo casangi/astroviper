@@ -251,7 +251,11 @@ PHASES = [
         "model_update_cube_single_field",
         3.0,
     ),
-    ("astroviper.processing_functions.imaging.restore", "restore_image", 7.5),
+    (
+        "astroviper.processing_functions.imaging.imaging_conclude.restore",
+        "restore_image",
+        7.5,
+    ),
     (
         "astroviper.processing_functions.image_analysis.plane_statistics",
         "calculate_plane_statistics",

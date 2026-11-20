@@ -101,7 +101,7 @@ from xradio.measurement_set import load_processing_set, open_processing_set
 
 import astroviper.distributed_applications as distributed_applications
 from astroviper.distributed_applications.imaging import image_cube_single_field
-from astroviper.processing_functions.imaging.restore import (
+from astroviper.processing_functions.imaging.imaging_conclude.restore import (
     _elliptical_gaussian_kernel,
 )
 from astroviper.processing_functions.imaging.utils.cycle_control import (
