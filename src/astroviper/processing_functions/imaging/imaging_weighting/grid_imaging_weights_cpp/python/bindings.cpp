@@ -3,6 +3,7 @@
 #include <pybind11/numpy.h>
 #include <cstdint>
 #include <limits>
+#include <initializer_list>
 #include <stdexcept>
 #include "../include/grid_imaging_weights.hpp"
 
@@ -42,6 +43,39 @@ static int checked_int_dimension(py::ssize_t dimension, const char* name) {
         throw std::overflow_error(
             std::string(name) + " dimension exceeds the kernel int range");
     return static_cast<int>(dimension);
+}
+
+// Cross-array contracts must be checked before releasing the GIL or writing
+// either accumulator. Map validation uses byte-safe scalar reads so spilled,
+// unaligned inputs retain their zero-copy support.
+static void require_shape(const py::buffer_info& info,
+                          std::initializer_list<py::ssize_t> expected,
+                          const char* name) {
+    bool matches = info.shape.size() == expected.size();
+    std::size_t axis = 0;
+    for (const auto dimension : expected) {
+        if (axis >= info.shape.size() || info.shape[axis] != dimension) matches = false;
+        ++axis;
+    }
+    if (matches) return;
+    std::string message = std::string(name) + " must have shape (";
+    axis = 0;
+    for (const auto dimension : expected) {
+        if (axis++) message += ", ";
+        message += std::to_string(dimension);
+    }
+    throw std::runtime_error(message + ")");
+}
+
+static void require_map_indices(const py::array_t<int64_t, py::array::c_style>& map,
+                                py::ssize_t limit, const char* name) {
+    const astroviper::ScalarBuffer<const int64_t, false> values(map.data());
+    for (py::ssize_t i = 0; i < map.shape(0); ++i) {
+        const int64_t value = values[i];
+        if (value < 0 || value >= limit)
+            throw std::runtime_error(std::string(name) + " entry " + std::to_string(value) +
+                                     " is outside [0, " + std::to_string(limit) + ")");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -85,6 +119,11 @@ void grid_imaging_weights_bind(
         throw std::runtime_error(
             "data_weights must be 4-D (n_time, n_baseline, n_vis_chan, n_pol)");
 
+    if (frequency_coord.ndim() != 1)
+        throw std::runtime_error("frequency_coord must be 1-D (n_vis_chan,)");
+    if (chan_map.ndim() != 1)
+        throw std::runtime_error("chan_map must be 1-D (n_vis_chan,)");
+
     require_c_contiguous(grid_info, "grid");
     require_c_contiguous(sum_info,  "sum_weight");
     require_c_contiguous(uvw_info,  "uvw");
@@ -123,9 +162,19 @@ void grid_imaging_weights_bind(
     const int n_baseline = checked_int_dimension(
         uvw_info.shape[1], "uvw baseline");
     const int n_vis_chan = checked_int_dimension(
-        chan_map.shape(0), "visibility channel");
+        wt_info.shape[2], "visibility channel");
     const int n_pol = checked_int_dimension(
         wt_info.shape[3], "data-weight polarization");
+
+    require_shape(frequency_coord.request(), {n_vis_chan}, "frequency_coord");
+    require_shape(chan_map.request(), {n_vis_chan}, "chan_map");
+    require_shape(wt_info, {n_time, n_baseline, n_vis_chan, n_pol}, "data_weights");
+    require_shape(sum_info, {n_chan_g, n_pol_g}, "sum_weight");
+    if (n_pol == 0)
+        throw std::runtime_error("data_weights must have at least one polarization");
+    if (n_pol_g == 0)
+        throw std::runtime_error("grid must have at least one polarization");
+    require_map_indices(chan_map, n_chan_g, "chan_map");
 
     (void)n_uv;  // grid dimensions are taken from the grid array itself
 
@@ -202,6 +251,13 @@ void degrid_imaging_weights_bind(
         throw std::runtime_error(
             "data_weight must be 4-D (n_time, n_baseline, n_vis_chan, n_pol)");
 
+    if (frequency_coord.ndim() != 1)
+        throw std::runtime_error("frequency_coord must be 1-D (n_vis_chan,)");
+    if (chan_map.ndim() != 1)
+        throw std::runtime_error("chan_map must be 1-D (n_vis_chan,)");
+    if (pol_map.ndim() != 1)
+        throw std::runtime_error("pol_map must be 1-D (n_pol_out,)");
+
     require_c_contiguous(out_info,    "imaging_weight");
     require_c_contiguous(grid_info,   "grid_imaging_weight");
     require_c_contiguous(briggs_info, "briggs_factors");
@@ -240,11 +296,23 @@ void degrid_imaging_weights_bind(
     const int n_baseline = checked_int_dimension(
         uvw_info.shape[1], "uvw baseline");
     const int n_vis_chan = checked_int_dimension(
-        chan_map.shape(0), "visibility channel");
+        wt_info.shape[2], "visibility channel");
     const int n_pol = checked_int_dimension(
         wt_info.shape[3], "data-weight polarization");
     const int n_pol_out = checked_int_dimension(
         pol_map.shape(0), "output polarization");
+
+    require_shape(frequency_coord.request(), {n_vis_chan}, "frequency_coord");
+    require_shape(chan_map.request(), {n_vis_chan}, "chan_map");
+    require_shape(wt_info, {n_time, n_baseline, n_vis_chan, n_pol}, "data_weight");
+    require_shape(out_info, {n_time, n_baseline, n_vis_chan, n_pol}, "imaging_weight");
+    require_shape(briggs_info, {2, n_chan_g, n_pol_g}, "briggs_factors");
+    // A prefix of the data polarizations may be reweighted, but the kernel
+    // uses the complete data/output shape for its channel and baseline strides.
+    if (n_pol_out > n_pol)
+        throw std::runtime_error("pol_map length must not exceed data_weight polarization count");
+    require_map_indices(chan_map, n_chan_g, "chan_map");
+    require_map_indices(pol_map, n_pol_g, "pol_map");
 
     (void)n_uv;  // grid dimensions are taken from the grid array itself
 
