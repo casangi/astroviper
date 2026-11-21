@@ -13,8 +13,8 @@ import numpy as np
 import scipy.optimize
 import scipy.special
 
-from astroviper.processing_functions.image_analysis.make_auto_mask import (
-    _chauvenet_sample,
+from astroviper.processing_functions.image_analysis.statistics.chauvenet import (
+    chauvenet_sample,
 )
 
 # The divisor of findContinuum's scaled median absolute deviation (fC 8591).
@@ -139,7 +139,7 @@ def chauvenet_statistics(values: np.ndarray) -> tuple[float, float, float]:
     standard_deviation : float
         With ``ddof=1``; 0.0 for one kept value.
     """
-    sample = _chauvenet_sample(np.asarray(values, dtype=np.float64))
+    sample = chauvenet_sample(np.asarray(values, dtype=np.float64))
     median = np.median(sample)
     return (
         float(median),

@@ -28,9 +28,9 @@ from astroviper.node_tasks.imaging.find_continuum import (
     small_image_attributes,
     write_small_image,
 )
-from astroviper.processing_functions.image_analysis.make_auto_mask import (
-    _chauvenet_sample,
-    _prune,
+from astroviper.processing_functions.image_analysis.make_auto_mask import _prune
+from astroviper.processing_functions.image_analysis.statistics.chauvenet import (
+    chauvenet_sample,
 )
 from astroviper.processing_functions.imaging.find_continuum import (
     CASA_MOMENTS,
@@ -479,7 +479,7 @@ def _image_statistics(imagename, per_channel, box, chans, mask, algorithm, maxit
         return {key: np.array([], dtype=np.float64) for key in CHANNEL_STATISTICS}
     sample = values[valid]
     if algorithm == "chauvenet":
-        sample = _chauvenet_sample(sample)
+        sample = chauvenet_sample(sample)
 
     def positions():
         masked = np.where(valid, values, np.nan)

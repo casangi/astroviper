@@ -15,8 +15,8 @@ import re
 
 import numpy as np
 
-from astroviper.processing_functions.image_analysis.make_auto_mask import (
-    _chauvenet_sample,
+from astroviper.processing_functions.image_analysis.statistics.chauvenet import (
+    chauvenet_sample,
 )
 
 SPEED_OF_LIGHT_KM_S = 299792.458
@@ -335,7 +335,7 @@ def image_statistics(values, algorithm="classic", maxiter=-1):
     if algorithm == "chauvenet":
         if maxiter != 5:
             raise ValueError("Only maxiter=5 is supported with algorithm='chauvenet'")
-        values = _chauvenet_sample(values)
+        values = chauvenet_sample(values)
     elif algorithm != "classic":
         raise ValueError(f"imstat algorithm {algorithm!r} is not supported")
     return channel_statistics(values)

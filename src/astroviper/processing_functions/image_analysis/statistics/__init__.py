@@ -1,10 +1,14 @@
 """Public processing-function API for mergeable image statistics.
 
-These functions accept already selected, loaded xarray objects. They do not
-parse CASA syntax, access storage, or construct GraphVIPER workflows; those
-responsibilities belong to the node-task and distributed-application layers.
+These functions accept already selected, loaded xarray objects, and
+:func:`chauvenet_sample` a NumPy sample. They do not parse CASA syntax, access
+storage, or construct GraphVIPER workflows; those responsibilities belong to
+the node-task and distributed-application layers.
 """
 
+from astroviper.processing_functions.image_analysis.statistics.chauvenet import (
+    chauvenet_sample,
+)
 from astroviper.processing_functions.image_analysis.statistics.reductions import (
     DEFAULT_STATISTICS,
     STATISTIC_FUNCTIONS,
@@ -29,6 +33,7 @@ from astroviper.processing_functions.image_analysis.statistics.reductions import
 __all__ = [
     "DEFAULT_STATISTICS",
     "STATISTIC_FUNCTIONS",
+    "chauvenet_sample",
     "create_statistics_state",
     "finalize_statistics_state",
     "merge_statistics_states",

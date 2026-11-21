@@ -10,6 +10,9 @@ from astroviper.processing_functions.imaging.config_check import (
     check_model_update,
     check_residual_update,
 )
+from astroviper.processing_functions.imaging.config_check._predicates import (
+    check_annulus_limits,
+)
 from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (
     check_delphi_parameters,
 )
@@ -91,3 +94,29 @@ def test_taylor_count_accepts_original_integer_scalars(checker, value):
     params = {"n_taylor_terms": value}
     checker({"image_params": params}, mode=CONTINUUM_SINGLE_FIELD)
     assert params["n_taylor_terms"] is value
+
+
+@pytest.mark.parametrize(
+    "value",
+    [(0.0, 1.0), (0.25, 0.25), [0, 1], np.array([0.2, 0.3], dtype=np.float32)],
+)
+def test_annulus_limits_accept_ordered_levels_of_the_unit_interval(value):
+    check_annulus_limits(value)
+
+
+@pytest.mark.parametrize(
+    ("value", "error"),
+    [
+        ((0.3, 0.2), ValueError),
+        ((-0.1, 0.5), ValueError),
+        ((0.5, 1.1), ValueError),
+        ((0.2, np.inf), ValueError),
+        ((0.2,), ValueError),
+        (0.2, ValueError),
+        (("0.2", "0.3"), TypeError),
+        ((True, True), TypeError),
+    ],
+)
+def test_annulus_limits_reject_malformed_values(value, error):
+    with pytest.raises(error, match="annulus_limits"):
+        check_annulus_limits(value)

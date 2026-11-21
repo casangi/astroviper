@@ -33,6 +33,26 @@ def check_primary_beam_limit(value):
         raise ValueError("primary_beam_limit must lie in [0, 1].")
 
 
+def check_annulus_limits(value, *, name="annulus_limits"):
+    """Require primary beam levels ``(lower, upper)`` with ``0 <= lower <= upper <= 1``.
+
+    Equal levels are accepted: the pipeline's rule for the levels gives them
+    for images of fewer than 20 pixels along ``m``.
+
+    Parameters
+    ----------
+    value : sequence of float
+        Two finite real levels.
+    name : str, optional
+        Parameter label included in errors.
+    """
+    limits = require_finite_real(name, value)
+    if limits.shape != (2,):
+        raise ValueError(f"{name} must hold two levels (lower, upper).")
+    if not 0 <= limits[0] <= limits[1] <= 1:
+        raise ValueError(f"{name} must satisfy 0 <= lower <= upper <= 1.")
+
+
 def check_briggs_robust(value):
     """Require a finite scalar Briggs robustness within the supported [-2, 2].
 

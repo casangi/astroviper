@@ -13,6 +13,9 @@ line): the per-function ``name : type`` line -- which encodes the type and
 whether the parameter is optional -- is preserved by the codegen, so the same
 description can be shared by functions that give the parameter different
 defaults.
+
+A key ``"<function name>.<parameter name>"`` gives the decorated functions of
+that name their own description of the parameter, in place of the shared one.
 """
 
 IMAGE_ANALYSIS_PARAM_DOCS = {
@@ -65,6 +68,14 @@ IMAGE_ANALYSIS_PARAM_DOCS = {
         'Key in the image\'s ``data_groups`` whose ``"sky"`` (and, optionally,\n'
         '``"mask"``) roles name the input data variables.  Datasets without\n'
         'data groups fall back to the conventional ``"SKY"`` variable.'
+    ),
+    "primary_beam_annulus_limits.image_data_group_in_name": (
+        'Data group whose ``"primary_beam"`` role names the primary beam.'
+    ),
+    "calculate_primary_beam_annulus_statistics.image_data_group_in_name": (
+        'Data group whose ``"sky"`` and ``"primary_beam"`` roles name the image\n'
+        'and its primary beam, and whose optional ``"mask"`` role names the\n'
+        "clean mask (``True`` inside), not a primary beam mask."
     ),
     "image_data_group_in_role": (
         "Role of ``image_data_group_in_name`` whose data variable is collapsed,\n"
