@@ -35,6 +35,7 @@ here serve both inputs.
 
 from __future__ import annotations
 
+import base64
 import errno
 import json
 import os
@@ -101,17 +102,63 @@ def _np_dtype(meta_dtype):
     return np.dtype(meta_dtype)
 
 
+def _decode_float_fill_value(fill):
+    """Decode one JSON float, including Zarr v3 big-endian IEEE hex bits."""
+    if isinstance(fill, str) and fill.startswith("0x"):
+        formats = {4: ">e", 8: ">f", 16: ">d"}
+        fmt = formats.get(len(fill) - 2)
+        if fmt is None:
+            raise ValueError(
+                f"Invalid hexadecimal float fill {fill!r}: expected 4, 8 or 16 hex digits."
+            )
+        return struct.unpack(fmt, bytes.fromhex(fill[2:]))[0]
+    return float(fill)
+
+
+def _decode_fill_value(fill, dtype, *, zarr_format):
+    """Decode JSON numeric/v2 byte fills to a scalar, without array copies."""
+    if fill is None:
+        return None
+    if zarr_format == 2 and dtype.kind in "SV":
+        return dtype.type(base64.b64decode(fill, validate=True))
+    if dtype.kind == "c" and isinstance(fill, (list, tuple)):
+        # Decode each component independently, preserving NaNs, infinities and
+        # signed zeros without complex arithmetic or data-sized temporaries.
+        fill = complex(
+            _decode_float_fill_value(fill[0]), _decode_float_fill_value(fill[1])
+        )
+    elif dtype.kind == "f":
+        fill = _decode_float_fill_value(fill)
+    return dtype.type(fill) if dtype.kind in "biufc" else fill
+
+
+def _check_v3_codec_endianness(codecs, array_path):
+    """Reject unsupported big-endian data and shard-index bytes before I/O."""
+    for codec in codecs:
+        config = codec.get("configuration", {})
+        if codec["name"] == "bytes" and config.get("endian") == "big":
+            raise NotImplementedError(
+                f"Big-endian Zarr v3 bytes codecs are not supported by the "
+                f"chunk I/O engine: {array_path}. Use a little-endian store."
+            )
+        if codec["name"] == "sharding_indexed":
+            _check_v3_codec_endianness(config.get("codecs", []), array_path)
+            _check_v3_codec_endianness(config.get("index_codecs", []), array_path)
+
+
 def _read_array_meta(array_path):
     """Read just one array's Zarr metadata (no data, no group/tree open).
 
     Supports Zarr v3 (``zarr.json``, optionally ``sharding_indexed``) and v2
     (``.zarray`` + ``.zattrs``). Returns a small plain dict.
+    Big-endian v3 data/index codecs raise ``NotImplementedError`` before I/O.
     """
     v3_path = os.path.join(array_path, "zarr.json")
     if os.path.exists(v3_path):
         with open(v3_path) as fh:
             m = json.load(fh)
         codecs = m["codecs"]
+        _check_v3_codec_endianness(codecs, array_path)
         sharding = next((c for c in codecs if c["name"] == "sharding_indexed"), None)
         key = m.get("chunk_key_encoding", {}).get("configuration", {})
         return {
@@ -123,7 +170,9 @@ def _read_array_meta(array_path):
             "sep": key.get("separator", "/"),
             "codecs": codecs,
             "sharding": sharding["configuration"] if sharding else None,
-            "fill_value": m.get("fill_value"),
+            "fill_value": _decode_fill_value(
+                m.get("fill_value"), _np_dtype(m["data_type"]), zarr_format=3
+            ),
             "bool_encoded": m.get("attributes", {}).get("dtype") == "bool",
         }
 
@@ -143,7 +192,9 @@ def _read_array_meta(array_path):
         "compressor": m.get("compressor"),
         "filters": m.get("filters"),
         "order": m.get("order", "C"),
-        "fill_value": m.get("fill_value"),
+        "fill_value": _decode_fill_value(
+            m.get("fill_value"), np.dtype(m["dtype"]), zarr_format=2
+        ),
         "bool_encoded": attrs.get("dtype") == "bool",
     }
 
@@ -405,7 +456,7 @@ def read_array_region(
         if out is not None and not relative_indices
         else np.empty(bounds, dtype=values_dtype)
     )
-    fill = meta["fill_value"] if meta["fill_value"] is not None else 0
+    fill = _fill_value(meta)
 
     sharding = meta["sharding"]
     unit_shape = tuple(sharding["chunk_shape"]) if sharding else oc
@@ -982,11 +1033,20 @@ def _encode_chunk_blob(chunk, meta):
 
 
 def _fill_value(meta):
-    """The fill value used to pad partial (array-edge) chunks before encoding."""
+    """Return the explicit fill or a dtype-specific compatibility default.
+
+    Zarr v2 leaves missing data with a null fill undefined. Match zarr-python's
+    deterministic defaults for reads, skipped chunks and edge padding: zero
+    (including raw bytes), empty strings, or NaT for datetimes/timedeltas.
+    Only a scalar is allocated; explicit fills are returned unchanged.
+    """
     fill = meta["fill_value"]
-    if fill is None or (isinstance(fill, float) and np.isnan(fill)):
-        fill = np.nan if meta["dtype"].kind in "fc" else 0
-    return fill
+    if fill is not None:
+        return fill
+    dtype = meta["dtype"]
+    if dtype.kind in "Mm":
+        return np.full((), "NaT", dtype=dtype)[()]
+    return np.zeros((), dtype=dtype)[()]
 
 
 def _task_chunk_grid(dims, shape, chunk_shape, task_coords, array_path):
