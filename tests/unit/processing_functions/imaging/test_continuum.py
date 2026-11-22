@@ -1155,6 +1155,73 @@ def test_mvc_grid_accumulates_child_into_full_image_frequency_axis(
     assert np.all(image.VISIBILITY_NORMALIZATION.values[:, [0, 2], ...] == 0.0)
 
 
+@pytest.mark.parametrize("grid_dtype", [np.complex64, np.complex128])
+def test_mvc_grid_preserves_frequency_boundaries_across_children(grid_dtype):
+    """Allocating the first child's grids must retain the full-axis context."""
+    import xradio.image.image_xds  # noqa: F401
+
+    full_axis = 4107516045.6904545 + np.arange(8) * 533950857.6451702
+    observed = 3972559200.5708504 + np.arange(16) * 8001126.285138
+    shape = (1, 1, observed.size, 1)
+    child = xr.Dataset(
+        {
+            "VISIBILITY": (
+                ("time", "baseline", "frequency", "polarization"),
+                np.ones(shape, dtype=np.complex128),
+            ),
+            "WEIGHT_IMAGING": (
+                ("time", "baseline", "frequency", "polarization"),
+                np.ones(shape),
+            ),
+            "UVW": (("time", "baseline", "uvw_label"), np.zeros((1, 1, 3))),
+        },
+        coords={"frequency": observed},
+        attrs={
+            "data_groups": {
+                "base": {
+                    "correlated_data": "VISIBILITY",
+                    "weight_imaging": "WEIGHT_IMAGING",
+                    "uvw": "UVW",
+                }
+            }
+        },
+    )
+    image = xr.Dataset(
+        coords={
+            "time": [0.0],
+            "frequency": full_axis[:1],
+            "polarization": ["I"],
+            "l": np.arange(16) * 1e-5,
+            "m": np.arange(16) * 1e-5,
+        },
+        attrs={"type": "image_dataset", "data_groups": {"residual": {}}},
+    )
+    frequency_attrs = {
+        "full_image_frequencies": full_axis.tolist(),
+        "units": "Hz",
+        "observer": "lsrk",
+    }
+    image.frequency.attrs.update(frequency_attrs)
+    kernel = make_gridding_kernel({"type": "prolate_spheroidal_casa"}, 1.2)
+    add_visibility_grid_mvc_single_field(child, kernel, image, complex_dtype=grid_dtype)
+    assert image.frequency.attrs == frequency_attrs
+    first_grid = image.VISIBILITY.values.copy()
+    first_sum = image.VISIBILITY_NORMALIZATION.values.copy()
+    assert np.any(first_grid != 0)
+    grid_pointer = image.VISIBILITY.values.ctypes.data
+    sum_pointer = image.VISIBILITY_NORMALIZATION.values.ctypes.data
+    add_visibility_grid_mvc_single_field(child, kernel, image, complex_dtype=grid_dtype)
+    assert image.frequency.attrs == frequency_attrs
+    assert image.VISIBILITY.values.ctypes.data == grid_pointer
+    assert image.VISIBILITY_NORMALIZATION.values.ctypes.data == sum_pointer
+    np.testing.assert_allclose(
+        image.VISIBILITY.values, 2 * first_grid, rtol=1e-6, atol=1e-9
+    )
+    np.testing.assert_allclose(
+        image.VISIBILITY_NORMALIZATION.values, 2 * first_sum, rtol=1e-12
+    )
+
+
 def test_mfs_grid_accumulates_normalization_across_processing_children(monkeypatch):
     """Repeated MFS child grids retain every child's normalization sum."""
     import xradio.image.image_xds  # noqa: F401

@@ -1,4 +1,6 @@
+#include "array_dtype.hpp"
 #include <pybind11/pybind11.h>
+#include "scalar_buffer.hpp"
 #include <pybind11/numpy.h>
 #include <algorithm>
 #include <cmath>
@@ -41,8 +43,8 @@ static void require_map(const py::array_t<int64_t, py::array::c_style>& map, py:
                                  "index along its axis (" + std::to_string(length) + ")");
     const int64_t* values = map.data();
     for (py::ssize_t i = 0; i < length; ++i) {
-        if (values[i] < 0 || values[i] >= limit)
-            throw std::runtime_error(std::string(name) + " entry " + std::to_string(values[i]) +
+        if (astroviper::scalar_load(values, i) < 0 || astroviper::scalar_load(values, i) >= limit)
+            throw std::runtime_error(std::string(name) + " entry " + std::to_string(astroviper::scalar_load(values, i)) +
                                      " is outside the image axis of length " +
                                      std::to_string(limit));
     }
@@ -60,12 +62,12 @@ static void require_direction_cosines(const py::array_t<double, py::array::c_sty
                                  ")");
     double l2_max = 0.0, m2_max = 0.0;
     for (py::ssize_t i = 0; i < n_l; ++i) {
-        const double value = l.data()[i];
+        const double value = astroviper::scalar_load(l.data(), i);
         if (!std::isfinite(value)) throw std::runtime_error("l must be finite");
         l2_max = std::max(l2_max, value * value);
     }
     for (py::ssize_t j = 0; j < n_m; ++j) {
-        const double value = m.data()[j];
+        const double value = astroviper::scalar_load(m.data(), j);
         if (!std::isfinite(value)) throw std::runtime_error("m must be finite");
         m2_max = std::max(m2_max, value * value);
     }
@@ -117,9 +119,7 @@ static void check_image(const py::buffer_info& image_info, const py::buffer_info
     require_writable(image_info, "image");
     require_writable(norm_info, "normalization");
     if (!normalization.dtype().equal(py::dtype::of<double>()))
-        throw std::runtime_error(
-            "normalization must be float64 (no implicit conversion is performed; the array is "
-            "modified in place)");
+        throw std::runtime_error(astroviper::dtype_error(normalization, "normalization", "float64"));
 }
 
 void dft_image_bind(
@@ -190,9 +190,7 @@ void dft_image_bind(
     } else if (dtype.equal(py::dtype::of<cflt>())) {
         run(cflt{});
     } else {
-        throw std::runtime_error(
-            "image must be float32, float64, complex64 or complex128 (no implicit conversion is "
-            "performed; the array is modified in place)");
+        throw std::runtime_error(astroviper::dtype_error(image, "image", "float32, float64, complex64 or complex128"));
     }
 }
 
@@ -254,9 +252,7 @@ void dft_image_uv_sampling_bind(
     } else if (dtype.equal(py::dtype::of<float>())) {
         run(float{});
     } else {
-        throw std::runtime_error(
-            "image must be float32 or float64 (no implicit conversion is performed; the array "
-            "is modified in place)");
+        throw std::runtime_error(astroviper::dtype_error(image, "image", "float32 or float64"));
     }
 }
 
@@ -306,9 +302,7 @@ void dft_predict_bind(
     const bool vis_is_c128 = vis_dtype.equal(py::dtype::of<cdbl>());
     const bool vis_is_c64 = vis_dtype.equal(py::dtype::of<cflt>());
     if (!vis_is_c128 && !vis_is_c64)
-        throw std::runtime_error(
-            "vis_data must be complex64 or complex128 (no implicit conversion is performed; the "
-            "array is modified in place)");
+        throw std::runtime_error(astroviper::dtype_error(vis_data, "vis_data", "complex64 or complex128"));
 
     const void* model_ptr = model_info.ptr;
     void* vis_ptr = vis_info.ptr;
@@ -347,9 +341,7 @@ void dft_predict_bind(
     } else if (model_dtype.equal(py::dtype::of<cflt>())) {
         dispatch_vis(cflt{});
     } else {
-        throw std::runtime_error(
-            "model must be float32, float64, complex64 or complex128 (no implicit conversion is "
-            "performed)");
+        throw std::runtime_error(astroviper::dtype_error(model, "model", "float32, float64, complex64 or complex128"));
     }
 }
 

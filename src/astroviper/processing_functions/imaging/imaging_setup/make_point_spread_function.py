@@ -741,6 +741,7 @@ def make_subtraction_point_spread_function_single_field(
         time_coords=image_params["time_coords"],
         do_sky_coords=False,
     )
+    psf_xds.frequency.attrs.update(img_xds.frequency.attrs)
     psf_xds.attrs["type"] = "image_dataset"
     psf_xds = psf_xds.xr_img.add_data_group(
         new_data_group_name="residual",

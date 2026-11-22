@@ -2799,3 +2799,111 @@ def test_preparation_checks_actual_taylor_layout_with_shared_predicate(
         continuum_node._prepare_continuum_image(
             image, {}, initialize_static_products=True, input_checked=input_checked
         )
+
+
+def test_weight_density_node_preserves_broad_channel_boundaries(monkeypatch):
+    """The loader validates boundaries; the collapsed weighting image needs none."""
+    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        map_visibility_frequencies_to_image,
+    )
+
+    full = 4107516045.6904545 + np.arange(8) * 533950857.6451702
+    observed = 4380616641.112875 + np.arange(13) * 8001126.285138
+    params = _weight_node_params()
+    params["image_params"]["frequency_coords"] = full
+    params["task_coords"]["frequency"]["data"] = full[1:2]
+    params["input_data"] = None
+    params["data_selection"] = {"ms": {"frequency": slice(None)}}
+    calls = []
+
+    def load(*args, **kwargs):
+        assert len(kwargs["frequency_boundaries"]) == 1
+        np.testing.assert_array_equal(
+            map_visibility_frequencies_to_image(
+                observed, full[1:2], frequency_boundaries=kwargs["frequency_boundaries"]
+            ),
+            np.zeros(observed.size, dtype=np.int64),
+        )
+        calls.append("load")
+        return {"ms": xr.Dataset(coords={"frequency": observed})}
+
+    def grid(ps, image, *args, **kwargs):
+        assert "frequency_boundaries" not in image.frequency.attrs
+        np.testing.assert_array_equal(ps["ms"].frequency.values, observed)
+        calls.append("grid")
+        return xr.Dataset(
+            {
+                "WEIGHT_DENSITY_GRID": (
+                    ("frequency", "weight_polarization", "u", "v"),
+                    np.ones((1, 1, 2, 2)),
+                ),
+                "SUM_WEIGHT": (("frequency", "weight_polarization"), np.ones((1, 1))),
+            },
+            coords={"frequency": full[1:2]},
+        )
+
+    monkeypatch.setattr("astroviper.utils.node_task_io.load_processing_set", load)
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.calculate_imaging_weights.grid_imaging_weight_density_continuum",
+        grid,
+    )
+    continuum_node.grid_imaging_weight_density_continuum_node(**params)
+    assert calls == ["load", "grid"]
+
+
+def test_weight_degrid_node_uses_loader_boundaries_without_stamping_image(monkeypatch):
+    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        map_visibility_frequencies_to_image,
+    )
+
+    full = np.array([1.0e9, 1.2e9, 1.4e9])
+    observed = np.array([1.15e9, 1.16e9, 1.17e9])
+    params = _weight_node_params()
+    params["image_params"]["frequency_coords"] = full
+    params["task_coords"]["frequency"]["data"] = full[1:2]
+    params.update(
+        input_data=None,
+        data_selection={"ms": {"frequency": slice(None)}},
+        global_weighting_xds=xr.Dataset(),
+        weight_memory_mode="in_memory",
+        image_store="unused-image",
+    )
+    child = xr.Dataset(
+        {
+            "WEIGHT_IMAGING": (
+                ("time", "baseline_id", "frequency", "polarization"),
+                np.ones((1, 1, 3, 2)),
+            )
+        },
+        coords={"frequency": observed},
+        attrs={"data_groups": {"base": {"weight_imaging": "WEIGHT_IMAGING"}}},
+    )
+    calls = []
+
+    def load(*args, **kwargs):
+        assert len(kwargs["frequency_boundaries"]) == 1
+        np.testing.assert_array_equal(
+            map_visibility_frequencies_to_image(
+                observed, full[1:2], frequency_boundaries=kwargs["frequency_boundaries"]
+            ),
+            [0, 0, 0],
+        )
+        calls.append("load")
+        return {"ms": child}
+
+    def degrid(ps, image, *args, **kwargs):
+        assert "frequency_boundaries" not in image.frequency.attrs
+        np.testing.assert_array_equal(ps["ms"].frequency.values, observed)
+        calls.append("degrid")
+        return ps
+
+    monkeypatch.setattr("astroviper.utils.node_task_io.load_processing_set", load)
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.calculate_imaging_weights.degrid_imaging_weights_continuum",
+        degrid,
+    )
+    result = continuum_node.degrid_imaging_weights_continuum_node(**params)
+    np.testing.assert_array_equal(
+        result["weight_datasets"]["ms"].WEIGHT_IMAGING, child.WEIGHT_IMAGING
+    )
+    assert calls == ["load", "degrid"]

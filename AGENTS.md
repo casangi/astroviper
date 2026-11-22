@@ -501,6 +501,15 @@ match them in any new kernel:
    place"). The MT-MFS residual is the documented exception: its spatial
    planes must be contiguous, but its outer Taylor-term stride may exceed one
    plane so a polarization slice can still be updated in place.
+   Alignment is independent of contiguity. Compare dtype values with `.equal()`,
+   never descriptor identity or buffer-format strings. External buffers may be
+   unaligned after Dask spilling or process transfer: use the scalar byte-safe
+   loads/stores in `processing_functions/include/scalar_buffer.hpp` rather than
+   dereferencing typed pointers. These fixed-size accesses never allocate an
+   array copy. Imaging-weight kernels retain their separately dispatched aligned
+   fast path. Concurrent gridding retains aligned atomics and uses striped locks
+   for unaligned destinations. FFT inputs that require aligned storage use at
+   most one row of scratch, never an image-sized realignment buffer.
 3. **In-place output.** Accumulators (`grid`, `normalization`) and CLEAN buffers
    (residual/model cubes) are written through `mutable_data()` pointers; they
    are *not* returned. Repeated calls accumulate (e.g. summing over MSes).

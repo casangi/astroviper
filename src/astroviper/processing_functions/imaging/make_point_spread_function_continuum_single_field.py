@@ -478,6 +478,7 @@ def make_point_spread_function_mvc_single_field(
     )
     from astroviper.processing_functions.imaging.utils import drop_auto_correlations
     from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        get_frequency_boundaries,
         map_visibility_frequencies_to_image,
     )
 
@@ -486,6 +487,10 @@ def make_point_spread_function_mvc_single_field(
         map_visibility_frequencies_to_image(
             ms_xdt.frequency.values,
             img_xds.frequency.values,
+            full_image_frequencies=img_xds.frequency.attrs.get(
+                "full_image_frequencies"
+            ),
+            frequency_boundaries=get_frequency_boundaries(img_xds, ms_xdt),
         )
 
     if complex_dtype is None:

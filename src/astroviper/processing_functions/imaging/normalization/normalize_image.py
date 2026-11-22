@@ -61,6 +61,33 @@ def _fft_module(backend):
     return fft
 
 
+def _fftw_unaligned_inplace(work, axes, threads, inverse):
+    """Transform external unaligned storage using only one aligned line of scratch.
+
+    FFTW requires natural alignment even with SIMD disabled. A separable FFT
+    lets spilled buffers stay in place while each row/column uses a reusable
+    aligned line; no plane-sized realignment copy is needed.
+    """
+    import pyfftw
+
+    for axis in axes:
+        lines = np.moveaxis(work, axis, -1)
+        scratch = pyfftw.empty_aligned(lines.shape[-1], dtype=work.dtype)
+        plan = pyfftw.FFTW(
+            scratch,
+            scratch,
+            direction="FFTW_BACKWARD" if inverse else "FFTW_FORWARD",
+            flags=("FFTW_ESTIMATE",),
+            threads=threads,
+        )
+        for index in np.ndindex(lines.shape[:-1]):
+            np.copyto(scratch, lines[index])
+            plan()
+            np.copyto(lines[index], scratch)
+        del plan, scratch
+    return work
+
+
 def _require_gridding_kernel(gridding_kernel, function_name):
     """Refuse a missing gridding kernel: the image correction is its transform."""
     if gridding_kernel is None:
@@ -595,12 +622,17 @@ def ifft_uv_to_lm(
         # Own the buffer unless the caller ceded it via overwrite_input.
         work = grid_2d if overwrite_input else grid_2d.copy()
         _fold_shift_checkerboard(work, fft_plane_dims)
-        sky = fft.ifft2(
-            work,
-            axes=fft_plane_dims,
-            workers=processing_function_threads,
-            overwrite_x=True,
-        )
+        if fft_backend == "pyfftw" and not work.flags.aligned:
+            sky = _fftw_unaligned_inplace(
+                work, fft_plane_dims, processing_function_threads, inverse=True
+            )
+        else:
+            sky = fft.ifft2(
+                work,
+                axes=fft_plane_dims,
+                workers=processing_function_threads,
+                overwrite_x=True,
+            )
         _fold_shift_checkerboard(sky, fft_plane_dims, centred=True)
     else:
         # Odd axis: the two shifts are not a simple checkerboard; use the rolls.
@@ -678,12 +710,17 @@ def fft_lm_to_uv(
         if work is image and not overwrite_input:
             work = work.copy()
         _fold_shift_checkerboard(work, fft_plane_dims)
-        uv = fft.fft2(
-            work,
-            axes=fft_plane_dims,
-            workers=processing_function_threads,
-            overwrite_x=True,
-        )
+        if fft_backend == "pyfftw" and not work.flags.aligned:
+            uv = _fftw_unaligned_inplace(
+                work, fft_plane_dims, processing_function_threads, inverse=False
+            )
+        else:
+            uv = fft.fft2(
+                work,
+                axes=fft_plane_dims,
+                workers=processing_function_threads,
+                overwrite_x=True,
+            )
         _fold_shift_checkerboard(uv, fft_plane_dims, centred=True)
         return uv
     return fft.fftshift(

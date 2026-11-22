@@ -1,5 +1,7 @@
 #include "../include/grid_imaging_weights.hpp"
 
+#include "scalar_buffer.hpp"
+
 #include <cmath>
 #include <cstdint>
 #include <stdexcept>
@@ -10,18 +12,24 @@ namespace {
 constexpr double kSpeedOfLight = 299792458.0;
 }  // namespace
 
-template <typename GridT>
-void grid_imaging_weights(
-    GridT* grid,
-    double* sum_weight,
-    const double* uvw,
-    const double* frequency_coord,
-    const int64_t* chan_map,
-    const double* data_weights,
+template <typename GridT, bool Aligned>
+void grid_imaging_weights_impl(
+    void* grid_raw,
+    void* sum_weight_raw,
+    const void* uvw_raw,
+    const void* frequency_coord_raw,
+    const void* chan_map_raw,
+    const void* data_weights_raw,
     int n_chan_g, int n_pol_g, int m_u, int m_v,
     int n_time, int n_baseline, int n_vis_chan, int n_pol,
     double delta_l, double delta_m, bool truncate_uv_cells
 ) {
+    astroviper::ScalarBuffer<GridT, Aligned> grid(grid_raw);
+    astroviper::ScalarBuffer<double, Aligned> sum_weight(sum_weight_raw);
+    astroviper::ScalarBuffer<const double, Aligned> uvw(uvw_raw);
+    astroviper::ScalarBuffer<const double, Aligned> frequency_coord(frequency_coord_raw);
+    astroviper::ScalarBuffer<const int64_t, Aligned> chan_map(chan_map_raw);
+    astroviper::ScalarBuffer<const double, Aligned> data_weights(data_weights_raw);
     (void)n_chan_g;
 
     // uv_scale maps baseline meters -> UV pixels for each frequency:
@@ -146,20 +154,28 @@ void grid_imaging_weights(
     }
 }
 
-template <typename GridT>
-void degrid_imaging_weights(
-    double* imaging_weight,
-    const GridT* grid_imaging_weight,
-    const double* briggs_factors,
-    const double* uvw,
-    const double* frequency_coord,
-    const int64_t* chan_map,
-    const int64_t* pol_map,
-    const double* data_weight,
+template <typename GridT, bool Aligned>
+void degrid_imaging_weights_impl(
+    void* imaging_weight_raw,
+    const void* grid_imaging_weight_raw,
+    const void* briggs_factors_raw,
+    const void* uvw_raw,
+    const void* frequency_coord_raw,
+    const void* chan_map_raw,
+    const void* pol_map_raw,
+    const void* data_weight_raw,
     int n_chan_g, int n_pol_g, int m_u, int m_v,
     int n_time, int n_baseline, int n_vis_chan, int n_pol, int n_pol_out,
     double delta_l, double delta_m, bool truncate_uv_cells
 ) {
+    astroviper::ScalarBuffer<double, Aligned> imaging_weight(imaging_weight_raw);
+    astroviper::ScalarBuffer<const GridT, Aligned> grid_imaging_weight(grid_imaging_weight_raw);
+    astroviper::ScalarBuffer<const double, Aligned> briggs_factors(briggs_factors_raw);
+    astroviper::ScalarBuffer<const double, Aligned> uvw(uvw_raw);
+    astroviper::ScalarBuffer<const double, Aligned> frequency_coord(frequency_coord_raw);
+    astroviper::ScalarBuffer<const int64_t, Aligned> chan_map(chan_map_raw);
+    astroviper::ScalarBuffer<const int64_t, Aligned> pol_map(pol_map_raw);
+    astroviper::ScalarBuffer<const double, Aligned> data_weight(data_weight_raw);
     const int uv_center_u = m_u / 2;
     const int uv_center_v = m_v / 2;
 
@@ -265,20 +281,84 @@ void degrid_imaging_weights(
     }
 }
 
+
+template <typename GridT>
+void grid_imaging_weights(
+    void* grid,
+    void* sum_weight,
+    const void* uvw,
+    const void* frequency_coord,
+    const void* chan_map,
+    const void* data_weights,
+    int n_chan_g, int n_pol_g, int m_u, int m_v,
+    int n_time, int n_baseline, int n_vis_chan, int n_pol,
+    double delta_l, double delta_m, bool truncate_uv_cells
+) {
+    const bool aligned = astroviper::naturally_aligned<GridT>(grid) &&
+        astroviper::naturally_aligned<double>(sum_weight) &&
+        astroviper::naturally_aligned<double>(uvw) &&
+        astroviper::naturally_aligned<double>(frequency_coord) &&
+        astroviper::naturally_aligned<int64_t>(chan_map) &&
+        astroviper::naturally_aligned<double>(data_weights);
+    if (aligned)
+        grid_imaging_weights_impl<GridT, true>(
+            grid, sum_weight, uvw, frequency_coord, chan_map, data_weights, n_chan_g, n_pol_g,
+            m_u, m_v, n_time, n_baseline, n_vis_chan, n_pol, delta_l, delta_m,
+            truncate_uv_cells);
+    else
+        grid_imaging_weights_impl<GridT, false>(
+            grid, sum_weight, uvw, frequency_coord, chan_map, data_weights, n_chan_g, n_pol_g,
+            m_u, m_v, n_time, n_baseline, n_vis_chan, n_pol, delta_l, delta_m,
+            truncate_uv_cells);
+}
+
+template <typename GridT>
+void degrid_imaging_weights(
+    void* imaging_weight,
+    const void* grid_imaging_weight,
+    const void* briggs_factors,
+    const void* uvw,
+    const void* frequency_coord,
+    const void* chan_map,
+    const void* pol_map,
+    const void* data_weight,
+    int n_chan_g, int n_pol_g, int m_u, int m_v,
+    int n_time, int n_baseline, int n_vis_chan, int n_pol, int n_pol_out,
+    double delta_l, double delta_m, bool truncate_uv_cells
+) {
+    const bool aligned = astroviper::naturally_aligned<double>(imaging_weight) &&
+        astroviper::naturally_aligned<GridT>(grid_imaging_weight) &&
+        astroviper::naturally_aligned<double>(briggs_factors) &&
+        astroviper::naturally_aligned<double>(uvw) &&
+        astroviper::naturally_aligned<double>(frequency_coord) &&
+        astroviper::naturally_aligned<int64_t>(chan_map) &&
+        astroviper::naturally_aligned<int64_t>(pol_map) &&
+        astroviper::naturally_aligned<double>(data_weight);
+    if (aligned)
+        degrid_imaging_weights_impl<GridT, true>(
+            imaging_weight, grid_imaging_weight, briggs_factors, uvw, frequency_coord,
+            chan_map, pol_map, data_weight, n_chan_g, n_pol_g, m_u, m_v, n_time, n_baseline,
+            n_vis_chan, n_pol, n_pol_out, delta_l, delta_m, truncate_uv_cells);
+    else
+        degrid_imaging_weights_impl<GridT, false>(
+            imaging_weight, grid_imaging_weight, briggs_factors, uvw, frequency_coord,
+            chan_map, pol_map, data_weight, n_chan_g, n_pol_g, m_u, m_v, n_time, n_baseline,
+            n_vis_chan, n_pol, n_pol_out, delta_l, delta_m, truncate_uv_cells);
+}
 template void grid_imaging_weights<float>(
-    float*, double*, const double*, const double*, const int64_t*,
-    const double*, int, int, int, int, int, int, int, int, double, double, bool);
+    void*, void*, const void*, const void*, const void*,
+    const void*, int, int, int, int, int, int, int, int, double, double, bool);
 template void grid_imaging_weights<double>(
-    double*, double*, const double*, const double*, const int64_t*,
-    const double*, int, int, int, int, int, int, int, int, double, double, bool);
+    void*, void*, const void*, const void*, const void*,
+    const void*, int, int, int, int, int, int, int, int, double, double, bool);
 
 template void degrid_imaging_weights<float>(
-    double*, const float*, const double*, const double*, const double*,
-    const int64_t*, const int64_t*, const double*,
+    void*, const void*, const void*, const void*, const void*,
+    const void*, const void*, const void*,
     int, int, int, int, int, int, int, int, int, double, double, bool);
 template void degrid_imaging_weights<double>(
-    double*, const double*, const double*, const double*, const double*,
-    const int64_t*, const int64_t*, const double*,
+    void*, const void*, const void*, const void*, const void*,
+    const void*, const void*, const void*,
     int, int, int, int, int, int, int, int, int, double, double, bool);
 
 }  // namespace imaging_weighting

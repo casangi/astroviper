@@ -1,3 +1,4 @@
+#include "array_dtype.hpp"
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -19,10 +20,7 @@ namespace {
 
 template <typename T>
 py::buffer_info check_array(py::array& arr, const char* name, const std::vector<py::ssize_t>& shape, bool writable) {
-    if (!arr.dtype().equal(py::dtype::of<T>()))
-        throw std::runtime_error(std::string(name) + " has wrong dtype; expected " +
-                                 py::cast<std::string>(py::dtype::of<T>().attr("name")) + " but got " +
-                                 py::cast<std::string>(arr.dtype().attr("name")));
+    astroviper::require_dtype<T>(arr, name);
     if (!(arr.flags() & py::array::c_style))
         throw std::runtime_error(std::string(name) + " must be C-contiguous (no copy is made)");
     if (writable && !arr.writeable())
@@ -42,10 +40,7 @@ py::buffer_info check_array(py::array& arr, const char* name, const std::vector<
 
 template <typename T>
 py::buffer_info check_strided_residual(py::array& arr, const std::vector<py::ssize_t>& shape) {
-    if (!arr.dtype().equal(py::dtype::of<T>()))
-        throw std::runtime_error("residual has wrong dtype; expected " +
-                                 py::cast<std::string>(py::dtype::of<T>().attr("name")) + " but got " +
-                                 py::cast<std::string>(arr.dtype().attr("name")));
+    astroviper::require_dtype<T>(arr, "residual");
     if (!arr.writeable()) throw std::runtime_error("residual must be writeable (modified in place)");
     py::buffer_info info = arr.request(true);
     if (info.ndim != 3) throw std::runtime_error("residual must be a 3-D array");
@@ -204,7 +199,7 @@ static py::dict clean_dispatch(py::array residual, py::array psf, py::array mode
         return clean_impl<double>(residual, psf, model, mask, scales, small_scale_bias, max_iter_per_cycle_updated, gain,
                                   threshold_per_cycle, mask_threshold, max_iter_divergence,
                                   divergence_rms_factor, divergence_peak_factor, record_iteration_history);
-    throw std::runtime_error("residual must be float32 or float64");
+    throw std::runtime_error(astroviper::dtype_error(residual, "residual", "float32 or float64"));
 }
 
 template <typename T>
@@ -242,7 +237,7 @@ py::dict hessian_impl(py::array psf, const std::vector<float>& scales, float sma
 static py::dict hessian_dispatch(py::array psf, const std::vector<float>& scales, float small_scale_bias) {
     if (psf.dtype().equal(py::dtype::of<float>())) return hessian_impl<float>(psf, scales, small_scale_bias);
     if (psf.dtype().equal(py::dtype::of<double>())) return hessian_impl<double>(psf, scales, small_scale_bias);
-    throw std::runtime_error("psf must be float32 or float64");
+    throw std::runtime_error(astroviper::dtype_error(psf, "psf", "float32 or float64"));
 }
 
 template <typename T>
@@ -261,7 +256,7 @@ static void principal_dispatch(py::array residual, py::array inverse_hessian) {
     else if (residual.dtype().equal(py::dtype::of<double>()))
         principal_impl<double>(residual, inverse_hessian);
     else
-        throw std::runtime_error("residual must be float32 or float64");
+        throw std::runtime_error(astroviper::dtype_error(residual, "residual", "float32 or float64"));
 }
 
 }  // namespace

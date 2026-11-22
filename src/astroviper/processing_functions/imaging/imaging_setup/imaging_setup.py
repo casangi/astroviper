@@ -121,6 +121,7 @@ def _mfs_channel_imaging_weight_sums(
     import xarray as xr
 
     from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        get_frequency_boundaries,
         map_visibility_frequencies_to_image,
     )
 
@@ -174,6 +175,10 @@ def _mfs_channel_imaging_weight_sums(
         frequency_map = map_visibility_frequencies_to_image(
             weight.frequency.values,
             image_frequencies,
+            full_image_frequencies=img_xds.frequency.attrs.get(
+                "full_image_frequencies"
+            ),
+            frequency_boundaries=get_frequency_boundaries(img_xds, ms_xdt),
         )
         values = np.asarray(weight.values)
         if np.any(np.isinf(values)):

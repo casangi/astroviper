@@ -100,6 +100,9 @@ def _target_files():
 
     root = pathlib.Path(__file__).resolve().parents[1]  # src/astroviper
     rel = [
+        "utils/node_task_io.py",
+        "utils/chunk_io/zarr_chunks.py",
+        "processing_functions/imaging/utils/frequency_mapping.py",
         "distributed_applications/imaging/image_cube_single_field.py",
         "distributed_applications/imaging/feather.py",
         "distributed_applications/imaging/find_continuum/find_continuum.py",

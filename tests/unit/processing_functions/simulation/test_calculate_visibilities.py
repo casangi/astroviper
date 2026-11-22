@@ -619,3 +619,79 @@ class TestGaussianSources:
             elliptical_gaussian_uv_response(u, v, *shape[0]),
             elliptical_gaussian_uv_taper(u, v, *shape[0]),
         )
+
+
+def test_simulation_native_alignment_contract(unaligned_array):
+    """Use external unaligned buffers in place and retain equivalent dtype support."""
+    import numpy as np
+
+    from astroviper.processing_functions.simulation.visibility_kernel_cpp import (
+        calculate_visibilities,
+    )
+
+    uvw = np.zeros((1, 1, 3))
+    freq = np.array([1e9])
+    imap = np.zeros(1, dtype=np.int64)
+    sim = dict(
+        visibility=np.zeros((1, 1, 1, 1), complex),
+        uvw=uvw,
+        antenna1=imap,
+        antenna2=imap,
+        frequency=freq,
+        polarization_index=imap,
+        point_source_flux=np.ones((1, 1, 1, 4), complex),
+        k_vector=np.zeros((1, 1, 3)),
+        inverse_n=np.ones((1, 1)),
+        point_source_ra_dec=np.zeros((1, 1, 2)),
+        pointing_ra_dec=np.zeros((1, 1, 2)),
+        beam_model_map=imap,
+        beam_models=[
+            dict(
+                kind="analytic",
+                func="none",
+                max_rad_1GHz=1.0,
+                dish_diameter=1.0,
+                blockage_diameter=0.0,
+            )
+        ],
+        parallactic_angle=np.zeros(1),
+        mueller_selection=imap,
+        processing_function_threads=1,
+    )
+    kwargs = sim
+    reference = {
+        k: v.copy() if isinstance(v, np.ndarray) else v for k, v in kwargs.items()
+    }
+    calculate_visibilities(**reference)
+    for key, value in kwargs.items():
+        if not isinstance(value, np.ndarray) or value.dtype.alignment == 1:
+            continue
+        for offset in range(1, value.dtype.alignment):
+            trial = {
+                k: v.copy() if isinstance(v, np.ndarray) else v
+                for k, v in kwargs.items()
+            }
+            trial[key] = unaligned_array(value, offset)
+            calculate_visibilities(**trial)
+            for name, expected in reference.items():
+                if isinstance(expected, np.ndarray):
+                    np.testing.assert_array_equal(trial[name], expected)
+            assert trial[key].base[0] == 0xA5
+            assert trial[key].base[-1] == 0xA5
+
+    import pickle
+
+    reference = {
+        k: v.copy() if isinstance(v, np.ndarray) else v for k, v in kwargs.items()
+    }
+    trial = {
+        k: v.copy().view(pickle.loads(pickle.dumps(v.dtype)))
+        if isinstance(v, np.ndarray)
+        else v
+        for k, v in kwargs.items()
+    }
+    calculate_visibilities(**reference)
+    calculate_visibilities(**trial)
+    for key, value in reference.items():
+        if isinstance(value, np.ndarray):
+            np.testing.assert_array_equal(trial[key], value)

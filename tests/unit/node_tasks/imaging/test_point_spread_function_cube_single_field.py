@@ -79,6 +79,8 @@ def test_channel_properties_and_whole_chunk_fallback():
     )
     properties = result["point_spread_function_properties"]
     assert "POINT_SPREAD_FUNCTION" not in properties
+    assert "frequency_boundaries" not in properties.frequency.attrs
+    assert "full_image_frequencies" not in properties.frequency.attrs
     np.testing.assert_array_equal(properties.frequency.values, frequencies)
     assert list(properties.polarization.values) == ["I", "Q"]
     beam = properties.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION

@@ -144,11 +144,17 @@ def get_visibility_grid_single_field(
     n_chan = ms_xds.sizes["frequency"]
     if chan_mode == "cube":
         from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+            get_frequency_boundaries,
             map_visibility_frequencies_to_image,
         )
 
         frequency_map = map_visibility_frequencies_to_image(
-            ms_xds.frequency.values, img_xds.frequency.values
+            ms_xds.frequency.values,
+            img_xds.frequency.values,
+            full_image_frequencies=img_xds.frequency.attrs.get(
+                "full_image_frequencies"
+            ),
+            frequency_boundaries=get_frequency_boundaries(img_xds, ms_xds),
         )
     else:  # continuum
         frequency_map = (np.zeros(n_chan)).astype(int)

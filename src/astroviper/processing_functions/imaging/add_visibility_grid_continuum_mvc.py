@@ -135,6 +135,7 @@ def add_visibility_grid_mvc_single_field(
         padded_grid_size,
     )
     from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        get_frequency_boundaries,
         map_visibility_frequencies_to_image,
     )
     from astroviper.utils.data_group_tools import create_data_groups_in_and_out
@@ -261,7 +262,12 @@ def add_visibility_grid_mvc_single_field(
         )
 
     # Refuses unmappable channels before the axis checks; the gridding maps them again.
-    map_visibility_frequencies_to_image(frequency_coord, image_frequency_coord)
+    map_visibility_frequencies_to_image(
+        frequency_coord,
+        image_frequency_coord,
+        full_image_frequencies=img_xds.frequency.attrs.get("full_image_frequencies"),
+        frequency_boundaries=get_frequency_boundaries(img_xds, ms_xds),
+    )
     n_image_chan = image_frequency_coord.size
 
     if "polarization" not in img_xds.coords:
@@ -366,6 +372,20 @@ def add_visibility_grid_mvc_single_field(
     # ------------------------------------------------------------------
     # Grid directly into the output frequency cube.
     # ------------------------------------------------------------------
+    # Keep coordinate metadata (especially the unpartitioned frequency
+    # axis) when the first child allocates outputs for later children.
+    visibility_coords = {
+        "time": img_xds.coords["time"],
+        "frequency": img_xds.coords["frequency"],
+        "polarization": img_xds.coords["polarization"],
+    }
+
+    if "u" in img_xds.coords:
+        visibility_coords["u"] = img_xds.coords["u"]
+
+    if "v" in img_xds.coords:
+        visibility_coords["v"] = img_xds.coords["v"]
+
     _add_grid_single_field(
         ms_xds,
         gcf_xds,
@@ -385,11 +405,7 @@ def add_visibility_grid_mvc_single_field(
             "Added frequency-resolved MVC visibility grids "
             "with add_visibility_grid_mvc_single_field."
         ),
-        coords={
-            "time": img_xds.coords["time"],
-            "frequency": ("frequency", image_frequency_coord),
-            "polarization": img_xds.coords["polarization"],
-        },
+        coords=visibility_coords,
         n_frequency_planes=n_image_chan,
     )
 

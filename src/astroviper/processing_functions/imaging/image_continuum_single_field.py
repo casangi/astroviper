@@ -1330,6 +1330,21 @@ def prepare_model_uv_mvc_single_field(
         new_polarization_basis=None,
     )
 
+    # Reconstructed channel models must retain the original mapping boundaries.
+    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        calculate_frequency_boundaries,
+        select_frequency_boundaries,
+    )
+
+    boundaries = primary_beam_xds.frequency.attrs.get("frequency_boundaries")
+    if boundaries is None:
+        boundaries = calculate_frequency_boundaries(
+            image_params.get("frequency_coords", frequency_values)
+        )
+    mvc_xds.frequency.attrs["frequency_boundaries"] = select_frequency_boundaries(
+        boundaries, frequency_values
+    )
+
     return mvc_xds
 
 

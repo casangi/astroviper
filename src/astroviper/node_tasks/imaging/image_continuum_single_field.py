@@ -1,3 +1,6 @@
+from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+    task_frequency_boundaries,
+)
 from astroviper.utils.clean_mask import install_clean_mask
 from astroviper.utils.continuum_cache import (
     CONTINUUM_WEIGHT_CACHE_GROUP as _CONTINUUM_WEIGHT_CACHE_GROUP,
@@ -1522,6 +1525,9 @@ def residual_update_continuum_single_field(
         spectral_reference=image_params.get("spectral_reference", "lsrk"),
         do_sky_coords=False,
     )
+    img_xds.frequency.attrs["frequency_boundaries"] = task_frequency_boundaries(
+        task_coords, image_params
+    )
 
     T_make_empty_image = time.time() - start
 
@@ -1546,12 +1552,23 @@ def residual_update_continuum_single_field(
             data_selection,
             processing_set_data_group_name,
             frequency_coords=task_coords["frequency"]["data"],
+            frequency_boundaries=task_frequency_boundaries(task_coords, image_params),
+            observation_frequency_boundaries=task_coords["frequency"].get(
+                "observation_frequency_boundaries"
+            ),
             instrument_polarization_basis=instrument_polarization_basis,
             data_group=data_group,
             load_correlated_data=not omit_observed_visibility,
             processing_function_threads=processing_function_threads,
         )
 
+    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        attach_observation_frequency_boundaries,
+    )
+
+    ps_xdt = attach_observation_frequency_boundaries(
+        ps_xdt, task_coords["frequency"].get("observation_frequency_boundaries")
+    )
     T_load = time.time() - start
 
     # =============================================================
@@ -2068,12 +2085,23 @@ def grid_imaging_weight_density_continuum_node(
             data_selection,
             processing_set_data_group_name,
             frequency_coords=task_coords["frequency"]["data"],
+            frequency_boundaries=task_frequency_boundaries(task_coords, image_params),
+            observation_frequency_boundaries=task_coords["frequency"].get(
+                "observation_frequency_boundaries"
+            ),
             instrument_polarization_basis=instrument_polarization_basis,
             data_group=data_group,
             load_correlated_data=False,
             processing_function_threads=processing_function_threads,
         )
 
+    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        attach_observation_frequency_boundaries,
+    )
+
+    ps_xdt = attach_observation_frequency_boundaries(
+        ps_xdt, task_coords["frequency"].get("observation_frequency_boundaries")
+    )
     T_load = time.time() - start
 
     # ------------------------------------------------------------------
@@ -2385,12 +2413,23 @@ def degrid_imaging_weights_continuum_node(
             data_selection,
             processing_set_data_group_name,
             frequency_coords=task_coords["frequency"]["data"],
+            frequency_boundaries=task_frequency_boundaries(task_coords, image_params),
+            observation_frequency_boundaries=task_coords["frequency"].get(
+                "observation_frequency_boundaries"
+            ),
             instrument_polarization_basis=instrument_polarization_basis,
             data_group=data_group,
             load_correlated_data=False,
             processing_function_threads=processing_function_threads,
         )
 
+    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        attach_observation_frequency_boundaries,
+    )
+
+    ps_xdt = attach_observation_frequency_boundaries(
+        ps_xdt, task_coords["frequency"].get("observation_frequency_boundaries")
+    )
     T_load = time.time() - start
 
     # -------------------------------------------------------------

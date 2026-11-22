@@ -1765,3 +1765,69 @@ def test_concurrent_calls_match_serial():
     for (r1, m1), (r2, m2) in zip(serial, threaded, strict=True):
         np.testing.assert_array_equal(r1, r2)
         np.testing.assert_array_equal(m1, m2)
+
+
+def test_mtmfs_native_alignment_contract(unaligned_array):
+    """Use external unaligned buffers in place and retain equivalent dtype support."""
+    import numpy as np
+    from astroviper.processing_functions.imaging.model_update.deconvolvers.mtmfs._mtmfs_ext import (
+        clean as mtmfs,
+    )
+
+    r = np.zeros((16, 16))
+    r[8, 8] = 1
+    p = r.copy()
+    model = r * 0
+    kwargs = dict(
+        residual=r[None], psf=p[None], model=model[None], max_iter_per_cycle_updated=1
+    )
+    reference = {
+        k: v.copy() if isinstance(v, np.ndarray) else v for k, v in kwargs.items()
+    }
+    mtmfs(**reference)
+    for key, value in kwargs.items():
+        if not isinstance(value, np.ndarray) or value.dtype.alignment == 1:
+            continue
+        for offset in range(1, value.dtype.alignment):
+            trial = {
+                k: v.copy() if isinstance(v, np.ndarray) else v
+                for k, v in kwargs.items()
+            }
+            trial[key] = unaligned_array(value, offset)
+            mtmfs(**trial)
+            for name, expected in reference.items():
+                if isinstance(expected, np.ndarray):
+                    np.testing.assert_array_equal(trial[name], expected)
+            assert trial[key].base[0] == 0xA5
+            assert trial[key].base[-1] == 0xA5
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_multiscale_mtmfs_updates_unaligned_strided_external_buffers(
+    dtype, unaligned_array
+):
+    """Use real FFT inputs, multiple Taylor terms, and a padded residual view."""
+    psf = make_psf_stack(2, 64, 64).astype(dtype)
+    dirty = make_dirty_stack(2, 64, 64, seed=7).astype(dtype)
+    mask = np.ones((64, 64), dtype=dtype)
+    expected = dirty.copy()
+    model = np.zeros_like(dirty)
+    options = dict(
+        scales=[0.0, 4.0],
+        max_iter_per_cycle_updated=3,
+        gain=0.1,
+        record_iteration_history=True,
+    )
+    mtmfs.clean(expected, psf, model, mask, **options)
+    backing = unaligned_array(np.full((2, 2, 64, 64), -99.0, dtype=dtype))
+    residual = backing[:, 0]
+    residual[:] = dirty
+    actual_model = unaligned_array(np.zeros_like(dirty))
+    actual_psf = unaligned_array(psf)
+    actual_mask = unaligned_array(mask)
+    mtmfs.clean(residual, actual_psf, actual_model, actual_mask, **options)
+    np.testing.assert_array_equal(residual, expected)
+    np.testing.assert_array_equal(actual_model, model)
+    np.testing.assert_array_equal(actual_psf, psf)
+    np.testing.assert_array_equal(backing[:, 1], -99.0)
+    assert backing.base[0] == backing.base[-1] == 0xA5

@@ -1,3 +1,5 @@
+#include "array_dtype.hpp"
+#include "scalar_buffer.hpp"
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -22,11 +24,7 @@ namespace {
  */
 template <typename T>
 py::buffer_info checked_buffer(const py::array& arr, const char* name, int ndim, bool writable) {
-    if (!arr.dtype().is(py::dtype::of<T>())) {
-        throw std::runtime_error(std::string(name) + " has wrong dtype; expected " +
-                                 py::cast<std::string>(py::dtype::of<T>().attr("name")) + " but got " +
-                                 py::cast<std::string>(arr.dtype().attr("name")));
-    }
+    astroviper::require_dtype<T>(arr, name);
     if (!(arr.flags() & py::array::c_style)) {
         throw std::runtime_error(std::string(name) +
                                  " must be C-contiguous (use np.ascontiguousarray; no copy is made)");
@@ -46,7 +44,7 @@ const T* ptr_of(const py::buffer_info& info) {
     return static_cast<const T*>(info.ptr);
 }
 
-BeamModel beam_model_from_dict(const py::dict& d, std::vector<py::buffer_info>& keep) {
+BeamModel beam_model_from_dict(const py::dict& d, std::vector<py::buffer_info>& keep, const std::string& name) {
     BeamModel bm;
     const std::string kind = py::cast<std::string>(d["kind"]);
     bm.max_rad_1GHz = py::cast<double>(d["max_rad_1GHz"]);
@@ -63,8 +61,8 @@ BeamModel beam_model_from_dict(const py::dict& d, std::vector<py::buffer_info>& 
         bm.kind = 1;
         py::array freq = py::cast<py::array>(d["frequency"]);
         py::array coef = py::cast<py::array>(d["coefficients"]);
-        keep.push_back(checked_buffer<double>(freq, "beam polynomial frequency", 1, false));
-        keep.push_back(checked_buffer<double>(coef, "beam polynomial coefficients", 2, false));
+        keep.push_back(checked_buffer<double>(freq, (name + "['frequency']").c_str(), 1, false));
+        keep.push_back(checked_buffer<double>(coef, (name + "['coefficients']").c_str(), 2, false));
         const py::buffer_info& fi = keep[keep.size() - 2];
         const py::buffer_info& ci = keep[keep.size() - 1];
         bm.n_poly_frequency = fi.shape[0];
@@ -84,10 +82,10 @@ BeamModel beam_model_from_dict(const py::dict& d, std::vector<py::buffer_info>& 
         py::array pa = py::cast<py::array>(d["parallactic_angle"]);
         py::array freq = py::cast<py::array>(d["frequency"]);
         py::array pol = py::cast<py::array>(d["polarization_index"]);
-        keep.push_back(checked_buffer<std::complex<double>>(jones, "jones", 5, false));
-        keep.push_back(checked_buffer<double>(pa, "jones parallactic_angle", 1, false));
-        keep.push_back(checked_buffer<double>(freq, "jones frequency", 1, false));
-        keep.push_back(checked_buffer<std::int64_t>(pol, "jones polarization_index", 1, false));
+        keep.push_back(checked_buffer<std::complex<double>>(jones, (name + "['jones']").c_str(), 5, false));
+        keep.push_back(checked_buffer<double>(pa, (name + "['parallactic_angle']").c_str(), 1, false));
+        keep.push_back(checked_buffer<double>(freq, (name + "['frequency']").c_str(), 1, false));
+        keep.push_back(checked_buffer<std::int64_t>(pol, (name + "['polarization_index']").c_str(), 1, false));
         const std::size_t n = keep.size();
         const py::buffer_info& ji = keep[n - 4];
         const py::buffer_info& pi = keep[n - 3];
@@ -163,24 +161,24 @@ void calculate_visibilities_py(py::array visibility, py::array uvw, py::array an
             "pointing_ra_dec must have shape [n_time|1, n_antenna|1, 2]");
     require(pa_info.shape[0] == n_time, "parallactic_angle must have shape [n_time]");
     for (std::int64_t p = 0; p < n_polarization; ++p) {
-        const std::int64_t v = ptr_of<std::int64_t>(pol_info)[p];
+        const std::int64_t v = astroviper::scalar_load(ptr_of<std::int64_t>(pol_info), p);
         require(v >= 0 && v < 4, "polarization_index values must be in 0..3");
     }
     for (std::int64_t i = 0; i < mu_info.shape[0]; ++i) {
-        const std::int64_t v = ptr_of<std::int64_t>(mu_info)[i];
+        const std::int64_t v = astroviper::scalar_load(ptr_of<std::int64_t>(mu_info), i);
         require(v >= 0 && v < 16, "mueller_selection values must be in 0..15");
     }
     for (std::int64_t b = 0; b < n_baseline; ++b) {
-        require(ptr_of<std::int64_t>(a1_info)[b] >= 0 && ptr_of<std::int64_t>(a1_info)[b] < n_antenna &&
-                    ptr_of<std::int64_t>(a2_info)[b] >= 0 && ptr_of<std::int64_t>(a2_info)[b] < n_antenna,
+        require(astroviper::scalar_load(ptr_of<std::int64_t>(a1_info), b) >= 0 && astroviper::scalar_load(ptr_of<std::int64_t>(a1_info), b) < n_antenna &&
+                    astroviper::scalar_load(ptr_of<std::int64_t>(a2_info), b) >= 0 && astroviper::scalar_load(ptr_of<std::int64_t>(a2_info), b) < n_antenna,
                 "antenna indices must be in 0..n_antenna-1");
     }
 
     std::vector<py::buffer_info> keep;  // keeps beam-model buffers alive during compute
     std::vector<BeamModel> models;
-    for (auto item : beam_models) models.push_back(beam_model_from_dict(py::cast<py::dict>(item), keep));
+    for (auto item : beam_models) models.push_back(beam_model_from_dict(py::cast<py::dict>(item), keep, "beam_models[" + std::to_string(models.size()) + "]"));
     for (std::int64_t a = 0; a < n_antenna; ++a) {
-        const std::int64_t v = ptr_of<std::int64_t>(map_info)[a];
+        const std::int64_t v = astroviper::scalar_load(ptr_of<std::int64_t>(map_info), a);
         require(v >= 0 && v < static_cast<std::int64_t>(models.size()), "beam_model_map must index beam_models");
     }
 

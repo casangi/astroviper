@@ -390,6 +390,12 @@ def point_spread_function_cube_single_field(
             thread_info,
         )
     )
+    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        calculate_frequency_boundaries,
+    )
+
+    frequency_boundaries = calculate_frequency_boundaries(img_xds.frequency.values)
+
     parallel_coords = {
         "frequency": make_parallel_coord(
             coord=img_xds.frequency, n_chunks=n_frequency_chunks
@@ -453,9 +459,31 @@ def point_spread_function_cube_single_field(
                 else imaging_data_variables_and_dims_double_precision
             ),
         )
+    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        calculate_observation_frequency_boundaries,
+    )
+
+    observation_frequency_boundaries = calculate_observation_frequency_boundaries(
+        img_xds.frequency.values, ps_xdt
+    )
     node_task_data_mapping = interpolate_data_coords_onto_parallel_coords(
         parallel_coords, ps_xdt
     )
+    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        select_frequency_boundaries,
+    )
+
+    for task in node_task_data_mapping.values():
+        coordinate = task["task_coords"]["frequency"]
+        coordinate["frequency_boundaries"] = select_frequency_boundaries(
+            frequency_boundaries, coordinate["data"]
+        )
+        if observation_frequency_boundaries:
+            coordinate["observation_frequency_boundaries"] = {
+                name: observation_frequency_boundaries[name]
+                for name, selection in task["data_selection"].items()
+                if selection is not None
+            }
 
     # Load only the correlations that are needed (as in the imager).
     for ms_name, ms_xdt in ps_xdt.items():

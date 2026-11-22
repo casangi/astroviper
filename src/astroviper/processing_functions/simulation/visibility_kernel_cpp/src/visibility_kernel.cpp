@@ -1,4 +1,5 @@
 #include "../include/visibility_kernel.hpp"
+#include "scalar_buffer.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -50,13 +51,13 @@ constexpr double THPIO4 = 2.35619449019234492885;
 constexpr double SQ2OPI = 7.9788456080286535587989E-1;
 
 inline double polevl(double x, const double* c, int n) {
-    double a = c[0];
-    for (int i = 1; i <= n; ++i) a = a * x + c[i];
+    double a = astroviper::scalar_load(c, 0);
+    for (int i = 1; i <= n; ++i) a = a * x + astroviper::scalar_load(c, i);
     return a;
 }
 inline double p1evl(double x, const double* c, int n) {
-    double a = x + c[0];
-    for (int i = 1; i < n; ++i) a = a * x + c[i];
+    double a = x + astroviper::scalar_load(c, 0);
+    for (int i = 1; i < n; ++i) a = a * x + astroviper::scalar_load(c, i);
     return a;
 }
 
@@ -95,9 +96,9 @@ inline double analytic_response(const BeamModel& bm, double l, double m, double 
 
 inline std::int64_t nearest_index(const double* values, std::int64_t n, double x) {
     std::int64_t best = 0;
-    double best_d = std::abs(x - values[0]);
+    double best_d = std::abs(x - astroviper::scalar_load(values, 0));
     for (std::int64_t i = 1; i < n; ++i) {
-        const double d = std::abs(x - values[i]);
+        const double d = std::abs(x - astroviper::scalar_load(values, i));
         if (d < best_d) { best_d = d; best = i; }
     }
     return best;
@@ -109,9 +110,9 @@ inline double wrapped_angle_difference(double a, double b) {
 
 inline std::int64_t nearest_angle_index(const double* values, std::int64_t n, double x) {
     std::int64_t best = 0;
-    double best_d = wrapped_angle_difference(x, values[0]);
+    double best_d = wrapped_angle_difference(x, astroviper::scalar_load(values, 0));
     for (std::int64_t i = 1; i < n; ++i) {
-        const double d = wrapped_angle_difference(x, values[i]);
+        const double d = wrapped_angle_difference(x, astroviper::scalar_load(values, i));
         if (d < best_d) { best_d = d; best = i; }
     }
     return best;
@@ -127,14 +128,14 @@ inline double clampd(double x, double lo, double hi) { return std::min(std::max(
 inline void sample_jones(const BeamModel& bm, double l, double m, double freq,
                          double parallactic_angle, std::int64_t i_chan,
                          std::complex<double> jones[4]) {
-    jones[0] = jones[1] = jones[2] = jones[3] = 0.0;
+    astroviper::scalar_store(jones, 0, astroviper::scalar_store(jones, 1, astroviper::scalar_store(jones, 2, astroviper::scalar_store(jones, 3, 0.0))));
     const double rho = std::sqrt(l * l + m * m);
     if (rho >= bm.max_rad_1GHz / (freq / 1e9)) return;  // outside the beam cut
 
     if (bm.kind == 0) {
         const double resp = analytic_response(bm, l, m, freq);
-        jones[0] = resp;
-        jones[3] = resp;
+        astroviper::scalar_store(jones, 0, resp);
+        astroviper::scalar_store(jones, 3, resp);
     } else if (bm.kind == 1) {
         const double* coef = bm.poly_coefficients + i_chan * bm.n_poly_coefficient;
         double rho_table = rho;
@@ -144,14 +145,14 @@ inline void sample_jones(const BeamModel& bm, double l, double m, double freq,
         }
         const double r = rho_table * (freq / 1e9) / kArcminToRad;
         double beam = 0.0;
-        for (std::int64_t i = 0; i < bm.n_poly_coefficient; ++i) beam += coef[i] * std::pow(r, 2.0 * i);
+        for (std::int64_t i = 0; i < bm.n_poly_coefficient; ++i) beam += astroviper::scalar_load(coef, i) * std::pow(r, 2.0 * i);
         beam = beam < 0.0 ? 0.0 : std::sqrt(beam);
-        jones[0] = beam;
-        jones[3] = beam;
+        astroviper::scalar_store(jones, 0, beam);
+        astroviper::scalar_store(jones, 3, beam);
     } else {
         const std::int64_t i_pa = nearest_angle_index(bm.jones_parallactic_angle, bm.n_pa, parallactic_angle);
-        const double scale = freq / bm.jones_frequency[i_chan];
-        const double delta_pa = parallactic_angle - bm.jones_parallactic_angle[i_pa];
+        const double scale = freq / astroviper::scalar_load(bm.jones_frequency, i_chan);
+        const double delta_pa = parallactic_angle - astroviper::scalar_load(bm.jones_parallactic_angle, i_pa);
         const double c = std::cos(delta_pa), s = std::sin(delta_pa);
         const double ls = l * scale, ms = m * scale;
         const double l_rot = c * ls + s * ms;
@@ -168,9 +169,9 @@ inline void sample_jones(const BeamModel& bm, double l, double m, double freq,
         for (std::int64_t ip = 0; ip < bm.n_jones_pol; ++ip) {
             const std::complex<double>* img = base + ip * plane;
             const std::complex<double> v =
-                (1 - fx) * (1 - fy) * img[x0 * bm.n_m + y0] + (1 - fx) * fy * img[x0 * bm.n_m + y1] +
-                fx * (1 - fy) * img[x1 * bm.n_m + y0] + fx * fy * img[x1 * bm.n_m + y1];
-            jones[bm.jones_polarization_index[ip]] = v;
+                (1 - fx) * (1 - fy) * astroviper::scalar_load(img, x0 * bm.n_m + y0) + (1 - fx) * fy * astroviper::scalar_load(img, x0 * bm.n_m + y1) +
+                fx * (1 - fy) * astroviper::scalar_load(img, x1 * bm.n_m + y0) + fx * fy * astroviper::scalar_load(img, x1 * bm.n_m + y1);
+            astroviper::scalar_store(jones, astroviper::scalar_load(bm.jones_polarization_index, ip), v);
         }
     }
 }
@@ -230,7 +231,7 @@ void calculate_visibilities(
         const std::int64_t n = bm.kind == 1 ? bm.n_poly_frequency : bm.n_jones_frequency;
         model_row[i].resize(static_cast<std::size_t>(n_frequency));
         for (std::int64_t c = 0; c < n_frequency; ++c) {
-            model_row[i][static_cast<std::size_t>(c)] = nearest_index(values, n, frequency[c]);
+            model_row[i][static_cast<std::size_t>(c)] = nearest_index(values, n, astroviper::scalar_load(frequency, c));
         }
     }
 
@@ -239,33 +240,33 @@ void calculate_visibilities(
         std::vector<std::complex<double>> flux_scaled(4);
         std::vector<double> lm_ant(static_cast<std::size_t>(n_antenna * 2));
         for (std::int64_t t = 0; t < n_time; ++t) {
-            const double pa = parallactic_angle[t];
+            const double pa = astroviper::scalar_load(parallactic_angle, t);
             for (std::int64_t s = 0; s < n_source; ++s) {
-                const double ra = source_ra_dec[((t / f_source_time) * n_source + s) * 2 + 0];
-                const double dec = source_ra_dec[((t / f_source_time) * n_source + s) * 2 + 1];
+                const double ra = astroviper::scalar_load(source_ra_dec, ((t / f_source_time) * n_source + s) * 2 + 0);
+                const double dec = astroviper::scalar_load(source_ra_dec, ((t / f_source_time) * n_source + s) * 2 + 1);
                 // direction of the source relative to every antenna's pointing
                 for (std::int64_t a = 0; a < n_antenna; ++a) {
                     const double* pt = pointing_ra_dec +
                         ((t / f_pointing_time) * n_pointing_antenna + (a / f_pointing_ant)) * 2;
-                    sin_project(pt[0], pt[1], ra, dec, lm_ant[2 * a], lm_ant[2 * a + 1]);
+                    sin_project(astroviper::scalar_load(pt, 0), astroviper::scalar_load(pt, 1), ra, dec, lm_ant[2 * a], lm_ant[2 * a + 1]);
                 }
                 // Jones of every antenna at every frequency
                 for (std::int64_t a = 0; a < n_antenna; ++a) {
-                    const std::size_t i_model = static_cast<std::size_t>(beam_model_map[a]);
+                    const std::size_t i_model = static_cast<std::size_t>(astroviper::scalar_load(beam_model_map, a));
                     const BeamModel& bm = beam_models[i_model];
                     const std::vector<std::int64_t>& row = model_row[i_model];
                     for (std::int64_t c = 0; c < n_frequency; ++c) {
-                        sample_jones(bm, lm_ant[2 * a], lm_ant[2 * a + 1], frequency[c], pa,
+                        sample_jones(bm, lm_ant[2 * a], lm_ant[2 * a + 1], astroviper::scalar_load(frequency, c), pa,
                                      row.empty() ? 0 : row[static_cast<std::size_t>(c)],
                                      &jones_all[(a * n_frequency + c) * 4]);
                     }
                 }
                 const double* k = k_vector + (t * n_source + s) * 3;
-                const double inv_n = inverse_n[t * n_source + s];
+                const double inv_n = astroviper::scalar_load(inverse_n, t * n_source + s);
                 for (std::int64_t b = b_begin; b < b_end; ++b) {
                     const double* uvw_b = uvw + (t * n_baseline + b) * 3;
-                    const double phase = 2.0 * kPi * (uvw_b[0] * k[0] + uvw_b[1] * k[1] + uvw_b[2] * k[2]);
-                    const std::int64_t a1 = antenna1[b], a2 = antenna2[b];
+                    const double phase = 2.0 * kPi * (astroviper::scalar_load(uvw_b, 0) * astroviper::scalar_load(k, 0) + astroviper::scalar_load(uvw_b, 1) * astroviper::scalar_load(k, 1) + astroviper::scalar_load(uvw_b, 2) * astroviper::scalar_load(k, 2));
+                    const std::int64_t a1 = astroviper::scalar_load(antenna1, b), a2 = astroviper::scalar_load(antenna2, b);
                     for (std::int64_t c = 0; c < n_frequency; ++c) {
                         const std::complex<double>* j1 = &jones_all[(a1 * n_frequency + c) * 4];
                         const std::complex<double>* j2 = &jones_all[(a2 * n_frequency + c) * 4];
@@ -273,15 +274,15 @@ void calculate_visibilities(
                             flux + ((s * n_flux_time + t / f_flux_time) * n_flux_frequency + c / f_flux_freq) * 4;
                         flux_scaled[0] = flux_scaled[1] = flux_scaled[2] = flux_scaled[3] = 0.0;
                         for (std::int64_t im = 0; im < n_mueller; ++im) {
-                            const int e = static_cast<int>(mueller_selection[im]);
+                            const int e = static_cast<int>(astroviper::scalar_load(mueller_selection, im));
                             const int ja = kMapMuellerToJones[e][0], jb = kMapMuellerToJones[e][1];
-                            flux_scaled[e / 4] += j1[ja] * std::conj(j2[jb]) * f[e % 4];
+                            flux_scaled[e / 4] += astroviper::scalar_load(j1, ja) * std::conj(astroviper::scalar_load(j2, jb)) * astroviper::scalar_load(f, e % 4);
                         }
-                        const double arg = phase * frequency[c] / kSpeedOfLight;
+                        const double arg = phase * astroviper::scalar_load(frequency, c) / kSpeedOfLight;
                         const std::complex<double> fringe(std::cos(arg) * inv_n, std::sin(arg) * inv_n);
                         std::complex<double>* out = visibility + ((t * n_baseline + b) * n_frequency + c) * n_polarization;
                         for (std::int64_t p = 0; p < n_polarization; ++p) {
-                            out[p] += flux_scaled[polarization_index[p]] * fringe;
+                            astroviper::scalar_add(out, p, flux_scaled[astroviper::scalar_load(polarization_index, p)] * fringe);
                         }
                     }
                 }

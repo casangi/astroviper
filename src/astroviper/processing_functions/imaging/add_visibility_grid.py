@@ -351,7 +351,8 @@ def _add_grid_single_field(
         Description of the output data group, registered when the arrays
         are created.
     coords : dict, optional
-        Coordinates of the created arrays; none by default.
+        Coordinates of the created grid, of which the normalization takes
+        ``time``, ``frequency`` and ``polarization``; none by default.
     n_frequency_planes : int, optional
         Number of frequency planes of the created arrays in cube mode;
         ``img_xds.sizes["frequency"]`` by default.
@@ -391,6 +392,7 @@ def _add_grid_single_field(
 
     if chan_mode == "cube":
         from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+            get_frequency_boundaries,
             map_visibility_frequencies_to_image,
         )
 
@@ -400,7 +402,12 @@ def _add_grid_single_field(
             else n_frequency_planes
         )
         frequency_map = map_visibility_frequencies_to_image(
-            ms_xds.frequency.values, img_xds.frequency.values
+            ms_xds.frequency.values,
+            img_xds.frequency.values,
+            full_image_frequencies=img_xds.frequency.attrs.get(
+                "full_image_frequencies"
+            ),
+            frequency_boundaries=get_frequency_boundaries(img_xds, ms_xds),
         )
     else:  # continuum
         n_imag_chan = 1  # Single continuum image collapsed across all channels.
@@ -435,7 +442,11 @@ def _add_grid_single_field(
         img_xds[image_data_group_out[normalization_role]] = xr.DataArray(
             np.zeros((n_imag_time, n_imag_chan, n_imag_pol), dtype=np.double),
             dims=["time", "frequency", "polarization"],
-            coords=coords,
+            coords=(
+                None
+                if coords is None
+                else {dim: coords[dim] for dim in ("time", "frequency", "polarization")}
+            ),
         )
 
         modify_data_groups_xds(

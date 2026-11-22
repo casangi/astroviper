@@ -93,6 +93,41 @@ def test_continuum_mode_must_be_top_level():
         )
 
 
+@pytest.mark.parametrize("mode", [CONTINUUM_SINGLE_FIELD, CUBE_SINGLE_FIELD])
+@pytest.mark.parametrize(
+    "frequencies",
+    [
+        [1e9, 1e9],
+        [1e9, 1.1e9, 1.1e9],
+        [1.2e9, 1.1e9, 1e9],
+        [1e9, 1.2e9, 1.1e9],
+        np.array([2, 1], dtype=np.uint64),
+    ],
+)
+def test_frequency_axis_must_be_strictly_increasing(mode, frequencies):
+    original = deepcopy(frequencies)
+    with pytest.raises(
+        ValueError, match="frequency_coords must be strictly increasing"
+    ):
+        check_residual_update(
+            {"image_params": {"frequency_coords": frequencies}}, mode=mode
+        )
+    np.testing.assert_array_equal(frequencies, original)
+
+
+@pytest.mark.parametrize("mode", [CONTINUUM_SINGLE_FIELD, CUBE_SINGLE_FIELD])
+@pytest.mark.parametrize(
+    "frequencies",
+    [[1e9], [1e9, 1.1e9, 1.4e9], np.array([1, 2], dtype=np.uint64)],
+)
+def test_increasing_and_single_channel_axes_are_accepted_unchanged(mode, frequencies):
+    original = deepcopy(frequencies)
+    check_residual_update(
+        {"image_params": {"frequency_coords": frequencies}}, mode=mode
+    )
+    np.testing.assert_array_equal(frequencies, original)
+
+
 @pytest.mark.parametrize(
     "image,message",
     [
