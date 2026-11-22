@@ -1,11 +1,11 @@
 #include "../include/direct_fourier_transform.hpp"
+#include "parallel_for.hpp"
 #include "scalar_buffer.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <complex>
 #include <cstdint>
-#include <thread>
 #include <type_traits>
 #include <vector>
 
@@ -198,27 +198,6 @@ inline void read_model(const ModelT& value, double& re, double& im) {
     }
 }
 
-int resolve_threads(int processing_function_threads, std::int64_t n_work) {
-    int threads = std::max(1, processing_function_threads);
-    if (static_cast<std::int64_t>(threads) > n_work) {
-        threads = static_cast<int>(std::max<std::int64_t>(n_work, 1));
-    }
-    return threads;
-}
-
-template <typename Worker>
-void run_threads(int n_threads, Worker worker) {
-    if (n_threads <= 1) {
-        worker(0);
-        return;
-    }
-    std::vector<std::thread> threads;
-    threads.reserve(n_threads - 1);
-    for (int t = 1; t < n_threads; ++t) threads.emplace_back(worker, t);
-    worker(0);
-    for (auto& th : threads) th.join();
-}
-
 // The valid samples of every image plane (a_time, a_chan), in their order in
 // the visibility arrays: u, v, w in wavelengths and, per polarization, the
 // weighted visibility (zero for a polarization whose sample is not valid).
@@ -337,7 +316,7 @@ void image_samples(
     const std::int64_t n_tiles = n_row_tiles * n_column_tiles;
     const std::int64_t n_units = n_planes * n_tiles;
     if (n_units <= 0 || samples.plane_start[n_planes] == 0) return;
-    const int n_threads = resolve_threads(processing_function_threads, n_units);
+    const int n_threads = astroviper::thread_count(processing_function_threads, n_units);
 
     auto worker = [&](int thread_index) {
         std::vector<double> l_tile(kTileRows), m_tile(kTileColumns), n_tile(kTilePixels),
@@ -450,7 +429,7 @@ void image_samples(
             }
         }
     };
-    run_threads(n_threads, worker);
+    astroviper::run_threads(n_threads, worker);
 }
 
 }  // namespace
@@ -560,16 +539,12 @@ void dft_predict(
     for (std::int64_t c = 0; c < n_vis_chan; ++c) scale[c] = astroviper::scalar_load(frequency_coord, c) / kSpeedOfLight;
 
     const std::int64_t n_rows = n_time * n_baseline;
-    if (n_rows <= 0) return;
-    const int n_threads = resolve_threads(processing_function_threads, n_rows);
-    const std::int64_t chunk = (n_rows + n_threads - 1) / n_threads;
 
-    auto worker = [&](int thread_index) {
+    auto worker = [&](std::int64_t row_begin, std::int64_t row_end) {
         std::vector<double> cos_block(kBlock), sin_block(kBlock);
         std::vector<double> sum_re(static_cast<std::size_t>(n_pol)),
             sum_im(static_cast<std::size_t>(n_pol));
-        const std::int64_t row_end = std::min(n_rows, (thread_index + 1) * chunk);
-        for (std::int64_t row = thread_index * chunk; row < row_end; ++row) {
+        for (std::int64_t row = row_begin; row < row_end; ++row) {
             const std::int64_t t = row / n_baseline;
             const double* uvw_b = uvw + row * 3;
             if (!std::isfinite(astroviper::scalar_load(uvw_b, 0)) || !std::isfinite(astroviper::scalar_load(uvw_b, 1)) || !std::isfinite(astroviper::scalar_load(uvw_b, 2)))
@@ -619,7 +594,7 @@ void dft_predict(
             }
         }
     };
-    run_threads(n_threads, worker);
+    astroviper::parallel_for(processing_function_threads, n_rows, worker);
 }
 
 // Explicit instantiations.

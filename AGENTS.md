@@ -537,7 +537,10 @@ match them in any new kernel:
    visibilities in place — all four combinations are explicitly instantiated.
 6. **Threading inside the kernel** is via a `processing_function_threads` argument →
    `std::thread` workers; a count below 1 runs one thread, as `1` does (serial),
-   never `std::thread::hardware_concurrency()`. A task's `processing_function_threads`
+   never `std::thread::hardware_concurrency()`; the anti-alias gridders and degridder and
+   the direct Fourier transform run their loops with
+   `processing_functions/include/parallel_for.hpp` (`thread_count`, `run_threads`,
+   `parallel_for`). A task's `processing_function_threads`
    is the most threads its processing functions compute with at once: a kernel that
    runs FFTs inside a parallel loop shares the count between them and never
    multiplies it (Asp gives each running plane `max(1, count / active)` FFT threads,

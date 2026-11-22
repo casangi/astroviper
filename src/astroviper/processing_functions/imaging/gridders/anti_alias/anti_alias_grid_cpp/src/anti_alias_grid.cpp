@@ -1,15 +1,14 @@
 #include "../include/anti_alias_grid.hpp"
 #include "scalar_buffer.hpp"
+#include "parallel_for.hpp"
 #include "../include/kernel_lookup.hpp"
 
-#include <algorithm>
 #include <atomic>
 #include <array>
 #include <mutex>
 #include <cmath>
 #include <complex>
 #include <cstdint>
-#include <thread>
 #include <vector>
 
 namespace anti_alias {
@@ -209,12 +208,6 @@ void anti_alias_grid(
 
     const int64_t total_work =
         static_cast<int64_t>(n_time) * static_cast<int64_t>(n_baseline);
-    if (total_work <= 0) return;
-
-    int resolved_threads = std::max(1, processing_function_threads);
-    if (static_cast<int64_t>(resolved_threads) > total_work) {
-        resolved_threads = static_cast<int>(total_work);
-    }
 
     auto worker = [&](int64_t begin, int64_t end) {
         for (int64_t flat = begin; flat < end; ++flat) {
@@ -224,24 +217,7 @@ void anti_alias_grid(
         }
     };
 
-    if (resolved_threads <= 1) {
-        worker(0, total_work);
-        return;
-    }
-
-    const int64_t chunk =
-        (total_work + resolved_threads - 1) / resolved_threads;
-
-    std::vector<std::thread> threads;
-    threads.reserve(resolved_threads - 1);
-    for (int t = 0; t < resolved_threads - 1; ++t) {
-        const int64_t begin = static_cast<int64_t>(t) * chunk;
-        const int64_t end   = std::min(total_work, begin + chunk);
-        threads.emplace_back(worker, begin, end);
-    }
-    // Run the last chunk on the calling thread to save one join.
-    worker(static_cast<int64_t>(resolved_threads - 1) * chunk, total_work);
-    for (auto& th : threads) th.join();
+    astroviper::parallel_for(processing_function_threads, total_work, worker);
 }
 
 
@@ -389,12 +365,6 @@ void anti_alias_grid_uv_sampling(
 
     const int64_t total_work =
         static_cast<int64_t>(n_time) * static_cast<int64_t>(n_baseline);
-    if (total_work <= 0) return;
-
-    int resolved_threads = std::max(1, processing_function_threads);
-    if (static_cast<int64_t>(resolved_threads) > total_work) {
-        resolved_threads = static_cast<int>(total_work);
-    }
 
     auto worker = [&](int64_t begin, int64_t end) {
         for (int64_t flat = begin; flat < end; ++flat) {
@@ -404,23 +374,7 @@ void anti_alias_grid_uv_sampling(
         }
     };
 
-    if (resolved_threads <= 1) {
-        worker(0, total_work);
-        return;
-    }
-
-    const int64_t chunk =
-        (total_work + resolved_threads - 1) / resolved_threads;
-
-    std::vector<std::thread> threads;
-    threads.reserve(resolved_threads - 1);
-    for (int t = 0; t < resolved_threads - 1; ++t) {
-        const int64_t begin = static_cast<int64_t>(t) * chunk;
-        const int64_t end   = std::min(total_work, begin + chunk);
-        threads.emplace_back(worker, begin, end);
-    }
-    worker(static_cast<int64_t>(resolved_threads - 1) * chunk, total_work);
-    for (auto& th : threads) th.join();
+    astroviper::parallel_for(processing_function_threads, total_work, worker);
 }
 
 // Explicit instantiations for the supported grid precisions.
