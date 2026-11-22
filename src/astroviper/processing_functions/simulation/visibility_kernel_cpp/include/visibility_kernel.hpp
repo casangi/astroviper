@@ -91,7 +91,7 @@ void calculate_visibilities(
     std::int64_t n_pointing_antenna,
     std::int64_t n_antenna,
     std::int64_t n_mueller,
-    int n_threads);
+    int processing_function_threads);
 
 /** Bessel function of the first kind of order one (Cephes algorithm, as used by SciPy). */
 double bessel_j1(double x);

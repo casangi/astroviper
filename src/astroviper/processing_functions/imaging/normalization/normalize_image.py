@@ -61,7 +61,7 @@ def _fft_module(backend):
     return fft
 
 
-def _fftw_unaligned_inplace(work, axes, threads, inverse):
+def _fftw_unaligned_inplace(work, axes, processing_function_threads, inverse):
     """Transform external unaligned storage using only one aligned line of scratch.
 
     FFTW requires natural alignment even with SIMD disabled. A separable FFT
@@ -78,7 +78,7 @@ def _fftw_unaligned_inplace(work, axes, threads, inverse):
             scratch,
             direction="FFTW_BACKWARD" if inverse else "FFTW_FORWARD",
             flags=("FFTW_ESTIMATE",),
-            threads=threads,
+            threads=processing_function_threads,
         )
         for index in np.ndindex(lines.shape[:-1]):
             np.copyto(scratch, lines[index])
@@ -585,7 +585,7 @@ def ifft_uv_to_lm(
         either complex precision (``complex64`` or ``complex128``).
     fft_plane_dims : tuple of int, optional
         Axes over which to apply the 2-D FFT.  Default is ``(-2, -1)``.
-    threads : int, optional
+    processing_function_threads : int, optional
         Number of threads passed to the FFT backend.  Default is ``1``.
     fft_backend : {"scipy", "pyfftw"}, optional
         FFT library to use.  Default is ``"pyfftw"``.
@@ -605,9 +605,10 @@ def ifft_uv_to_lm(
 
     Notes
     -----
-    When running inside a single-threaded dask worker keep ``threads=1`` to
-    avoid spawning threads that fight dask's own scheduler.  Set
-    ``threads > 1`` only when calling outside a dask context.
+    When running inside a single-threaded dask worker keep
+    ``processing_function_threads=1`` to avoid spawning threads that fight
+    dask's own scheduler.  Set ``processing_function_threads > 1`` only when
+    calling outside a dask context.
     """
     fft = _fft_module(fft_backend)
     start = time.time()
@@ -678,7 +679,7 @@ def fft_lm_to_uv(
         Cast to ``complex_dtype`` internally.
     fft_plane_dims : tuple of int, optional
         Axes over which to apply the 2-D FFT.  Default is ``(-2, -1)``.
-    threads : int, optional
+    processing_function_threads : int, optional
         Number of threads passed to the FFT backend.  Default is ``1``.
     fft_backend : {"scipy", "pyfftw"}, optional
         FFT library to use.  Default is ``"pyfftw"``.

@@ -1688,14 +1688,14 @@ AspResult aspclean_plane(T* residual, T* model, const T* psf, const T* mask,
                          int asp_scale_normalization_method, bool asp_stop_after_hogbom_run,
                          bool verbose,
                          const deconvolvers::DivergenceControl<double>& divergence,
-                         int fft_threads, const AspOptions& options) {
+                         int processing_function_threads, const AspOptions& options) {
     check_controls(asp_psf_width, asp_largest_scale, asp_stop_point_mode,
                    asp_scale_normalization_method, options.asp_min_mask_coverage);
     return clean_plane<T>(residual, model, psf, mask, nx, ny, gain, threshold_per_cycle,
                           max_iter_per_cycle_updated, asp_fused_threshold, asp_psf_width,
                           asp_largest_scale, asp_stop_point_mode, asp_scale_normalization_method,
                           asp_stop_after_hogbom_run, verbose, divergence,
-                          FftThreads{std::max(1, fft_threads), nullptr}, options);
+                          FftThreads{std::max(1, processing_function_threads), nullptr}, options);
 }
 
 template <typename T>

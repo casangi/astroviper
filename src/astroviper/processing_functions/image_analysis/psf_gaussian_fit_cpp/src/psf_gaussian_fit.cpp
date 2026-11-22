@@ -473,7 +473,7 @@ int fit_plane(const double* psf_in, std::size_t nx_in, std::size_t ny_in,
 
 int fit_planes(const double* psf, std::size_t n_plane, std::size_t nx,
                std::size_t ny, double delta_x, double delta_y, double psfcutoff,
-               double* beams, int n_threads) {
+               double* beams, int processing_function_threads) {
     const std::size_t plane_size = nx * ny;
     std::vector<int> fallback(n_plane, 0);
     std::vector<std::string> errors(n_plane);
@@ -490,7 +490,7 @@ int fit_planes(const double* psf, std::size_t n_plane, std::size_t nx,
     };
 
     const int usable = std::max(
-        1, std::min<int>(n_threads, static_cast<int>(n_plane)));
+        1, std::min<int>(processing_function_threads, static_cast<int>(n_plane)));
     if (usable <= 1) {
         work(0, n_plane);
     } else {

@@ -206,8 +206,9 @@ void convolve_centered(const double* a, const double* b, int nx, int ny,
 // reproduce the CASA defaults. Other values throw std::invalid_argument.
 // `asp_stop_after_hogbom_run` reproduces CASA's end of the model update after
 // a Hogbom run. `divergence` is the divergence test shared with the other
-// deconvolvers (plane_stop_test.hpp). `fft_threads` is the number of threads
-// of every 2-D transform. No copies of the caller's buffers are made.
+// deconvolvers (plane_stop_test.hpp). `processing_function_threads` is the
+// number of threads of every 2-D transform. No copies of the caller's buffers
+// are made.
 template <typename T>
 AspResult aspclean_plane(T* residual, T* model, const T* psf, const T* mask,
                          int nx, int ny, double gain, double threshold_per_cycle,
@@ -216,7 +217,7 @@ AspResult aspclean_plane(T* residual, T* model, const T* psf, const T* mask,
                          int asp_scale_normalization_method, bool asp_stop_after_hogbom_run,
                          bool verbose,
                          const deconvolvers::DivergenceControl<double>& divergence,
-                         int fft_threads = 1, const AspOptions& options = AspOptions{});
+                         int processing_function_threads = 1, const AspOptions& options = AspOptions{});
 
 // Run aspclean_plane independently on every (time, frequency, polarization)
 // plane of a 5-D cube [nt, nf, np, ny, nx], in place, across `processing_function_threads`
