@@ -433,7 +433,7 @@ or exports from the imaging package, and have been removed:
 
 - `check_grid_params`
 - `check_gcf_params`
-- `check_mosaic_pb_params`
+- `check_mosaic_pb_params` (kept, not tested or maintained, in `src/astroviper/parked/`)
 - `check_rotation_params`
 - `check_norm_params`
 - `check_pb_params`
