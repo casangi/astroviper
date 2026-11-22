@@ -1,9 +1,9 @@
 #include "../include/visibility_kernel.hpp"
+#include "parallel_for.hpp"
 #include "scalar_buffer.hpp"
 
 #include <algorithm>
 #include <cmath>
-#include <thread>
 #include <vector>
 
 namespace visibility_kernel {
@@ -212,9 +212,6 @@ void calculate_visibilities(
     std::int64_t n_flux_time, std::int64_t n_flux_frequency, std::int64_t n_source_time,
     std::int64_t n_pointing_time, std::int64_t n_pointing_antenna, std::int64_t n_antenna,
     std::int64_t n_mueller, int processing_function_threads) {
-    if (processing_function_threads < 1) processing_function_threads = 1;
-    processing_function_threads = static_cast<int>(std::min<std::int64_t>(processing_function_threads, std::max<std::int64_t>(n_baseline, 1)));
-
     const std::int64_t f_flux_time = (n_flux_time == 1) ? n_time : 1;
     const std::int64_t f_flux_freq = (n_flux_frequency == 1) ? n_frequency : 1;
     const std::int64_t f_source_time = (n_source_time == 1) ? n_time : 1;
@@ -289,20 +286,7 @@ void calculate_visibilities(
         }
     };
 
-    if (processing_function_threads == 1) {
-        worker(0, n_baseline);
-        return;
-    }
-    std::vector<std::thread> threads;
-    threads.reserve(processing_function_threads);
-    const std::int64_t per = (n_baseline + processing_function_threads - 1) / processing_function_threads;
-    for (int i = 0; i < processing_function_threads; ++i) {
-        const std::int64_t b0 = i * per;
-        const std::int64_t b1 = std::min(n_baseline, b0 + per);
-        if (b0 >= b1) break;
-        threads.emplace_back(worker, b0, b1);
-    }
-    for (auto& th : threads) th.join();
+    astroviper::parallel_for(processing_function_threads, n_baseline, worker);
 }
 
 }  // namespace visibility_kernel

@@ -29,6 +29,7 @@
  */
 
 #include "../include/hclean.hpp"
+#include "parallel_for.hpp"
 #include "scalar_buffer.hpp"
 #include <cmath>
 #include <algorithm>
@@ -357,22 +358,8 @@ void clean_cube(T* residual_cube, T* model_cube, const T* psf_cube,
         }
     };
 
-    int nthreads = processing_function_threads;
-    if (nthreads < 1) nthreads = 1;
-    if (nthreads > nplanes) nthreads = nplanes;
-
-    if (nthreads == 1) {
-        worker();
-    } else {
-        std::vector<std::thread> threads;
-        threads.reserve(nthreads);
-        for (int i = 0; i < nthreads; ++i) {
-            threads.emplace_back(worker);
-        }
-        for (auto& t : threads) {
-            t.join();
-        }
-    }
+    astroviper::run_threads(astroviper::thread_count(processing_function_threads, nplanes),
+                            [&](int) { worker(); });
 }
 
 /**
@@ -536,14 +523,9 @@ void clean_cube_many_threads(T* residual_cube, T* model_cube, const T* psf_cube,
         if (astroviper::scalar_load(max_iter_per_cycle_updated, pl) > max_iter_over_planes) max_iter_over_planes = astroviper::scalar_load(max_iter_per_cycle_updated, pl);
     }
 
-    int nthreads = processing_function_threads;
-    if (nthreads < 1) nthreads = 1;
-
     const long n_rows = static_cast<long>(nplanes) * ny;
     // Don't create more workers than rows of work.
-    if (static_cast<long>(nthreads) > n_rows) {
-        nthreads = static_cast<int>(std::max(1L, n_rows));
-    }
+    const int nthreads = astroviper::thread_count(processing_function_threads, n_rows);
 
     // Persistent thread pool: workers are created once here and reused for
     // every iteration's peak search and subtraction (no per-iteration spawn).

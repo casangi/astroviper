@@ -499,6 +499,39 @@ class TestCube:
                     np.testing.assert_allclose(rc[t, f, p], r1, atol=1e-10)
                     np.testing.assert_allclose(mc[t, f, p], m1, atol=1e-10)
 
+    @pytest.mark.parametrize("n_planes", [2, 3])
+    def test_cube_identical_for_every_thread_count(self, n_planes):
+        """On 2 and 3 planes, 3 and 7 threads (as many as or more than the
+        planes) give the residual, the model and every returned array of one
+        thread (fewer than the planes), bit for bit."""
+        psf, resid = self._make_cube(1, n_planes, 1, 64, 64)
+        threshold = np.full((1, n_planes, 1), 0.05, dtype=np.float64)
+        max_iter = np.full((1, n_planes, 1), 80, dtype=np.int32)
+
+        def run(threads):
+            residual, model = resid.copy(), np.zeros_like(resid)
+            out = aspclean.clean_cube(
+                residual,
+                psf,
+                model,
+                gain=0.1,
+                threshold_per_cycle=threshold,
+                max_iter_per_cycle_updated=max_iter,
+                asp_fused_threshold=0.1,
+                processing_function_threads=threads,
+            )
+            return residual, model, out
+
+        residual_1, model_1, out_1 = run(1)
+        assert model_1.any()
+        for threads in (3, 7):
+            residual, model, out = run(threads)
+            np.testing.assert_array_equal(residual, residual_1)
+            np.testing.assert_array_equal(model, model_1)
+            assert out.keys() == out_1.keys()
+            for key, value in out_1.items():
+                np.testing.assert_array_equal(out[key], value, err_msg=key)
+
     def test_cube_psf_broadcast(self):
         nt, nf, npol, ny, nx = 1, 1, 3, 64, 64
         _, resid = self._make_cube(nt, nf, npol, ny, nx)

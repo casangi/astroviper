@@ -24,6 +24,7 @@
 // None of this changes what is computed beyond rounding.
 
 #include "../include/asp_clean.hpp"
+#include "parallel_for.hpp"
 #include "scalar_buffer.hpp"
 
 #include <algorithm>
@@ -35,7 +36,6 @@
 #include <deque>
 #include <numeric>
 #include <stdexcept>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -1718,7 +1718,7 @@ void aspclean_cube(T* residual, T* model, const T* psf, const T* mask, int nt,
     // plane share all processing_function_threads with the planes still
     // running, so threads beyond the plane count, and those of workers that
     // have run out of planes, go to the planes left.
-    const int nthreads = std::max(1, std::min(processing_function_threads, nplanes));
+    const int nthreads = astroviper::thread_count(processing_function_threads, nplanes);
     std::atomic<int> active(nthreads);
     const FftThreads fft_threads{std::max(1, processing_function_threads), &active};
 
@@ -1748,14 +1748,7 @@ void aspclean_cube(T* residual, T* model, const T* psf, const T* mask, int nt,
         active.fetch_sub(1, std::memory_order_relaxed);
     };
 
-    if (nthreads == 1) {
-        worker();
-    } else {
-        std::vector<std::thread> pool;
-        pool.reserve(nthreads);
-        for (int i = 0; i < nthreads; ++i) pool.emplace_back(worker);
-        for (auto& t : pool) t.join();
-    }
+    astroviper::run_threads(nthreads, [&](int) { worker(); });
 }
 
 // Explicit instantiations for float and double image buffers.
