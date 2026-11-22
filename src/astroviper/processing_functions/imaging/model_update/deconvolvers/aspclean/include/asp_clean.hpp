@@ -5,8 +5,9 @@
 // synthesis/ImagerObjects/SDAlgorithmAAspClean.{h,cc}. All casacore
 // dependencies (Matrix, FFTServer, IPosition, LogIO, ...) and the ALGLIB
 // L-BFGS dependency have been removed and replaced with the C++ standard
-// library plus the small self-contained headers asp_fft.hpp (FFTs via the
-// vendored pocketfft header) and asp_lbfgs.hpp.
+// library plus the small self-contained headers
+// processing_functions/include/fft.hpp (FFTs via the vendored pocketfft
+// header) and asp_lbfgs.hpp.
 //
 // Deliberate departures from CASA, documented at the code:
 //  * the residual update and the Aspen fit use exact linear convolutions with

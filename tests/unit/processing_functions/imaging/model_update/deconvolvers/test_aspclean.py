@@ -4,7 +4,7 @@ deconvolver
 (``astroviper.processing_functions.imaging.model_update.deconvolvers.aspclean``).
 
 This is a dependency-free port of CASA's ``AspMatrixCleaner``: casacore and
-ALGLIB have been replaced by the self-contained FFT (``asp_fft.hpp``) and
+ALGLIB have been replaced by the self-contained FFT (``fft.hpp``) and
 L-BFGS (``asp_lbfgs.hpp``) headers. The wrapper operates on Python-owned numpy
 buffers with no copies on the C++ side: ``residual`` and ``model`` are written
 into directly.

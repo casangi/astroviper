@@ -4,7 +4,8 @@
 //
 // casacore types are replaced with the small `Mat` double-precision matrix
 // below and raw pointers into the caller's (Python-owned) buffers; FFTServer
-// is replaced by asp_fft.hpp (pocketfft) and ALGLIB by asp_lbfgs.hpp.
+// is replaced by processing_functions/include/fft.hpp (pocketfft) and ALGLIB
+// by asp_lbfgs.hpp.
 //
 // The algorithm is CASA's, but the convolutions are not computed the same way:
 //  * CASA convolves on the image grid with circular FFTs, so the PSF response
@@ -38,14 +39,20 @@
 #include <utility>
 #include <vector>
 
-#include "../include/asp_fft.hpp"
+#include "fft.hpp"
 #include "../include/asp_lbfgs.hpp"
 
 namespace aspclean {
 
 namespace {
 
-using aspfft::cd;
+using cd = std::complex<double>;
+
+// Complex product without the NaN recovery of std::complex's operator*
+// (the operands here are always finite).
+inline cd mul(const cd& a, const cd& b) {
+    return cd(a.real() * b.real() - a.imag() * b.imag(), a.real() * b.imag() + a.imag() * b.real());
+}
 
 constexpr double kTwoPi = 6.283185307179586476925286766559;
 constexpr double kSqrtTwoPi = 2.5066282746310002;
@@ -96,7 +103,7 @@ void conv_from_spectra(const std::vector<cd>& xfrA, const std::vector<cd>& xfrB,
     std::vector<cd> prod(xfrA.size());
     for (std::size_t k = 0; k < prod.size(); ++k) prod[k] = xfrA[k] * xfrB[k];
     out.assign(static_cast<std::size_t>(nx) * ny, 0.0);
-    aspfft::irfft2_inverse(std::move(prod), nx, ny, out.data());
+    astroviper::fft::irfft2_inverse(std::move(prod), nx, ny, out.data(), 1);
     flip_inplace(out, nx, ny);
 }
 
@@ -191,9 +198,9 @@ struct FftThreads {
     int total = 1;
     const std::atomic<int>* active = nullptr;
 
-    std::size_t get() const {
+    int get() const {
         const int n = active ? std::max(1, active->load(std::memory_order_relaxed)) : 1;
-        return static_cast<std::size_t>(std::max(1, total / n));
+        return std::max(1, total / n);
     }
 };
 
@@ -230,7 +237,7 @@ struct PsfCutoutSpectra {
             }
         }
         if (cache.size() >= 8) cache.erase(cache.begin());
-        cache.emplace_back(std::make_pair(lx, ly), aspfft::rfft2_half(grid.data(), lx, ly, threads->get()));
+        cache.emplace_back(std::make_pair(lx, ly), astroviper::fft::rfft2_half(grid.data(), lx, ly, threads->get()));
         return cache.back().second;
     }
 };
@@ -328,10 +335,10 @@ struct AspObjective {
             gy[k] = std::exp(-d * d * inv2s2);
             hy[k] = d * d * inv_s2 * gy[k];
         }
-        const std::vector<cd> Gx = aspfft::rfft1d_half(gx);
-        const std::vector<cd> Hx = aspfft::rfft1d_half(hxv);
-        const std::vector<cd> Gy = aspfft::fft1d_forward(gy);
-        const std::vector<cd> Hy = aspfft::fft1d_forward(hy);
+        const std::vector<cd> Gx = astroviper::fft::rfft1d_half(gx, 1);
+        const std::vector<cd> Hx = astroviper::fft::rfft1d_half(hxv, 1);
+        const std::vector<cd> Gy = astroviper::fft::fft1d_forward(gy, 1);
+        const std::vector<cd> Hy = astroviper::fft::fft1d_forward(hy, 1);
 
         const double norm = 1.0 / (kSqrtTwoPi * asc);
         const double dnorm = norm / asc;
@@ -347,19 +354,19 @@ struct AspObjective {
                 const cd gxk = Gx[static_cast<std::size_t>(kx)];
                 const cd hxk = Hx[static_cast<std::size_t>(kx)];
                 const cd p = psfFT[base + kx];
-                const cd gg = aspfft::mul(gxk, gyk);
-                specA[base + kx] = aspfft::mul(gg, p) * norm;
+                const cd gg = mul(gxk, gyk);
+                specA[base + kx] = mul(gg, p) * norm;
                 specD[base + kx] =
-                    aspfft::mul(aspfft::mul(hxk, gyk) + aspfft::mul(gxk, hyk) - gg, p) * dnorm;
+                    mul(mul(hxk, gyk) + mul(gxk, hyk) - gg, p) * dnorm;
             }
         }
         std::vector<double>& convA = ws.convA;
         std::vector<double>& convD = ws.convD;
         convA.resize(static_cast<std::size_t>(lx) * ly);
         convD.resize(convA.size());
-        const std::size_t nthreads = threads.get();
-        aspfft::irfft2_half(specA.data(), lx, ly, convA.data(), nthreads);
-        aspfft::irfft2_half(specD.data(), lx, ly, convD.data(), nthreads);
+        const int nthreads = threads.get();
+        astroviper::fft::irfft2_half(specA.data(), lx, ly, convA.data(), nthreads);
+        astroviper::fft::irfft2_half(specD.data(), lx, ly, convD.data(), nthreads);
 
         double func = 0.0, dA = 0.0, dS = 0.0;
         for (int j = minJ; j < maxJ; ++j) {
@@ -555,7 +562,7 @@ private:
                         psfd_[static_cast<std::size_t>(j) * nx_ + i];
                 }
             }
-            psfXfrPad_ = aspfft::rfft2_half(grid.data(), padNx_, padNy_, fftThreads_.get());
+            psfXfrPad_ = astroviper::fft::rfft2_half(grid.data(), padNx_, padNy_, fftThreads_.get());
         }
         psfCutouts_ = PsfCutoutSpectra{psfd_.data(), nx_, ny_, &fftThreads_, {}};
 
@@ -590,7 +597,7 @@ private:
         std::vector<double> dirtyd(static_cast<std::size_t>(nx_) * ny_);
         for (std::size_t k = 0; k < dirtyd.size(); ++k) dirtyd[k] = static_cast<double>(astroviper::scalar_load(residual_, k));
         std::vector<cd> spec;
-        if (ns > 1) aspfft::rfft2_half(dirtyd.data(), nx_, ny_, spec, fftThreads_.get());
+        if (ns > 1) astroviper::fft::rfft2_half(dirtyd.data(), nx_, ny_, spec, fftThreads_.get());
         std::vector<double> conv;
         const std::size_t n_all = static_cast<std::size_t>(nx_) * ny_;
         const std::size_t stride = std::max<std::size_t>(1, n_all / 400000);
@@ -626,10 +633,10 @@ private:
             std::copy(in.begin() + static_cast<std::ptrdiff_t>(j) * bx,
                       in.begin() + static_cast<std::ptrdiff_t>(j + 1) * bx,
                       grid.begin() + static_cast<std::ptrdiff_t>(j) * lx);
-        aspfft::rfft2_half(grid.data(), lx, ly, spec, fftThreads_.get());
+        astroviper::fft::rfft2_half(grid.data(), lx, ly, spec, fftThreads_.get());
         for (std::size_t k = 0; k < spec.size(); ++k)
-            astroviper::scalar_store(spec, k, aspfft::mul(astroviper::scalar_load(spec, k), adjoint ? std::conj(psfFT[k]) : psfFT[k]));
-        aspfft::irfft2_half(spec.data(), lx, ly, grid.data(), fftThreads_.get());
+            astroviper::scalar_store(spec, k, mul(astroviper::scalar_load(spec, k), adjoint ? std::conj(psfFT[k]) : psfFT[k]));
+        astroviper::fft::irfft2_half(spec.data(), lx, ly, grid.data(), fftThreads_.get());
         out.resize(static_cast<std::size_t>(bx) * by);
         for (int j = 0; j < by; ++j)
             std::copy(grid.begin() + static_cast<std::ptrdiff_t>(j) * lx,
@@ -811,9 +818,9 @@ private:
                     modelAdd(box.i0 + i, box.j0 + j, v);
                 }
             std::vector<cd>& pspec = work_.specA;
-            aspfft::rfft2_half(padded.data(), padNx_, padNy_, pspec, fftThreads_.get());
-            for (std::size_t k = 0; k < pspec.size(); ++k) pspec[k] = aspfft::mul(pspec[k], psfXfrPad_[k]);
-            aspfft::irfft2_half(pspec.data(), padNx_, padNy_, padded.data(), fftThreads_.get());
+            astroviper::fft::rfft2_half(padded.data(), padNx_, padNy_, pspec, fftThreads_.get());
+            for (std::size_t k = 0; k < pspec.size(); ++k) pspec[k] = mul(pspec[k], psfXfrPad_[k]);
+            astroviper::fft::irfft2_half(pspec.data(), padNx_, padNy_, padded.data(), fftThreads_.get());
             for (int j = 0; j < ny_; ++j)
                 for (int i = 0; i < nx_; ++i)
                     dirtySet(i, j, dirtyAt(i, j) - padded[static_cast<std::size_t>(j) * padNx_ + i]);
@@ -910,8 +917,8 @@ private:
         };
         for (int s = 1; s < nInitScales_; ++s) {
             const double size = initScaleSizes_[s];
-            initScaleXfrX_[s] = aspfft::rfft1d_half(wrapped_profile(nx_, size));
-            initScaleXfrY_[s] = aspfft::fft1d_forward(wrapped_profile(ny_, size));
+            initScaleXfrX_[s] = astroviper::fft::rfft1d_half(wrapped_profile(nx_, size), 1);
+            initScaleXfrY_[s] = astroviper::fft::fft1d_forward(wrapped_profile(ny_, size), 1);
             const double norm = 1.0 / (kSqrtTwoPi * size);
             for (cd& v : initScaleXfrY_[s]) v *= norm;
         }
@@ -929,10 +936,10 @@ private:
             const cd yk = Y[static_cast<std::size_t>(ky)];
             const std::size_t base = static_cast<std::size_t>(ky) * hx;
             for (int kx = 0; kx < hx; ++kx)
-                prod[base + kx] = aspfft::mul(astroviper::scalar_load(spec, base + kx), aspfft::mul(X[static_cast<std::size_t>(kx)], yk));
+                prod[base + kx] = mul(astroviper::scalar_load(spec, base + kx), mul(X[static_cast<std::size_t>(kx)], yk));
         }
         out.resize(static_cast<std::size_t>(nx_) * ny_);
-        aspfft::irfft2_half(prod.data(), nx_, ny_, out.data(), fftThreads_.get());
+        astroviper::fft::irfft2_half(prod.data(), nx_, ny_, out.data(), fftThreads_.get());
     }
 
     // Share of the flux of the Gaussian at (ci, cj) on the mask.
@@ -969,7 +976,7 @@ private:
         if (noClean_) return;
 
         std::vector<cd> maskFT;
-        if (nInitScales_ > 1) maskFT = aspfft::rfft2_half(maskMat_.d.data(), nx_, ny_, fftThreads_.get());
+        if (nInitScales_ > 1) maskFT = astroviper::fft::rfft2_half(maskMat_.d.data(), nx_, ny_, fftThreads_.get());
         initScaleMasks_.assign(nInitScales_, Mat(nx_, ny_));
         for (int s = 0; s < nInitScales_; ++s) {
             initScaleMasks_[s] = Mat(nx_, ny_);
@@ -1139,7 +1146,7 @@ private:
             std::vector<double>& dirtyd = work_.convD;
             dirtyd.resize(static_cast<std::size_t>(nx_) * ny_);
             for (std::size_t k = 0; k < dirtyd.size(); ++k) dirtyd[k] = static_cast<double>(astroviper::scalar_load(residual_, k));
-            aspfft::rfft2_half(dirtyd.data(), nx_, ny_, dirtyFT_, fftThreads_.get());
+            astroviper::fft::rfft2_half(dirtyd.data(), nx_, ny_, dirtyFT_, fftThreads_.get());
             for (int s = 1; s < nInitScales_; ++s) {
                 dirtyConvInitScales_[s].nx = nx_;
                 dirtyConvInitScales_[s].ny = ny_;
@@ -1440,8 +1447,8 @@ private:
                 std::vector<double> gx(padNx_, 0.0), gy(padNy_, 0.0);
                 std::copy(rx.begin(), rx.end(), gx.begin());
                 std::copy(ry.begin(), ry.end(), gy.begin());
-                const std::vector<cd> X = aspfft::rfft1d_half(gx);
-                const std::vector<cd> Y = aspfft::fft1d_forward(gy);
+                const std::vector<cd> X = astroviper::fft::rfft1d_half(gx, 1);
+                const std::vector<cd> Y = astroviper::fft::fft1d_forward(gy, 1);
                 const double norm = 1.0 / (kSqrtTwoPi * usedScale);
                 componentFlux = scaleFactor * norm * std::accumulate(rx.begin(), rx.end(), 0.0) *
                                 std::accumulate(ry.begin(), ry.end(), 0.0);
@@ -1452,12 +1459,12 @@ private:
                     const cd ay = norm * Y[static_cast<std::size_t>(ky)];
                     const std::size_t base = static_cast<std::size_t>(ky) * hx;
                     for (int kx = 0; kx < hx; ++kx)
-                        astroviper::scalar_store(spec, base + kx, aspfft::mul(aspfft::mul(ay, X[static_cast<std::size_t>(kx)]),
+                        astroviper::scalar_store(spec, base + kx, mul(mul(ay, X[static_cast<std::size_t>(kx)]),
                                                       psfXfrPad_[base + kx]));
                 }
                 std::vector<double>& conv = work_.convA;
                 conv.resize(static_cast<std::size_t>(padNx_) * padNy_);
-                aspfft::irfft2_half(spec.data(), padNx_, padNy_, conv.data(), fftThreads_.get());
+                astroviper::fft::irfft2_half(spec.data(), padNx_, padNy_, conv.data(), fftThreads_.get());
                 for (int j = 0; j < ny_; ++j) {
                     const double gyj = norm * ry[static_cast<std::size_t>(j)];
                     const double* crow = conv.data() + static_cast<std::size_t>(j) * padNx_;
@@ -1530,8 +1537,8 @@ private:
 
 void convolve_centered(const double* a, const double* b, int nx, int ny,
                        double* out) {
-    std::vector<cd> fa = aspfft::rfft2_forward(a, nx, ny);
-    std::vector<cd> fb = aspfft::rfft2_forward(b, nx, ny);
+    std::vector<cd> fa = astroviper::fft::rfft2_forward(a, nx, ny, 1);
+    std::vector<cd> fb = astroviper::fft::rfft2_forward(b, nx, ny, 1);
     std::vector<double> res;
     conv_from_spectra(fa, fb, nx, ny, res);
     for (std::size_t i = 0; i < res.size(); ++i) astroviper::scalar_store(out, i, res[i]);

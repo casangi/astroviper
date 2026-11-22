@@ -6,6 +6,7 @@
 
 #include "../include/mtmfs_clean.hpp"
 #include "scalar_buffer.hpp"
+#include "fft.hpp"
 
 #include <algorithm>
 #include <array>
@@ -238,8 +239,8 @@ struct Work {
             throw std::invalid_argument("psf must be finite");
         psf_ft.assign(npsf, std::vector<complex_t>(nspec(), complex_t(0, 0)));
         for (int order = 0; order < npsf; ++order)
-            forward_r2c<T>(psf + static_cast<std::size_t>(order) * nimg(), psf_ft[static_cast<std::size_t>(order)].data(),
-                           nx, ny);
+            astroviper::fft::rfft2_half<T>(psf + static_cast<std::size_t>(order) * nimg(), nx, ny,
+                                           psf_ft[static_cast<std::size_t>(order)], 1);
 
         {
             const T* p0 = psf;
@@ -279,7 +280,7 @@ struct Work {
         std::vector<T> scale_img(nimg());
         for (int s = 0; s < nscales; ++s) {
             make_scale<T>(scale_img.data(), nx, ny, scales[static_cast<std::size_t>(s)]);
-            forward_r2c<T>(scale_img.data(), scale_ft[static_cast<std::size_t>(s)].data(), nx, ny);
+            astroviper::fft::rfft2_half<T>(scale_img.data(), nx, ny, scale_ft[static_cast<std::size_t>(s)], 1);
             extract_patch(scale_img.data(), nx, ny, nx / 2, ny / 2, psf_support_x, psf_support_y,
                           vec_scales[static_cast<std::size_t>(s)]);
         }
@@ -304,7 +305,7 @@ struct Work {
                         const std::vector<complex_t>& x1 = scale_ft[static_cast<std::size_t>(s1)];
                         const std::vector<complex_t>& x2 = scale_ft[static_cast<std::size_t>(s2)];
                         for (std::size_t k = 0; k < nspec(); ++k) work[k] = pf[k] * x1[k] * x2[k];
-                        backward_c2r<T>(work.data(), full.data(), nx, ny);
+                        astroviper::fft::irfft2_half<T>(work.data(), nx, ny, full.data(), 1);
                         // Remove both scale centers before extracting the PSF patch.
                         // Scale setup is complete, so reuse scale_img as scratch.
                         recenter_convolution<T>(full.data(), nx, ny, scale_img.data(), 2);
@@ -448,11 +449,11 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
     if (mask != nullptr) {
         std::vector<typename Work<T>::complex_t> mask_ft(nspec), work(nspec);
         std::vector<T> scratch(nimg);
-        forward_r2c<T>(mask, mask_ft.data(), nx, ny);
+        astroviper::fft::rfft2_half<T>(mask, nx, ny, mask_ft, 1);
         for (int s = 0; s < ns; ++s) {
             std::vector<T>& sm = vec_scale_masks[static_cast<std::size_t>(s)];
             for (std::size_t k = 0; k < nspec; ++k) work[k] = mask_ft[k] * w.scale_ft[static_cast<std::size_t>(s)][k];
-            backward_c2r<T>(work.data(), sm.data(), nx, ny);
+            astroviper::fft::irfft2_half<T>(work.data(), nx, ny, sm.data(), 1);
             recenter_convolution<T>(sm.data(), nx, ny, scratch.data(), 1);
             if (mask_threshold > static_cast<T>(0))
                 for (std::size_t k = 0; k < nimg; ++k)
@@ -497,13 +498,13 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
         std::vector<typename Work<T>::complex_t> dirty_ft(nspec), work(nspec);
         std::vector<T> scratch(nimg);
         for (int t = 0; t < nt; ++t) {
-            forward_r2c<T>(residual + static_cast<std::ptrdiff_t>(t) * residual_term_stride, dirty_ft.data(), nx,
-                           ny);
+            astroviper::fft::rfft2_half<T>(residual + static_cast<std::ptrdiff_t>(t) * residual_term_stride, nx, ny,
+                                           dirty_ft, 1);
             for (int s = 0; s < ns; ++s) {
                 for (std::size_t k = 0; k < nspec; ++k)
                     work[k] = dirty_ft[k] * w.scale_ft[static_cast<std::size_t>(s)][k];
                 std::vector<T>& r = mat_r[static_cast<std::size_t>(w.ind2(t, s))];
-                backward_c2r<T>(work.data(), r.data(), nx, ny);
+                astroviper::fft::irfft2_half<T>(work.data(), nx, ny, r.data(), 1);
                 recenter_convolution<T>(r.data(), nx, ny, scratch.data(), 1);
             }
         }
@@ -695,11 +696,11 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
         std::vector<T> smooth_mod(nimg), scratch(nimg);
         std::vector<typename Work<T>::complex_t> model_ft(nspec), work(nspec);
         for (int t2 = 0; t2 < nt; ++t2) {
-            forward_r2c<T>(delta_model[static_cast<std::size_t>(t2)].data(), model_ft.data(), nx, ny);
+            astroviper::fft::rfft2_half<T>(delta_model[static_cast<std::size_t>(t2)].data(), nx, ny, model_ft, 1);
             for (int t1 = 0; t1 < nt; ++t1) {
                 const std::vector<typename Work<T>::complex_t>& pf = w.psf_ft[static_cast<std::size_t>(t1 + t2)];
                 for (std::size_t k = 0; k < nspec; ++k) work[k] = pf[k] * model_ft[k];
-                backward_c2r<T>(work.data(), smooth_mod.data(), nx, ny);
+                astroviper::fft::irfft2_half<T>(work.data(), nx, ny, smooth_mod.data(), 1);
                 recenter_convolution<T>(smooth_mod.data(), nx, ny, scratch.data(), 1);
                 T* d = residual + static_cast<std::ptrdiff_t>(t1) * residual_term_stride;
                 for (std::size_t k = 0; k < nimg; ++k) astroviper::scalar_sub(d, k, smooth_mod[k]);

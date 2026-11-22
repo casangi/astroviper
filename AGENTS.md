@@ -41,6 +41,14 @@ See [README.md](README.md) for instructions.
   single-kernel build, and the **`-ffp-contract=off`** reproducibility flag —
   see [the memory contract](#6-the-python--c-memory-contract); do not remove
   it). To change a flag for every kernel, edit that file — and only that file.
+- **Shared C++ code**: headers that several kernels use live in
+  `src/astroviper/processing_functions/include/`, which every module has on
+  its include path; `fft.hpp` there is the FFT wrapper of the deconvolvers.
+  The divergence test shared by the deconvolvers stays in
+  `deconvolvers/include/plane_stop_test.hpp`. pocketfft has one configuration
+  for every kernel, set in `cmake/AstroviperPybind.cmake` (the one-definition
+  rule): `fft.hpp` refuses a build without threads or with another cache
+  size, and no source defines a pocketfft macro.
 - **Build type (Release / Debug / …)**: set solely via `build-type` in
   `[tool.scikit-build.cmake]` of [`pyproject.toml`](pyproject.toml). The
   comment block above that key is the authoritative documentation: the flags
@@ -217,9 +225,10 @@ function, `processing_functions/simulation/antenna_beams.py::symmetric_beam_resp
 CASA's `PBMath1DAiry` with `func="casa_airy"`) and the EVLA beam polynomial,
 zero beyond `max_rad_1GHz` when the model has one. The Adaptive Scale Pixel
 deconvolver (`processing_functions/imaging/model_update/deconvolvers/aspclean/`, a port of
-CASA's `AspMatrixCleaner`) does its FFTs with the vendored
-`processing_functions/include/pocketfft_hdronly.h` (the BSD-3 header-only FFT
-behind NumPy/SciPy, kept verbatim with its licence block); its per-Aspen L-BFGS
+CASA's `AspMatrixCleaner`) does its FFTs through
+`processing_functions/include/fft.hpp`, as MTMFS does, over the vendored
+pocketfft (`pocketfft_hdronly.h` beside it, the BSD-3 header-only FFT behind
+NumPy/SciPy, kept verbatim with its licence block); its per-Aspen L-BFGS
 (`include/asp_lbfgs.hpp`) reproduces ALGLIB's `minlbfgs` as CASA and LibRA
 call it (unpreconditioned, the scale only in the stopping tests, More-Thuente
 line search; written independently, as ALGLIB is GPL) and is exposed for
