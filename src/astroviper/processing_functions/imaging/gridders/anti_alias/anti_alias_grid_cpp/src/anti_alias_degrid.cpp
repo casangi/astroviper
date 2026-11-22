@@ -1,7 +1,7 @@
 #include "../include/anti_alias_degrid.hpp"
 #include "scalar_buffer.hpp"
 #include "parallel_for.hpp"
-#include "../include/kernel_lookup.hpp"
+#include "stencil_placement.hpp"
 
 #include <cmath>
 #include <complex>
@@ -26,21 +26,13 @@ void anti_alias_degrid(
     int support, int oversampling, int interpolation,
     int processing_function_threads
 ) {
-    constexpr double c = 299792458.0;
     using VisElem = typename VisT::value_type;
 
-    // Precompute per-channel UV scaling factors:
-    //   uv_scale[0, i] = -(freq[i] * delta_l * m_u) / c
-    //   uv_scale[1, i] = -(freq[i] * delta_m * m_v) / c
     std::vector<double> uv_scale_u(n_vis_chan), uv_scale_v(n_vis_chan);
-    for (int i = 0; i < n_vis_chan; ++i) {
-        uv_scale_u[i] = -(astroviper::scalar_load(frequency_coord, i) * delta_l * m_u) / c;
-        uv_scale_v[i] = -(astroviper::scalar_load(frequency_coord, i) * delta_m * m_v) / c;
-    }
+    uv_scales(frequency_coord, n_vis_chan, delta_l, delta_m, m_u, m_v,
+              uv_scale_u.data(), uv_scale_v.data());
 
     const int support_center = support / 2;
-    const int uv_center_u    = m_u / 2;
-    const int uv_center_v    = m_v / 2;
     const int start_support  = -support_center;
     const int end_support    = support - support_center;
 
@@ -75,39 +67,12 @@ void anti_alias_degrid(
         for (int i_chan = 0; i_chan < n_vis_chan; ++i_chan) {
             const int a_chan = astroviper::scalar_load(frequency_map, i_chan);
 
-            const double u = astroviper::scalar_load(uvw, uvw_b_off + 0) * uv_scale_u[i_chan];
-            const double v = astroviper::scalar_load(uvw, uvw_b_off + 1) * uv_scale_v[i_chan];
-
-            if (std::isnan(u) || std::isnan(v)) continue;
-
-            const double u_pos = u + uv_center_u;
-            const double v_pos = v + uv_center_v;
-
-            // Round to the nearest grid centre and bounds-check in double
-            // precision *before* narrowing to int. Casting an out-of-range
-            // double to int is undefined behaviour (it yields INT_MIN on
-            // x86/ARM), and the `idx - support_center` guard would then
-            // overflow, letting an extreme UV coordinate slip through and
-            // read out of bounds. Validating in double — where nothing
-            // overflows — guarantees the centre lies in
-            // [support_center, m - support_center) and therefore fits in int.
-            // For an in-bounds (non-negative) coordinate std::floor(x + 0.5)
-            // matches the previous truncating cast exactly.
-            const double u_center = std::floor(u_pos + 0.5);
-            const double v_center = std::floor(v_pos + 0.5);
-
-            if (u_center + support_center >= m_u) continue;
-            if (v_center + support_center >= m_v) continue;
-            if (u_center - support_center <  0)   continue;
-            if (v_center - support_center <  0)   continue;
-
-            const int u_center_indx = static_cast<int>(u_center);
-            const int v_center_indx = static_cast<int>(v_center);
-
-            stencil_kernel_values(cgk_1D, support, oversampling, interpolation,
-                                  u_center_indx - u_pos, conv_u.data());
-            stencil_kernel_values(cgk_1D, support, oversampling, interpolation,
-                                  v_center_indx - v_pos, conv_v.data());
+            int u_center_indx, v_center_indx;
+            if (!stencil_placement(uvw + uvw_b_off, uv_scale_u[i_chan], uv_scale_v[i_chan],
+                                   m_u, m_v, cgk_1D, support, oversampling, interpolation,
+                                   u_center_indx, v_center_indx, conv_u.data(),
+                                   conv_v.data()))
+                continue;
 
             const int vis_c_off = vis_b_off + i_chan * vis_chan_stride;
 
