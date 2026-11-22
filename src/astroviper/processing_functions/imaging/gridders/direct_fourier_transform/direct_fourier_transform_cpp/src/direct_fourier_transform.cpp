@@ -40,6 +40,12 @@ constexpr double kSmallAngle = 0.0078125;  // 2^-7
 // of -ffast-math keep the two additions as written.
 constexpr double kRoundMagic = 6755399441055744.0;
 
+// 2^51 and 2^52: from 2^51 to 2^52 a double is a multiple of 1/2, from 2^52
+// on an integer. 2^50: see large_phases.
+constexpr double kTwoTo50 = 1125899906842624.0;
+constexpr double kTwoTo51 = 2251799813685248.0;
+constexpr double kTwoTo52 = 4503599627370496.0;
+
 // Cephes sin.c coefficients of sin(x) and cos(x) for |x| <= pi / 4.
 constexpr double kSin0 = 1.58962301576546568060E-10;
 constexpr double kSin1 = -2.50507477628578072866E-8;
@@ -58,14 +64,39 @@ inline double round_to_integer(double x) {
     return (x + kRoundMagic) - kRoundMagic;
 }
 
+// turns minus the integer nearest to it (ties to even), exactly, for every
+// finite turns: (turns + shift) - shift is that integer with shift =
+// kRoundMagic below 2^51 (round_to_integer), 2^52 with the sign of turns from
+// 2^51 to 2^52 (where kRoundMagic would round to an even integer) and 0 from
+// 2^52 on (turns is an integer). An infinite or NaN turns gives NaN. Only the
+// shift is selected, so that the loops around stay vectorised.
+inline double reduce_turns(double turns) {
+    const double magnitude = std::abs(turns);
+    const double shift = magnitude < kTwoTo51   ? kRoundMagic
+                         : magnitude < kTwoTo52 ? std::copysign(kTwoTo52, turns)
+                                                : 0.0;
+    return turns - ((turns + shift) - shift);
+}
+
+// Whether a sample can have a phase of 2^51 turns or more: |u l + v m +
+// w (n - 1)| <= |u| + |v| + |w| for |l|, |m| < 1 and |n - 1| <= 1, so a sample
+// with |u| + |v| + |w| < 2^50 cannot, rounding included. The transforms
+// evaluate the phases of the other samples with AnyTurns.
+inline bool large_phases(double u, double v, double w) {
+    return !(std::abs(u) + std::abs(v) + std::abs(w) < kTwoTo50);
+}
+
 // cos(2 pi t) and sin(2 pi t). The reduction to [-1/2, 1/2] turns and then
 // to [-1/8, 1/8] turns around a multiple q of a quarter turn is exact, so the
 // only errors are the rounding of 2 pi times the reduced angle and that of
 // the polynomials (about one unit in the last place each). The quarter turn
 // rotation, with cos(q pi / 2) = 1 - |q| and sin(q pi / 2) = q (2 - |q|) for
-// q in -2 .. 2, multiplies by -1, 0 or 1 only, which is exact.
+// q in -2 .. 2, multiplies by -1, 0 or 1 only, which is exact. The first
+// reduction is round_to_integer's, exact for |t| < 2^51, or with AnyTurns
+// reduce_turns', exact for every finite t and bitwise the same below 2^51.
+template <bool AnyTurns = false>
 inline void cos_sin_of_turns(double turns, double& cos_value, double& sin_value) {
-    const double reduced = turns - round_to_integer(turns);
+    const double reduced = AnyTurns ? reduce_turns(turns) : turns - round_to_integer(turns);
     const double quarter = round_to_integer(4.0 * reduced);
     const double x = kTwoPi * (reduced - 0.25 * quarter);
     const double z = x * x;
@@ -90,13 +121,14 @@ inline void cos_sin_of_small_angle(double x, double& cos_value, double& sin_valu
 
 // Phases of one sample at a block of pixels, then their cosines and sines.
 // Plain loops over arrays with an inlined body: the compiler vectorises them.
+template <bool AnyTurns>
 inline void block_cos_sin(double u, double v, double w, const double* l_block,
                           const double* m_block, const double* n_minus_one_block,
                           std::int64_t count, double* cos_block, double* sin_block) {
     for (std::int64_t j = 0; j < count; ++j) {
         const double turns = u * astroviper::scalar_load(l_block, j) + v * astroviper::scalar_load(m_block, j) + w * astroviper::scalar_load(n_minus_one_block, j);
         double c, s;
-        cos_sin_of_turns(turns, c, s);
+        cos_sin_of_turns<AnyTurns>(turns, c, s);
         astroviper::scalar_store(cos_block, j, c);
         astroviper::scalar_store(sin_block, j, s);
     }
@@ -300,8 +332,9 @@ PlaneSamples collect_samples(
 // sample the phase factor of a pixel is exp(2 pi i u l) of its row times
 // exp(2 pi i v m) of its column times that of the w term, which is exactly 1
 // for w = 0 and the small angle polynomials while |2 pi w (n - 1)| <=
-// kSmallAngle over the tile; otherwise the phase is reduced and evaluated per
-// pixel. The three are accurate to rounding.
+// kSmallAngle over the tile; otherwise, and for a sample whose phases can reach
+// 2^51 turns (large_phases), the phase is reduced and evaluated per pixel. The
+// three are accurate to rounding.
 template <typename ImageT, int NComponents>
 void image_samples(
     ImageT* image, const PlaneSamples& samples, const std::int64_t* pol_map,
@@ -310,6 +343,9 @@ void image_samples(
     int processing_function_threads) {
     constexpr bool complex_image = is_complex<ImageT>::value;
     const std::int64_t n_pixels = n_l * n_m;
+    // An image without a pixel has nothing to accumulate (and n_m = 0 would
+    // divide by zero in tile_columns below).
+    if (n_pixels == 0) return;
     const std::int64_t n_row_tiles = (n_l + kTileRows - 1) / kTileRows;
     const std::int64_t n_column_tiles = (n_m + kTileColumns - 1) / kTileColumns;
     const std::int64_t tile_columns = (n_m + n_column_tiles - 1) / n_column_tiles;
@@ -351,11 +387,13 @@ void image_samples(
                 const double* value = samples.values.data() + k * n_pol * NComponents;
                 const double u = samples.u[k], v = samples.v[k], w = samples.w[k];
                 const double two_pi_w = kTwoPi * w;
-                const int w_term = w == 0.0 ? 0
+                // 3: phases that can reach 2^51 turns, per pixel with AnyTurns
+                const int w_term = large_phases(u, v, w) ? 3
+                                   : w == 0.0           ? 0
                                    : std::abs(two_pi_w) * max_abs_n_minus_one <= kSmallAngle
                                        ? 1
                                        : 2;
-                if (w_term != 2) {
+                if (w_term < 2) {
                     for (std::int64_t r = 0; r < rows; ++r) {
                         cos_sin_of_turns(u * l_tile[r], cos_u[r], sin_u[r]);
                     }
@@ -386,13 +424,23 @@ void image_samples(
                             astroviper::scalar_store(cos_block, j, c * cw - s * sw);
                             astroviper::scalar_store(sin_block, j, c * sw + s * cw);
                         }
-                    } else {
+                    } else if (w_term == 2) {
                         const double l_row = l_tile[r];
                         for (std::int64_t j = 0; j < columns; ++j) {
                             const double turns =
                                 u * l_row + v * m_tile[j] + w * astroviper::scalar_load(n_minus_one_row, j);
                             double c, s;
                             cos_sin_of_turns(turns, c, s);
+                            astroviper::scalar_store(cos_block, j, c);
+                            astroviper::scalar_store(sin_block, j, s);
+                        }
+                    } else {
+                        const double l_row = l_tile[r];
+                        for (std::int64_t j = 0; j < columns; ++j) {
+                            const double turns =
+                                u * l_row + v * m_tile[j] + w * astroviper::scalar_load(n_minus_one_row, j);
+                            double c, s;
+                            cos_sin_of_turns<true>(turns, c, s);
                             astroviper::scalar_store(cos_block, j, c);
                             astroviper::scalar_store(sin_block, j, s);
                         }
@@ -438,7 +486,7 @@ void cos_sin_turns(const double* turns, double* cos_values, double* sin_values,
                    std::int64_t count) {
     for (std::int64_t j = 0; j < count; ++j) {
         double c, s;
-        cos_sin_of_turns(astroviper::scalar_load(turns, j), c, s);
+        cos_sin_of_turns<true>(astroviper::scalar_load(turns, j), c, s);
         astroviper::scalar_store(cos_values, j, c);
         astroviper::scalar_store(sin_values, j, s);
     }
@@ -554,14 +602,21 @@ void dft_predict(
                 const double u = astroviper::scalar_load(uvw_b, 0) * scale[c];
                 const double v = astroviper::scalar_load(uvw_b, 1) * scale[c];
                 const double w = astroviper::scalar_load(uvw_b, 2) * scale[c];
+                const bool large = large_phases(u, v, w);
                 std::fill(sum_re.begin(), sum_re.end(), 0.0);
                 std::fill(sum_im.begin(), sum_im.end(), 0.0);
                 const std::int64_t q_end = pixel_start[plane + 1];
                 for (std::int64_t q0 = pixel_start[plane]; q0 < q_end; q0 += kBlock) {
                     const std::int64_t count = std::min(kBlock, q_end - q0);
-                    block_cos_sin(u, v, w, l_pixel.data() + q0, m_pixel.data() + q0,
-                                  n_minus_one_pixel.data() + q0, count, cos_block.data(),
-                                  sin_block.data());
+                    if (large) {
+                        block_cos_sin<true>(u, v, w, l_pixel.data() + q0, m_pixel.data() + q0,
+                                            n_minus_one_pixel.data() + q0, count,
+                                            cos_block.data(), sin_block.data());
+                    } else {
+                        block_cos_sin<false>(u, v, w, l_pixel.data() + q0, m_pixel.data() + q0,
+                                             n_minus_one_pixel.data() + q0, count,
+                                             cos_block.data(), sin_block.data());
+                    }
                     // (model / n) * exp(+i phase), summed over the pixels in order;
                     // the polarizations' sums are independent chains
                     const double* value = model_over_n.data() + q0 * m_pol * 2;

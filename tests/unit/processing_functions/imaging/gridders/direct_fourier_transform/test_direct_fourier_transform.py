@@ -27,6 +27,9 @@ import astroviper.distributed_applications as distributed_applications
 from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
     LINEAR_CORR_TO_STOKES,
 )
+from astroviper.processing_functions.imaging.add_visibility_grid import (
+    add_visibility_grid_single_field,
+)
 from astroviper.processing_functions.imaging.add_visibility_grid_continuum import (
     add_visibility_grid_continuum_single_field,
 )
@@ -562,3 +565,51 @@ def test_dft_rejects_original_parameters_before_accessing_data(name, count, freq
     wrong = "n_taylor_terms" if frequency == 1e9 else "reference_frequency"
     with pytest.raises((TypeError, ValueError), match=f"{wrong} must"):
         CONTINUUM_DFT_CALLS[name](count, frequency)
+
+
+@pytest.mark.parametrize(
+    "function, args",
+    [
+        (add_visibility_grid_single_field, {"chan_mode": "continuum"}),
+        (
+            add_visibility_grid_continuum_single_field,
+            {"n_taylor_terms": 1, "reference_frequency": 1e9},
+        ),
+    ],
+)
+def test_a_pixel_beyond_the_horizon_raises_the_documented_runtime_error(function, args):
+    """The kernel refuses a pixel with l**2 + m**2 >= 1 with the RuntimeError that
+    the Raises section names."""
+    import inspect
+
+    samples = ("time", "baseline_id", "frequency", "polarization")
+    ms_xds = xr.Dataset(
+        {
+            "VISIBILITY": (samples, np.ones((1, 2, 1, 1), dtype=complex)),
+            "UVW": (("time", "baseline_id", "uvw_label"), np.ones((1, 2, 3))),
+            "WEIGHT_IMAGING": (samples, np.ones((1, 2, 1, 1))),
+        },
+        coords={"frequency": [1e9], "polarization": ["I"]},
+        attrs={
+            "data_groups": {
+                "base": {
+                    "correlated_data": "VISIBILITY",
+                    "uvw": "UVW",
+                    "weight_imaging": "WEIGHT_IMAGING",
+                }
+            }
+        },
+    )
+    img_xds = xr.Dataset(
+        coords={
+            "time": [0.0],
+            "frequency": [1e9],
+            "polarization": ["I"],
+            "l": [1.2],
+            "m": [0.0],
+        },
+        attrs={"data_groups": {"residual": {}}},
+    )
+    with pytest.raises(RuntimeError, match="hemisphere"):
+        function(ms_xds, None, img_xds, gridder=DFT, **args)
+    assert "RuntimeError" in inspect.getdoc(function).split("Raises")[1]

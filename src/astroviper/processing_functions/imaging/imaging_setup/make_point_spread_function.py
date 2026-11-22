@@ -289,6 +289,12 @@ def add_uv_sampling_grid_single_field(
         Modifies ``img_xds`` in place (data variables and ``data_groups``
         attribute); no return value.
 
+    Raises
+    ------
+    RuntimeError
+        With ``gridder="direct_fourier_transform"``, from the kernel, if an
+        image pixel lies beyond ``l**2 + m**2 < 1``.
+
     See Also
     --------
     add_uv_sampling_grid_mosaic : Mosaic (direction-dependent GCF) variant.

@@ -128,6 +128,11 @@ def add_uv_sampling_grid_continuum_single_field(
         which accumulates into the point spread function itself and uses
         neither ``gcf_xds`` nor ``fft_padding``.
 
+    Raises
+    ------
+    RuntimeError
+        As :func:`~astroviper.processing_functions.imaging.imaging_setup.make_point_spread_function.add_uv_sampling_grid_single_field`.
+
     Notes
     -----
     ``UV_SAMPLING_NORMALIZATION`` is repeated along ``psf_taylor_order`` but every
