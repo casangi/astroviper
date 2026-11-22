@@ -335,6 +335,9 @@ void image_samples(
     int processing_function_threads) {
     constexpr bool complex_image = is_complex<ImageT>::value;
     const std::int64_t n_pixels = n_l * n_m;
+    // An image without a pixel has nothing to accumulate (and n_m = 0 would
+    // divide by zero in tile_columns below).
+    if (n_pixels == 0) return;
     const std::int64_t n_row_tiles = (n_l + kTileRows - 1) / kTileRows;
     const std::int64_t n_column_tiles = (n_m + kTileColumns - 1) / kTileColumns;
     const std::int64_t tile_columns = (n_m + n_column_tiles - 1) / n_column_tiles;
