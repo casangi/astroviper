@@ -14,9 +14,10 @@
 // index iy*nx + ix. The half-complex spectrum is row-major (ny, nx/2 + 1).
 //
 // Callers own every input and output buffer, including the scratch needed to
-// recenter a convolution; PocketFFT allocates its plan and scratch internally
-// on each transform. The kernels are pure functions
-// of their arguments and may be called concurrently on distinct buffers.
+// recenter a convolution; PocketFFT allocates its scratch internally on each
+// transform and caches its plans (cmake/AstroviperPybind.cmake). The kernels
+// are pure functions of their arguments and may be called concurrently on
+// distinct buffers.
 
 #include <complex>
 #include <cstddef>

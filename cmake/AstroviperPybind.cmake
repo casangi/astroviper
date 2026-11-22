@@ -144,6 +144,11 @@ endif()
 target_compile_definitions(astroviper_cpp_flags INTERFACE
     VERSION_INFO="${_av_version}")
 
+# One pocketfft configuration for every kernel (the one-definition rule): a
+# cache of 16 plans, as the deconvolvers transform the same shapes many times,
+# and threads compiled in. Never define a pocketfft macro in a source.
+target_compile_definitions(astroviper_cpp_flags INTERFACE POCKETFFT_CACHE_SIZE=16)
+
 # Every AstroVIPER kernel uses std::thread.
 target_link_libraries(astroviper_cpp_flags INTERFACE Threads::Threads)
 

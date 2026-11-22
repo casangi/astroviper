@@ -5,10 +5,6 @@
 #include "scalar_buffer.hpp"
 #include <vector>
 
-// Header-only PocketFFT, compiled single-threaded: deterministic results and
-// no internal thread pool inside a kernel that may itself run on many Dask
-// worker threads at once.
-#define POCKETFFT_NO_MULTITHREADING
 #include "pocketfft_hdronly.h"
 
 namespace mtmfs {
