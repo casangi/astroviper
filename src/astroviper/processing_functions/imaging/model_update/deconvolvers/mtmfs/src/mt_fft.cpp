@@ -9,7 +9,7 @@
 // no internal thread pool inside a kernel that may itself run on many Dask
 // worker threads at once.
 #define POCKETFFT_NO_MULTITHREADING
-#include "../include/thirdparty/pocketfft_hdronly.h"
+#include "pocketfft_hdronly.h"
 
 namespace mtmfs {
 

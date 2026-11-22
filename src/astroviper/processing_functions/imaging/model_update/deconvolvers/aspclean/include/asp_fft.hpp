@@ -2,9 +2,10 @@
 
 // FFT primitives of the Asp (Adaptive Scale Pixel) deconvolver.
 //
-// The transforms are computed by pocketfft (include/pocketfft_hdronly.h, the
-// header-only C++ FFT that powers NumPy and SciPy; BSD-3-Clause, vendored
-// verbatim with its licence text). It handles arbitrary lengths (mixed radix
+// The transforms are computed by pocketfft
+// (processing_functions/include/pocketfft_hdronly.h, the header-only C++ FFT
+// that powers NumPy and SciPy; BSD-3-Clause, vendored verbatim with its licence
+// text). It handles arbitrary lengths (mixed radix
 // plus Bluestein for large primes) in double precision and is roughly ten
 // times faster than the textbook radix-2 / Bluestein code it replaced, which
 // mattered because the deconvolver's cost is almost entirely FFTs.

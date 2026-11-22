@@ -1,7 +1,7 @@
 #pragma once
 
 // 2-D real <-> half-complex FFT primitives for the MTMFS deconvolver, built on
-// the vendored header-only PocketFFT (BSD-3, thirdparty/).
+// the vendored header-only PocketFFT (BSD-3, processing_functions/include/).
 //
 // Port of CASA's casacore-free `stdcleaner/StdFFT.{h,cc}`, which reproduces the
 // casacore FFTServer<Float,Complex>::fft0 conventions that

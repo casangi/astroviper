@@ -218,8 +218,8 @@ CASA's `PBMath1DAiry` with `func="casa_airy"`) and the EVLA beam polynomial,
 zero beyond `max_rad_1GHz` when the model has one. The Adaptive Scale Pixel
 deconvolver (`processing_functions/imaging/model_update/deconvolvers/aspclean/`, a port of
 CASA's `AspMatrixCleaner`) does its FFTs with the vendored
-`include/pocketfft_hdronly.h` (the BSD-3 header-only FFT behind NumPy/SciPy,
-kept verbatim with its licence block); its per-Aspen L-BFGS
+`processing_functions/include/pocketfft_hdronly.h` (the BSD-3 header-only FFT
+behind NumPy/SciPy, kept verbatim with its licence block); its per-Aspen L-BFGS
 (`include/asp_lbfgs.hpp`) reproduces ALGLIB's `minlbfgs` as CASA and LibRA
 call it (unpreconditioned, the scale only in the stopping tests, More-Thuente
 line search; written independently, as ALGLIB is GPL) and is exposed for
