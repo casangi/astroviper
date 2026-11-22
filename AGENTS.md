@@ -504,8 +504,9 @@ match them in any new kernel:
    silently allocating a converted temporary. **Never add `forcecast` to a
    large array.**
 2. **Explicit checks before compute**: verify `ndim`/shape, require
-   C-contiguity (`require_c_contiguous(...)` — tells the caller to use
-   `np.ascontiguousarray()` if needed), and for outputs require writeability
+   C-contiguity (`require_c_contiguous(...)` of
+   `processing_functions/include/array_contiguity.hpp` — tells the caller to
+   use `np.ascontiguousarray()` if needed), and for outputs require writeability
    (raise if `info.readonly` / `!arr.writeable()` — message: "modified in
    place"). The MT-MFS residual is the documented exception: its spatial
    planes must be contiguous, but its outer Taylor-term stride may exceed one

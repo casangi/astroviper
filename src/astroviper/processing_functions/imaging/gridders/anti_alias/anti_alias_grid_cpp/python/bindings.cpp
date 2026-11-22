@@ -1,3 +1,4 @@
+#include "array_contiguity.hpp"
 #include "array_dtype.hpp"
 #include <pybind11/pybind11.h>
 #include "scalar_buffer.hpp"
@@ -13,21 +14,7 @@ namespace py = pybind11;
 using cdbl = std::complex<double>;
 using cflt = std::complex<float>;
 
-// ---------------------------------------------------------------------------
-// Helper: raise a clear error if an array is not C-contiguous.
-// pybind11 raises its own error for dtype mismatches when forcecast is absent,
-// but a contiguity message helps the caller fix the issue quickly.
-// ---------------------------------------------------------------------------
-static void require_c_contiguous(const py::buffer_info& info, const char* name) {
-    // Verify strides match a C-contiguous layout
-    py::ssize_t stride = info.itemsize;
-    for (int i = info.ndim - 1; i >= 0; --i) {
-        if (info.strides[i] != stride)
-            throw std::runtime_error(
-                std::string(name) + " must be C-contiguous (pass np.ascontiguousarray() if needed)");
-        stride *= info.shape[i];
-    }
-}
+using astroviper::require_c_contiguous;
 
 // ---------------------------------------------------------------------------
 // anti_alias_grid

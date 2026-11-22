@@ -1,3 +1,4 @@
+#include "array_contiguity.hpp"
 #include "array_dtype.hpp"
 #include <pybind11/pybind11.h>
 #include "scalar_buffer.hpp"
@@ -20,15 +21,7 @@ using cflt = std::complex<float>;
 // that does not match, and a map entry outside its output axis (the kernels
 // index the outputs with the maps unchecked).
 // ---------------------------------------------------------------------------
-static void require_c_contiguous(const py::buffer_info& info, const char* name) {
-    py::ssize_t stride = info.itemsize;
-    for (int i = info.ndim - 1; i >= 0; --i) {
-        if (info.strides[i] != stride)
-            throw std::runtime_error(
-                std::string(name) + " must be C-contiguous (pass np.ascontiguousarray() if needed)");
-        stride *= info.shape[i];
-    }
-}
+using astroviper::require_c_contiguous;
 
 static void require_writable(const py::buffer_info& info, const char* name) {
     if (info.readonly)
