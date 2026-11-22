@@ -714,8 +714,9 @@ def _restore_image_arrays(
     pixel_size : float
         Absolute image-cell size in radians.
     processing_function_threads : int, optional
-        Number of workers supplied to SciPy FFT operations. Values ``<= 0``
-        use all available cores.
+        Number of workers supplied to SciPy FFT operations, as given: SciPy
+        refuses ``0`` and reads a negative ``n`` (down to
+        ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
     primary_beam : numpy.ndarray, optional
         Primary-beam power with the same image-plane layout as ``residual``.
         Required for a primary-beam-corrected output.
@@ -779,11 +780,7 @@ def _restore_image_arrays(
                 "primary_beam polarization must be singleton or match the image."
             )
 
-    workers = (
-        processing_function_threads
-        if processing_function_threads and processing_function_threads > 0
-        else -1
-    )
+    workers = processing_function_threads
     nt, nplane, npol, ny, nx = residual.shape
     consume = (
         make_apparent
@@ -1086,7 +1083,10 @@ def restore_image(
         (see
         :func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).
         Node tasks and processing functions do not resolve ``0``; those that
-        check the count refuse it.
+        check the count refuse it. Given a count below 1, a C++ kernel and the
+        PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
+        and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
+        ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
     consume_model : bool, optional
         If ``True`` and apparent output is requested, that cube is written
         into the **model** variable's

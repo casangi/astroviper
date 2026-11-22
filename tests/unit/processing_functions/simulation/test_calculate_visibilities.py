@@ -483,13 +483,13 @@ def test_cpp_kernel_threads_and_validation():
     many = calculate_visibilities(
         *args, processing_function_threads=7, implementation="cpp"
     )
-    all_hw = calculate_visibilities(
+    below_one = calculate_visibilities(
         *args, processing_function_threads=0, implementation="cpp"
     )
     np.testing.assert_array_equal(
         one, many
     )  # baseline-partitioned threads: bit identical
-    np.testing.assert_array_equal(one, all_hw)
+    np.testing.assert_array_equal(one, below_one)
 
     # memory contract: wrong dtype / non-contiguous / read-only arrays are rejected, never copied
     vis = np.zeros((1, 1, 1, 1), dtype=np.complex64)

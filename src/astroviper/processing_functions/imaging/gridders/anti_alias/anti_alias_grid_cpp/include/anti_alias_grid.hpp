@@ -47,8 +47,8 @@ namespace anti_alias {
  * @param oversampling     Oversampling factor of cgk_1D
  * @param interpolation    Kernel lookup: 0 nearest table entry, 1 linear interpolation
  *                         (kernel_lookup.hpp)
- * @param processing_function_threads      Number of worker threads. Values <= 0 fall back to
- *                         std::thread::hardware_concurrency(); 1 runs serial.
+ * @param processing_function_threads      Number of worker threads; a count below 1
+ *                         runs one thread, as 1 does (serial).
  */
 template <typename GridT>
 void anti_alias_grid(

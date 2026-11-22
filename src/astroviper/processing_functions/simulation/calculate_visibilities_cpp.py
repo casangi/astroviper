@@ -63,8 +63,8 @@ def calculate_visibilities_cpp(
 ) -> np.ndarray:
     """C++ implementation of :func:`~astroviper.processing_functions.simulation.calculate_visibilities`.
 
-    Same parameters and result as the NumPy implementation; ``processing_function_threads``
-    ``<= 0`` uses all hardware threads.
+    Same parameters and result as the NumPy implementation; a
+    ``processing_function_threads`` below 1 runs one thread.
     """
     from astroviper.processing_functions.simulation.visibility_kernel_cpp import (
         calculate_visibilities as _kernel,

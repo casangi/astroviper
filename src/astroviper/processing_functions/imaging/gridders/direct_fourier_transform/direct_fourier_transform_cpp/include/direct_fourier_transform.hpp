@@ -80,8 +80,8 @@ namespace direct_fourier_transform {
  * @param weight         Imaging weights, shape (n_time, n_baseline, n_vis_chan, n_pol).
  * @param l              Direction cosine l of the image rows, shape (n_l,).
  * @param m              Direction cosine m of the image columns, shape (n_m,).
- * @param processing_function_threads  Worker threads; <= 0 is
- *                       std::thread::hardware_concurrency(), 1 runs serial.
+ * @param processing_function_threads  Worker threads; a count below 1 runs one
+ *                       thread, as 1 does (serial).
  */
 template <typename ImageT>
 void dft_image(

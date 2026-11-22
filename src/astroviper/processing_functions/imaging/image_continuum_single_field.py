@@ -186,7 +186,10 @@ def imaging_preparation_continuum_single_field(
         (see
         :func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).
         Node tasks and processing functions do not resolve ``0``; those that
-        check the count refuse it.
+        check the count refuse it. Given a count below 1, a C++ kernel and the
+        PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
+        and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
+        ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
 
     fft_backend : str, optional
         FFT backend used by the gridder normalization (``"pyfftw"`` or
@@ -669,7 +672,10 @@ def prepare_model_uv_continuum_single_field(
         (see
         :func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).
         Node tasks and processing functions do not resolve ``0``; those that
-        check the count refuse it.
+        check the count refuse it. Given a count below 1, a C++ kernel and the
+        PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
+        and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
+        ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
 
     fft_backend : str, optional
         FFT backend used by the gridder normalization (``"pyfftw"`` or
@@ -1104,7 +1110,10 @@ def prepare_model_uv_mvc_single_field(
         (see
         :func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).
         Node tasks and processing functions do not resolve ``0``; those that
-        check the count refuse it.
+        check the count refuse it. Given a count below 1, a C++ kernel and the
+        PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
+        and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
+        ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
     fft_backend : str, optional
         FFT backend used by the gridder normalization (``"pyfftw"`` or
         ``"scipy"``).
@@ -2578,7 +2587,10 @@ def residual_update_continuum_single_field(
         (see
         :func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).
         Node tasks and processing functions do not resolve ``0``; those that
-        check the count refuse it.
+        check the count refuse it. Given a count below 1, a C++ kernel and the
+        PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
+        and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
+        ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
 
     fft_backend : str, optional
         FFT backend used by the gridder normalization (``"pyfftw"`` or
@@ -3081,7 +3093,10 @@ def make_auto_mask_continuum(
         (see
         :func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).
         Node tasks and processing functions do not resolve ``0``; those that
-        check the count refuse it.
+        check the count refuse it. Given a count below 1, a C++ kernel and the
+        PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
+        and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
+        ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
     image_data_group_in_name : str, optional
         Data group of the residual. Default ``"residual"``.
     image_data_group_out_name : str, optional
@@ -3846,7 +3861,10 @@ def model_update_mtmfs_single_field(
         (see
         :func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).
         Node tasks and processing functions do not resolve ``0``; those that
-        check the count refuse it.
+        check the count refuse it. Given a count below 1, a C++ kernel and the
+        PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
+        and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
+        ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
 
     image_data_group_in_name : str, optional
         Key in the image's ``data_groups`` whose ``"sky"`` (and, optionally,
@@ -4652,7 +4670,10 @@ def restore_continuum_image(
         (see
         :func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).
         Node tasks and processing functions do not resolve ``0``; those that
-        check the count refuse it.
+        check the count refuse it. Given a count below 1, a C++ kernel and the
+        PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
+        and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
+        ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
 
     primary_beam_limit : float, optional
         Primary-beam cutoff below which the corrected image is blanked.

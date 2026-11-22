@@ -212,7 +212,6 @@ void calculate_visibilities(
     std::int64_t n_flux_time, std::int64_t n_flux_frequency, std::int64_t n_source_time,
     std::int64_t n_pointing_time, std::int64_t n_pointing_antenna, std::int64_t n_antenna,
     std::int64_t n_mueller, int processing_function_threads) {
-    if (processing_function_threads <= 0) processing_function_threads = static_cast<int>(std::thread::hardware_concurrency());
     if (processing_function_threads < 1) processing_function_threads = 1;
     processing_function_threads = static_cast<int>(std::min<std::int64_t>(processing_function_threads, std::max<std::int64_t>(n_baseline, 1)));
 

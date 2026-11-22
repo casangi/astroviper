@@ -361,7 +361,7 @@ PYBIND11_MODULE(_direct_fourier_transform_ext, module) {
                "Accumulate n * sum(weight * vis * exp(-2 pi i (u l + v m + w (n - 1)))) into the "
                "image and the sum of the weights into normalization, in place (the real part for "
                "a float32/float64 image). processing_function_threads selects the number of "
-               "std::thread workers; <= 0 falls back to std::thread::hardware_concurrency().",
+               "std::thread workers; a count below 1 runs one.",
                py::arg("image"),
                py::arg("normalization"),
                py::arg("vis_data").noconvert(),
@@ -380,8 +380,7 @@ PYBIND11_MODULE(_direct_fourier_transform_ext, module) {
                "Accumulate n * sum(weight * cos(2 pi (u l + v m + w (n - 1)))) into the image "
                "and the sum of the weights into normalization, in place (the point spread "
                "function before its normalization). processing_function_threads selects the "
-               "number of std::thread workers; <= 0 falls back to "
-               "std::thread::hardware_concurrency().",
+               "number of std::thread workers; a count below 1 runs one.",
                py::arg("image"),
                py::arg("normalization"),
                py::arg("uvw").noconvert(),
@@ -399,8 +398,7 @@ PYBIND11_MODULE(_direct_fourier_transform_ext, module) {
                "Write sum(model * exp(+2 pi i (u l + v m + w (n - 1))) / n) over the non-zero "
                "model pixels into vis_data in place (samples whose uvw is not finite or whose "
                "current value is NaN are left unchanged). processing_function_threads selects the "
-               "number of std::thread workers; <= 0 falls back to "
-               "std::thread::hardware_concurrency().",
+               "number of std::thread workers; a count below 1 runs one.",
                py::arg("model"),
                py::arg("vis_data"),
                py::arg("uvw").noconvert(),

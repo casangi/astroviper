@@ -75,7 +75,10 @@ def degrid_visibility_grid_single_field(
         (see
         :func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).
         Node tasks and processing functions do not resolve ``0``; those that
-        check the count refuse it.
+        check the count refuse it. Given a count below 1, a C++ kernel and the
+        PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
+        and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
+        ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
     description : str
         Description stored with a newly registered output data group.
 
@@ -97,8 +100,8 @@ def degrid_visibility_grid_single_field(
 
     Notes
     -----
-    ``processing_function_threads <= 0`` lets the C++ degridder fall back to
-    the hardware concurrency; ``1`` runs serially.
+    The C++ degridder runs one thread for a ``processing_function_threads``
+    below 1, as for ``1`` (serial).
     """
     if ms_data_group_out_modified is None:
         ms_data_group_out_modified = {"correlated_data": "VISIBILITY_MODEL"}

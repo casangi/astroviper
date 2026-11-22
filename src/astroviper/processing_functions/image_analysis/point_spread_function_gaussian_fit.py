@@ -1,4 +1,3 @@
-import os
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
@@ -70,7 +69,7 @@ def point_spread_function_gaussian_fit(
     processing_function_threads : int, default 1
         Number of worker threads used to fit individual (time, frequency,
         polarization) PSF slices concurrently via a ``ThreadPoolExecutor``.
-        Values ``<= 0`` fall back to ``os.cpu_count()``.  Each slice writes to
+        A count below 1 runs one thread.  Each slice writes to
         its own output entry, so the threaded result is identical to the
         serial one.
 
@@ -535,8 +534,8 @@ def psf_gaussian_fit_core(
         The pixel size in radians.
     processing_function_threads : int, default 1
         Number of worker threads used to fit (time, chan, pol) slices
-        concurrently via a ``ThreadPoolExecutor``. Values ``<= 0`` fall
-        back to ``os.cpu_count()``. Each slice writes to its own entry in
+        concurrently via a ``ThreadPoolExecutor``. A count below 1 runs
+        one thread. Each slice writes to its own entry in
         the output, so results are independent of the thread count.
     input_checked : bool, optional
         Skip fitting-grid checks already performed by the calling layer.
@@ -659,11 +658,7 @@ def psf_gaussian_fit_core(
         for pol in range(n_pol)
     ]
 
-    if processing_function_threads <= 0:
-        resolved_threads = os.cpu_count() or 1
-    else:
-        resolved_threads = processing_function_threads
-    resolved_threads = max(1, min(resolved_threads, len(tasks)))
+    resolved_threads = max(1, min(processing_function_threads, len(tasks)))
 
     if resolved_threads == 1 or len(tasks) <= 1:
         for t, c, p in tasks:

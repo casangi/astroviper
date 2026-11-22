@@ -77,7 +77,10 @@ def make_undeconvolved_image_single_field(
         (see
         :func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).
         Node tasks and processing functions do not resolve ``0``; those that
-        check the count refuse it.
+        check the count refuse it. Given a count below 1, a C++ kernel and the
+        PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
+        and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
+        ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
     complex_dtype : numpy.dtype, optional
         Complex precision of the gridded visibility grid (``complex64`` for a
         single-precision image, ``complex128`` otherwise).  Defaults to

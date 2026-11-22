@@ -283,7 +283,10 @@ def grid_imaging_weight_density_continuum(
         (see
         :func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).
         Node tasks and processing functions do not resolve ``0``; those that
-        check the count refuse it.
+        check the count refuse it. Given a count below 1, a C++ kernel and the
+        PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
+        and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
+        ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
 
     input_checked : bool, optional
         Skip configuration checks already performed by the calling layer.
@@ -689,7 +692,10 @@ def degrid_imaging_weights_continuum(
         (see
         :func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).
         Node tasks and processing functions do not resolve ``0``; those that
-        check the count refuse it.
+        check the count refuse it. Given a count below 1, a C++ kernel and the
+        PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
+        and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
+        ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
 
     input_checked : bool, optional
         Skip configuration checks already performed by the calling layer.
@@ -1072,7 +1078,10 @@ def calculate_imaging_weights(
         (see
         :func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).
         Node tasks and processing functions do not resolve ``0``; those that
-        check the count refuse it.
+        check the count refuse it. Given a count below 1, a C++ kernel and the
+        PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
+        and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
+        ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
     truncate_uv_cells : bool, default ``False``
         If True, assign shifted UV coordinates to density cells by integer
         truncation, matching CASA continuum weighting. If False, use the

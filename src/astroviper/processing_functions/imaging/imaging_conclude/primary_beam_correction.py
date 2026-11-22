@@ -139,11 +139,7 @@ def correct_sky_by_primary_beam(
     nt, nf, npol, ny, nx = residual.shape
     l = img_xds["l"].values
     delta = abs(float(l[1] - l[0]))
-    workers = (
-        processing_function_threads
-        if (processing_function_threads and processing_function_threads > 0)
-        else -1
-    )
+    workers = processing_function_threads
 
     corrected = np.empty_like(residual)
     for tt in range(nt):

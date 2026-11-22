@@ -536,9 +536,21 @@ match them in any new kernel:
    `complex64`/`complex128` grid and writes `complex64`/`complex128`
    visibilities in place — all four combinations are explicitly instantiated.
 6. **Threading inside the kernel** is via a `processing_function_threads` argument →
-   `std::thread` workers; `processing_function_threads <= 0` falls back to
-   `std::thread::hardware_concurrency()`, `1` runs serial. Concurrent writes to
-   shared grid cells use lock-free `std::atomic_ref<double>` adds (C++20) —
+   `std::thread` workers; a count below 1 runs one thread, as `1` does (serial),
+   never `std::thread::hardware_concurrency()`. A task's `processing_function_threads`
+   is the most threads its processing functions compute with at once: a kernel that
+   runs FFTs inside a parallel loop shares the count between them and never
+   multiplies it (Asp gives each running plane `max(1, count / active)` FFT threads,
+   `FftThreads` in `aspclean/src/asp_clean.cpp`). The Python FFTs (`normalize_image`,
+   the restore, `primary_beam_correction`, feather, `make_auto_mask`) pass the count to
+   scipy.fft and pyfftw as it is: their scipy interfaces refuse `0` and read a
+   negative `n` (down to `-os.cpu_count()`) as `os.cpu_count() + 1 + n`, and
+   `pyfftw.FFTW`, which `normalize_image` uses for unaligned buffers, takes it as an
+   unsigned int (a negative count raises `OverflowError`). Outside the count are the
+   BLAS and OpenMP threads of NumPy and SciPy, and the I/O threads of the chunk
+   reads, which read up to the count of arrays at once, each with its own pool of up
+   to `_READ_CONCURRENCY` threads (`utils/chunk_io/zarr_chunks.py`). Concurrent
+   writes to shared grid cells use lock-free `std::atomic_ref<double>` adds (C++20) —
    `complex<double>` is added as two `double` lanes.
 
 ---

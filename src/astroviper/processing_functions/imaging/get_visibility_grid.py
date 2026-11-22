@@ -115,8 +115,8 @@ def get_visibility_grid_single_field(
       grid will receive a prediction.
     - Time mapping is not currently implemented: every visibility time index
       is mapped to image time index 0.
-    - ``processing_function_threads <= 0`` lets the C++ degridder fall back
-      to the hardware concurrency; ``1`` runs serially.
+    - The C++ degridder runs one thread for a ``processing_function_threads``
+      below 1, as for ``1`` (serial).
 
     See Also
     --------

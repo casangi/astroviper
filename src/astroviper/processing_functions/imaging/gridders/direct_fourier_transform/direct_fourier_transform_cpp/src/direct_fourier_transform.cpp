@@ -199,11 +199,7 @@ inline void read_model(const ModelT& value, double& re, double& im) {
 }
 
 int resolve_threads(int processing_function_threads, std::int64_t n_work) {
-    int threads = processing_function_threads;
-    if (threads <= 0) {
-        threads = static_cast<int>(std::thread::hardware_concurrency());
-        if (threads <= 0) threads = 1;
-    }
+    int threads = std::max(1, processing_function_threads);
     if (static_cast<std::int64_t>(threads) > n_work) {
         threads = static_cast<int>(std::max<std::int64_t>(n_work, 1));
     }

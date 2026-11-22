@@ -3,7 +3,7 @@
 Coverage:
   * Numerical agreement with the pure-Python reference (`anti_alias_degrid_reference`)
   * Serial vs multi-threaded equivalence (exact: no atomic collisions)
-  * `processing_function_threads <= 0` auto-detects hardware concurrency
+  * `processing_function_threads` below 1 gives the result of one thread
   * NaN UV / NaN vis / out-of-bounds samples are left unchanged
   * Channel / time / pol index maps (cube and continuum collapse)
   * Dirac-delta grid returns the expected separable-kernel peak
@@ -179,12 +179,15 @@ class TestAntiAliasDegridCpp(unittest.TestCase):
                 threaded = _run_cpp(inputs, processing_function_threads=nt)
                 np.testing.assert_array_equal(threaded, serial)
 
-    def test_processing_function_threads_auto_detect(self):
-        """processing_function_threads <= 0 falls back to hardware_concurrency()."""
+    def test_processing_function_threads_below_one_matches_one_thread(self):
+        """A count below 1 gives the bits of one thread."""
         inputs = _make_random_inputs(seed=6)
         serial = _run_cpp(inputs, processing_function_threads=1)
-        auto = _run_cpp(inputs, processing_function_threads=0)
-        np.testing.assert_array_equal(auto, serial)
+        for nt in (0, -1):
+            with self.subTest(processing_function_threads=nt):
+                np.testing.assert_array_equal(
+                    _run_cpp(inputs, processing_function_threads=nt), serial
+                )
 
     def test_threaded_matches_reference(self):
         """Threaded C++ output matches the pure-Python reference within tolerance."""

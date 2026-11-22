@@ -360,8 +360,7 @@ PYBIND11_MODULE(_anti_alias_grid_ext, m) {
           "Grid weighted visibilities onto a UV plane using an anti-aliasing "
           "kernel (in-place). The grid may be complex64 or complex128; the "
           "visibilities stay complex128. processing_function_threads selects the number of "
-          "std::thread workers; <= 0 falls back to "
-          "std::thread::hardware_concurrency().",
+          "std::thread workers; a count below 1 runs one.",
           py::arg("grid"),
           py::arg("normalization"),
           py::arg("vis_data"),
@@ -383,8 +382,7 @@ PYBIND11_MODULE(_anti_alias_grid_ext, m) {
           &anti_alias_grid_uv_sampling_bind,
           "Grid imaging weights onto a UV plane (PSF / UV-sampling function, "
           "in-place). The grid may be complex64 or complex128. processing_function_threads "
-          "selects the number of std::thread workers; <= 0 falls back to "
-          "std::thread::hardware_concurrency().",
+          "selects the number of std::thread workers; a count below 1 runs one.",
           py::arg("grid"),
           py::arg("normalization"),
           py::arg("uvw"),
@@ -407,8 +405,7 @@ PYBIND11_MODULE(_anti_alias_grid_ext, m) {
           "anti-aliasing kernel. The model grid may be complex64 or "
           "complex128 and the visibilities complex64 or complex128; writes "
           "interpolated values into vis_data in place. processing_function_threads selects the "
-          "number of std::thread workers; <= 0 falls back to "
-          "std::thread::hardware_concurrency().",
+          "number of std::thread workers; a count below 1 runs one.",
           py::arg("grid"),
           py::arg("vis_data"),
           py::arg("uvw"),

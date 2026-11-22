@@ -166,11 +166,7 @@ void anti_alias_degrid(
         static_cast<int64_t>(n_time) * static_cast<int64_t>(n_baseline);
     if (total_work <= 0) return;
 
-    int resolved_threads = processing_function_threads;
-    if (resolved_threads <= 0) {
-        resolved_threads = static_cast<int>(std::thread::hardware_concurrency());
-        if (resolved_threads <= 0) resolved_threads = 1;
-    }
+    int resolved_threads = std::max(1, processing_function_threads);
     if (static_cast<int64_t>(resolved_threads) > total_work) {
         resolved_threads = static_cast<int>(total_work);
     }

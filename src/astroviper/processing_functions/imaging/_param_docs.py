@@ -1109,7 +1109,10 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
         "(see\n"
         ":func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).\n"
         "Node tasks and processing functions do not resolve ``0``; those that\n"
-        "check the count refuse it."
+        "check the count refuse it. Given a count below 1, a C++ kernel and the\n"
+        "PSF fit run one thread, and the Python FFTs pass the count to scipy.fft\n"
+        "and pyfftw, whose scipy interfaces refuse ``0`` and read a negative\n"
+        "``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``."
     ),
     "fft_backend": (
         'FFT backend used by the gridder normalization (``"pyfftw"`` or\n``"scipy"``).'
