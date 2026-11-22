@@ -1281,7 +1281,14 @@ def residual_update_continuum_single_field(
 
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
-        kernels.
+        kernels. A distributed application resolves ``0`` (auto) once, before
+        its checks, to the CPUs per Dask worker thread of the host with the
+        fewest, at least 1 (1 where these are not known, as under MPI), and
+        warns when a host's worker threads times the count exceed its CPUs
+        (see
+        :func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).
+        Node tasks and processing functions do not resolve ``0``; those that
+        check the count refuse it.
 
     fft_backend : str, optional
         FFT backend used by the gridder normalization (``"pyfftw"`` or
@@ -1997,7 +2004,14 @@ def grid_imaging_weight_density_continuum_node(
         Use single-precision density-grid storage when true.
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
-        kernels.
+        kernels. A distributed application resolves ``0`` (auto) once, before
+        its checks, to the CPUs per Dask worker thread of the host with the
+        fewest, at least 1 (1 where these are not known, as under MPI), and
+        warns when a host's worker threads times the count exceed its CPUs
+        (see
+        :func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).
+        Node tasks and processing functions do not resolve ``0``; those that
+        check the count refuse it.
     io_engine : {"chunk", "xradio"}, optional
         I/O engine of the node tasks. ``"chunk"`` reads and writes Zarr chunk
         blobs (and FITS data blocks) directly by byte offset
@@ -2317,7 +2331,14 @@ def degrid_imaging_weights_continuum_node(
         is used only if none of its loaded correlations is flagged.
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
-        kernels.
+        kernels. A distributed application resolves ``0`` (auto) once, before
+        its checks, to the CPUs per Dask worker thread of the host with the
+        fewest, at least 1 (1 where these are not known, as under MPI), and
+        warns when a host's worker threads times the count exceed its CPUs
+        (see
+        :func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).
+        Node tasks and processing functions do not resolve ``0``; those that
+        check the count refuse it.
     weight_memory_mode : {"in_memory", "in_place"}, optional
         Storage policy for calculated continuum imaging weights.
         ``"in_memory"``

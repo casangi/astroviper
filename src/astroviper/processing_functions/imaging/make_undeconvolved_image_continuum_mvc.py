@@ -64,7 +64,14 @@ def make_undeconvolved_image_mvc_single_field(
         Output image data-group name.
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
-        kernels.
+        kernels. A distributed application resolves ``0`` (auto) once, before
+        its checks, to the CPUs per Dask worker thread of the host with the
+        fewest, at least 1 (1 where these are not known, as under MPI), and
+        warns when a host's worker threads times the count exceed its CPUs
+        (see
+        :func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).
+        Node tasks and processing functions do not resolve ``0``; those that
+        check the count refuse it.
     complex_dtype : numpy.dtype or None, optional
         Complex dtype of the channelized residual UV grids.
 

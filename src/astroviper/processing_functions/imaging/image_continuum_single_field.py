@@ -179,7 +179,14 @@ def imaging_preparation_continuum_single_field(
 
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
-        kernels.
+        kernels. A distributed application resolves ``0`` (auto) once, before
+        its checks, to the CPUs per Dask worker thread of the host with the
+        fewest, at least 1 (1 where these are not known, as under MPI), and
+        warns when a host's worker threads times the count exceed its CPUs
+        (see
+        :func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).
+        Node tasks and processing functions do not resolve ``0``; those that
+        check the count refuse it.
 
     fft_backend : str, optional
         FFT backend used by the gridder normalization (``"pyfftw"`` or
@@ -655,7 +662,14 @@ def prepare_model_uv_continuum_single_field(
 
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
-        kernels.
+        kernels. A distributed application resolves ``0`` (auto) once, before
+        its checks, to the CPUs per Dask worker thread of the host with the
+        fewest, at least 1 (1 where these are not known, as under MPI), and
+        warns when a host's worker threads times the count exceed its CPUs
+        (see
+        :func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).
+        Node tasks and processing functions do not resolve ``0``; those that
+        check the count refuse it.
 
     fft_backend : str, optional
         FFT backend used by the gridder normalization (``"pyfftw"`` or
@@ -1083,7 +1097,14 @@ def prepare_model_uv_mvc_single_field(
         precision. If ``False`` the image-domain arrays are double precision.
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
-        kernels.
+        kernels. A distributed application resolves ``0`` (auto) once, before
+        its checks, to the CPUs per Dask worker thread of the host with the
+        fewest, at least 1 (1 where these are not known, as under MPI), and
+        warns when a host's worker threads times the count exceed its CPUs
+        (see
+        :func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).
+        Node tasks and processing functions do not resolve ``0``; those that
+        check the count refuse it.
     fft_backend : str, optional
         FFT backend used by the gridder normalization (``"pyfftw"`` or
         ``"scipy"``).
@@ -2550,7 +2571,14 @@ def residual_update_continuum_single_field(
 
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
-        kernels.
+        kernels. A distributed application resolves ``0`` (auto) once, before
+        its checks, to the CPUs per Dask worker thread of the host with the
+        fewest, at least 1 (1 where these are not known, as under MPI), and
+        warns when a host's worker threads times the count exceed its CPUs
+        (see
+        :func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).
+        Node tasks and processing functions do not resolve ``0``; those that
+        check the count refuse it.
 
     fft_backend : str, optional
         FFT backend used by the gridder normalization (``"pyfftw"`` or
@@ -3046,7 +3074,14 @@ def make_auto_mask_continuum(
         ``threshold_per_cycle`` was the absolute ``threshold``.
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
-        kernels.
+        kernels. A distributed application resolves ``0`` (auto) once, before
+        its checks, to the CPUs per Dask worker thread of the host with the
+        fewest, at least 1 (1 where these are not known, as under MPI), and
+        warns when a host's worker threads times the count exceed its CPUs
+        (see
+        :func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).
+        Node tasks and processing functions do not resolve ``0``; those that
+        check the count refuse it.
     image_data_group_in_name : str, optional
         Data group of the residual. Default ``"residual"``.
     image_data_group_out_name : str, optional
@@ -3804,7 +3839,14 @@ def model_update_mtmfs_single_field(
 
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
-        kernels.
+        kernels. A distributed application resolves ``0`` (auto) once, before
+        its checks, to the CPUs per Dask worker thread of the host with the
+        fewest, at least 1 (1 where these are not known, as under MPI), and
+        warns when a host's worker threads times the count exceed its CPUs
+        (see
+        :func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).
+        Node tasks and processing functions do not resolve ``0``; those that
+        check the count refuse it.
 
     image_data_group_in_name : str, optional
         Key in the image's ``data_groups`` whose ``"sky"`` (and, optionally,
@@ -4603,7 +4645,14 @@ def restore_continuum_image(
 
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
-        kernels.
+        kernels. A distributed application resolves ``0`` (auto) once, before
+        its checks, to the CPUs per Dask worker thread of the host with the
+        fewest, at least 1 (1 where these are not known, as under MPI), and
+        warns when a host's worker threads times the count exceed its CPUs
+        (see
+        :func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).
+        Node tasks and processing functions do not resolve ``0``; those that
+        check the count refuse it.
 
     primary_beam_limit : float, optional
         Primary-beam cutoff below which the corrected image is blanked.

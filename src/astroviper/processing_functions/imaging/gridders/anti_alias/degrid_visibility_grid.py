@@ -68,7 +68,14 @@ def degrid_visibility_grid_single_field(
         FFT padding used to derive the UV-grid shape from the image geometry.
     processing_function_threads : int
         Number of threads handed to the per-processing-function (C++ / FFT)
-        kernels.
+        kernels. A distributed application resolves ``0`` (auto) once, before
+        its checks, to the CPUs per Dask worker thread of the host with the
+        fewest, at least 1 (1 where these are not known, as under MPI), and
+        warns when a host's worker threads times the count exceed its CPUs
+        (see
+        :func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).
+        Node tasks and processing functions do not resolve ``0``; those that
+        check the count refuse it.
     description : str
         Description stored with a newly registered output data group.
 

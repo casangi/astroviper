@@ -1101,7 +1101,15 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
         '``"chunk"``.'
     ),
     "processing_function_threads": (
-        "Number of threads handed to the per-processing-function (C++ / FFT)\nkernels."
+        "Number of threads handed to the per-processing-function (C++ / FFT)\n"
+        "kernels. A distributed application resolves ``0`` (auto) once, before\n"
+        "its checks, to the CPUs per Dask worker thread of the host with the\n"
+        "fewest, at least 1 (1 where these are not known, as under MPI), and\n"
+        "warns when a host's worker threads times the count exceed its CPUs\n"
+        "(see\n"
+        ":func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).\n"
+        "Node tasks and processing functions do not resolve ``0``; those that\n"
+        "check the count refuse it."
     ),
     "fft_backend": (
         'FFT backend used by the gridder normalization (``"pyfftw"`` or\n``"scipy"``).'

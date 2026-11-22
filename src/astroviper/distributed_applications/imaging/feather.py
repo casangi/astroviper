@@ -105,7 +105,14 @@ def feather(
         automatically when ``None``.
     processing_function_threads : int, default 1
         Number of threads handed to the per-processing-function (C++ / FFT)
-        kernels.
+        kernels. A distributed application resolves ``0`` (auto) once, before
+        its checks, to the CPUs per Dask worker thread of the host with the
+        fewest, at least 1 (1 where these are not known, as under MPI), and
+        warns when a host's worker threads times the count exceed its CPUs
+        (see
+        :func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).
+        Node tasks and processing functions do not resolve ``0``; those that
+        check the count refuse it.
     fft_backend : {"scipy", "pyfftw"}, default "scipy"
         FFT backend used by the feather combination (``"scipy"`` or ``"pyfftw"``).
     compressor : numcodecs compressor
@@ -131,6 +138,12 @@ def feather(
     Supplied configuration is checked before opening images. Shape and dtype
     checks use the opened image metadata and always run before output creation.
     """
+    from astroviper.utils.data_partitioning import resolve_processing_function_threads
+
+    processing_function_threads = resolve_processing_function_threads(
+        processing_function_threads, "dask"
+    )
+
     from astroviper.utils.node_task_io import check_io_engine
 
     check_io_engine(io_engine)

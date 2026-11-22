@@ -239,7 +239,14 @@ def simulate_processing_set(
         Astropy frame of all right ascension / declination inputs (``"icrs"`` or ``"fk5"``).
     processing_function_threads : int
         Number of threads handed to the per-processing-function (C++ / FFT)
-        kernels.
+        kernels. A distributed application resolves ``0`` (auto) once, before
+        its checks, to the CPUs per Dask worker thread of the host with the
+        fewest, at least 1 (1 where these are not known, as under MPI), and
+        warns when a host's worker threads times the count exceed its CPUs
+        (see
+        :func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).
+        Node tasks and processing functions do not resolve ``0``; those that
+        check the count refuse it.
     implementation : {"numpy", "cpp"}
         Visibility kernel implementation: ``"cpp"`` (multithreaded C++, default) or
         ``"numpy"`` (vectorised NumPy reference).

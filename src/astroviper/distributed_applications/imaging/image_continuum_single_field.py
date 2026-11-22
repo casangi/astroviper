@@ -2797,7 +2797,14 @@ def image_continuum_single_field(
         Resource description used for partition planning.
     processing_function_threads : int
         Number of threads handed to the per-processing-function (C++ / FFT)
-        kernels.
+        kernels. A distributed application resolves ``0`` (auto) once, before
+        its checks, to the CPUs per Dask worker thread of the host with the
+        fewest, at least 1 (1 where these are not known, as under MPI), and
+        warns when a host's worker threads times the count exceed its CPUs
+        (see
+        :func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).
+        Node tasks and processing functions do not resolve ``0``; those that
+        check the count refuse it.
     n_mapping_parallelism : dict, optional
         Mapping parallelism as ``{"frequency": count}``. ``count=None`` or a
         missing dictionary auto-determines the number of frequency chunks.
@@ -3409,6 +3416,12 @@ def image_continuum_single_field(
             What the graphs ran on, see
             :func:`astroviper.utils.data_partitioning.get_compute_resources`.
     """
+    from astroviper.utils.data_partitioning import resolve_processing_function_threads
+
+    processing_function_threads = resolve_processing_function_threads(
+        processing_function_threads, "dask"
+    )
+
     if not input_checked:
         from astroviper.processing_functions.imaging.config_check import (
             CONTINUUM_SINGLE_FIELD,

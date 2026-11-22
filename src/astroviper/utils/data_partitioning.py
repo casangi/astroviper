@@ -133,9 +133,10 @@ def get_compute_resources(compute_backend, processing_function_threads):
     compute_backend : str
         ``"dask"`` or ``"mpi"``, the engine that computes the graphs.
     processing_function_threads : int or None
-        The threads of each node task's processing functions, as passed to
-        the application (``<= 0`` means the hardware concurrency); ``None``
-        for an application without that argument.
+        The threads of each node task's processing functions, as the
+        application resolved them with
+        :func:`resolve_processing_function_threads`; ``None`` for an
+        application without that argument.
 
     Returns
     -------
@@ -290,6 +291,109 @@ def get_compute_resources(compute_backend, processing_function_threads):
         **{key: _total(h[key] for h in values) for key in COMPUTE_RESOURCES_HOST_KEYS},
         "hosts": hosts,
     }
+
+
+def _host_cpu_count():
+    """The hostname and ``dask.system.cpu_count()`` of the host this runs on."""
+    import socket
+
+    from dask.system import cpu_count
+
+    return socket.gethostname(), cpu_count()
+
+
+def resolve_processing_function_threads(processing_function_threads, compute_backend):
+    """The ``processing_function_threads`` that a distributed application passes down.
+
+    A distributed application calls this first, before it checks its
+    configuration, and passes the count it returns to its node tasks.
+
+    Parameters
+    ----------
+    processing_function_threads : int
+        The count passed to the application; ``0`` asks for auto. Any other
+        value, and a value that is not an integer, is returned unchanged.
+    compute_backend : str
+        ``"dask"`` or ``"mpi"``, the engine that computes the graphs.
+
+    Returns
+    -------
+    int
+        For ``0``: over the hosts of :func:`get_compute_resources`, the
+        smallest number of CPUs per worker thread (a host's CPUs divided by
+        its ``n_worker_slots``, rounded down), at least 1. A host's CPUs are
+        ``dask.system.cpu_count()`` where its tasks run, which counts only
+        the CPUs that CPU affinity and cgroup quotas allow: run on the
+        workers of a distributed client (the smallest count of a host's
+        workers), else ``dask.system.CPU_COUNT``. 1 when there is no host or
+        the CPUs or worker threads of a host are not known: MPI, a scheduler
+        not recognised, a pool of unknown size, a client without workers.
+
+    Notes
+    -----
+    Logs the count it resolves for ``0``, and one warning that lists every
+    host whose worker threads times the returned count exceed its CPUs; it
+    never refuses a count. With a distributed client it calls
+    :func:`get_compute_resources` and runs one function on every worker.
+    """
+    import numbers
+
+    if isinstance(processing_function_threads, bool) or not isinstance(
+        processing_function_threads, numbers.Integral
+    ):
+        return processing_function_threads
+    hosts = {}
+    if compute_backend == "dask":
+        resources = get_compute_resources("dask", processing_function_threads)
+        slots = {
+            hostname: host["n_worker_slots"]
+            for hostname, host in (resources["hosts"] or {}).items()
+        }
+        if resources["scheduler"] == "distributed":
+            from dask.base import get_scheduler
+
+            cpus = {}
+            for hostname, n_cpus in (
+                get_scheduler().__self__.run(_host_cpu_count).values()
+            ):
+                cpus[hostname] = min(n_cpus, cpus.get(hostname, n_cpus))
+        else:
+            from dask.system import CPU_COUNT
+
+            cpus = dict.fromkeys(slots, CPU_COUNT)
+        hosts = {hostname: (slots[hostname], cpus.get(hostname)) for hostname in slots}
+    known = {
+        hostname: (n_slots, n_cpus)
+        for hostname, (n_slots, n_cpus) in hosts.items()
+        if n_slots is not None and n_cpus is not None
+    }
+    count = processing_function_threads
+    if count == 0:
+        if known and len(known) == len(hosts):
+            count = max(1, min(n_cpus // n_slots for n_slots, n_cpus in known.values()))
+            logger.info(
+                f"processing_function_threads=0 resolved to {count}, the CPUs per "
+                "Dask worker thread of the host with the fewest."
+            )
+        else:
+            count = 1
+            logger.info(
+                "processing_function_threads=0 resolved to 1: the CPUs per Dask "
+                "worker thread are not known."
+            )
+    oversubscribed = [
+        f"{hostname} ({n_slots} worker threads, {n_cpus} CPUs)"
+        for hostname, (n_slots, n_cpus) in known.items()
+        if n_slots * count > n_cpus
+    ]
+    if oversubscribed:
+        logger.warning(
+            f"processing_function_threads={count} times the Dask worker threads "
+            f"exceeds the CPUs of {len(oversubscribed)} "
+            f"host{'s' if len(oversubscribed) > 1 else ''}: "
+            f"{', '.join(oversubscribed)}."
+        )
+    return count
 
 
 def check_compute_resources(compute_resources):

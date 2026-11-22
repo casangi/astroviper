@@ -571,7 +571,12 @@ When applicable multiple instances of map-reduce can be done in a single distrib
 - **GraphVIPER Map-Reduce**: Distributed parallelism using Dask or MPI
 - **Within a task**: `processing_function_threads`, passed down unchanged from
   distributed_applications to the C++ kernels (the same parameter name at every layer of the
-  stack).
+  stack). A distributed application first resolves `0` (auto), once, with
+  `utils/data_partitioning.py::resolve_processing_function_threads`: the CPUs per Dask worker
+  thread of the host with the fewest (`dask.system.cpu_count()` where the tasks run, over the
+  host's worker threads), at least 1, and 1 where these are not known (MPI, a scheduler not
+  recognised). When a host's worker threads times the count exceed its CPUs, it logs one warning
+  that lists every such host; it never refuses a count.
 
 ### Why this design (do not regress it)
 GraphVIPER deliberately **loads data inside compute nodes** rather than as
@@ -728,8 +733,9 @@ per-variable nodes.
   group → return stats/timings).
 - Keep new C++ kernels consistent with the §6 memory contract and with the
   binding patterns of the existing kernels.
-- Pass `processing_function_threads` through unchanged from distributed applications to processing function kernels —
-  the same parameter name is used at every layer.
+- Pass `processing_function_threads` through unchanged from distributed applications (after
+  they resolve `0`) to processing function kernels — the same parameter name is used at every
+  layer.
 - Keep the layering: graph code in `distributed_applications/`, I/O in `node_tasks/`,
   science in `processing_functions/`.
 - Write processing functions for the full dimensionality of the XRADIO data
