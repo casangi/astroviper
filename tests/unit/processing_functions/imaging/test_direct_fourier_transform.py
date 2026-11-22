@@ -458,3 +458,54 @@ def test_dft_rejects_original_parameters_before_accessing_data(name, count, freq
     function = getattr(direct_fourier_transform, name)
     with pytest.raises((TypeError, ValueError)):
         function(None, None, count, frequency)
+
+
+@pytest.mark.parametrize(
+    "name, args",
+    [
+        ("add_dft_image_single_field", {"chan_mode": "continuum"}),
+        (
+            "add_dft_image_continuum_single_field",
+            {"n_taylor_terms": 1, "reference_frequency": 1e9},
+        ),
+    ],
+)
+def test_a_pixel_beyond_the_horizon_raises_the_documented_runtime_error(name, args):
+    """The kernel refuses a pixel with l**2 + m**2 >= 1 with the RuntimeError that
+    the Raises section names."""
+    import inspect
+
+    from astroviper.processing_functions.imaging import direct_fourier_transform
+
+    samples = ("time", "baseline_id", "frequency", "polarization")
+    ms_xds = xr.Dataset(
+        {
+            "VISIBILITY": (samples, np.ones((1, 2, 1, 1), dtype=complex)),
+            "UVW": (("time", "baseline_id", "uvw_label"), np.ones((1, 2, 3))),
+            "WEIGHT_IMAGING": (samples, np.ones((1, 2, 1, 1))),
+        },
+        coords={"frequency": [1e9], "polarization": ["I"]},
+        attrs={
+            "data_groups": {
+                "base": {
+                    "correlated_data": "VISIBILITY",
+                    "uvw": "UVW",
+                    "weight_imaging": "WEIGHT_IMAGING",
+                }
+            }
+        },
+    )
+    img_xds = xr.Dataset(
+        coords={
+            "time": [0.0],
+            "frequency": [1e9],
+            "polarization": ["I"],
+            "l": [1.2],
+            "m": [0.0],
+        },
+        attrs={"data_groups": {"residual": {}}},
+    )
+    function = getattr(direct_fourier_transform, name)
+    with pytest.raises(RuntimeError, match="hemisphere"):
+        function(ms_xds, img_xds, **args)
+    assert "RuntimeError" in inspect.getdoc(function).split("Raises")[1]
