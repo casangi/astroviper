@@ -1289,3 +1289,35 @@ def test_a_corrected_restore_to_a_target_refuses_a_cutoff_below_1e_3(output):
         restoring_beam=TARGET,
         primary_beam_limit=1e-3,
     )
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("n", [64, 182, 200, 256])
+def test_restore_transforms_with_three_workers_stay_within_rounding(n, dtype):
+    """The clean beam's transform, the convolution with it and the primary beam
+    corrected plane with 3 workers stay within 8 eps of the peak of one worker;
+    scipy's bits may depend on the workers at some of these sizes."""
+    rng = np.random.default_rng(1)
+    delta = 1e-6
+    beam = np.array([4.0 * delta, 2.5 * delta, 0.4])
+    plane = rng.standard_normal((n, n)).astype(dtype)
+    primary_beam = np.linspace(0.05, 1.0, n * n).reshape(n, n).astype(dtype)
+
+    def run(workers):
+        kernel_ft = _clean_beam_kernel_ft(beam, n, n, delta, dtype, workers)
+        convolved = _convolve_with_clean_beam(plane.copy(), kernel_ft, workers)
+        corrected = primary_beam_corrected_plane(
+            primary_beam,
+            0.2,
+            plane.copy(),
+            plane.copy(),
+            kernel_ft=kernel_ft,
+            workers=workers,
+        )
+        return kernel_ft, convolved, corrected
+
+    for one, three in zip(run(1), run(3), strict=True):
+        finite = np.isfinite(one)
+        np.testing.assert_array_equal(np.isfinite(three), finite)
+        bound = 8 * np.finfo(one.dtype).eps * np.abs(one[finite]).max()
+        assert np.abs(three[finite] - one[finite]).max() <= bound

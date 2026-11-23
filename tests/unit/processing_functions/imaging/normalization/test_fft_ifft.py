@@ -396,3 +396,101 @@ def test_fftw_unaligned_transform_uses_line_scratch(
         assert backing[:offset] == bytes([0xA5]) * offset
         assert backing[-1] == 0xA5
     assert allocations
+
+
+def _spilled(values):
+    """``values`` copied into a view at byte offset 1, not aligned for its dtype."""
+    backing = bytearray(values.nbytes + 2)
+    view = np.ndarray(values.shape, dtype=values.dtype, buffer=backing, offset=1)
+    view[...] = values
+    return view
+
+
+def _plane(n, dtype):
+    rng = np.random.default_rng(n)
+    return (rng.standard_normal((n, n)) + 1j * rng.standard_normal((n, n))).astype(
+        dtype
+    )
+
+
+def _both_transforms(values, threads, layout, fft_backend):
+    """ifft_uv_to_lm and fft_lm_to_uv of ``values``, each in place on a copy."""
+    results = []
+    for transform, extra in (
+        (ifft_uv_to_lm, {}),
+        (fft_lm_to_uv, {"complex_dtype": values.dtype}),
+    ):
+        work = values.copy() if layout == "aligned" else _spilled(values)
+        result = transform(
+            work,
+            processing_function_threads=threads,
+            fft_backend=fft_backend,
+            overwrite_input=True,
+            **extra,
+        )
+        results.append(result.copy())
+    return results
+
+
+@pytest.mark.parametrize("transform", [ifft_uv_to_lm, fft_lm_to_uv])
+def test_fftw_unaligned_transform_passes_the_thread_count(transform, monkeypatch):
+    """On an unaligned plane the line path makes one plan per axis, each given
+    the count by keyword."""
+    import pyfftw
+
+    real = pyfftw.FFTW
+    threads = []
+
+    def plan(*args, **kwargs):
+        threads.append(kwargs.get("threads", "not by keyword"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(pyfftw, "FFTW", plan)
+    extra = {"complex_dtype": np.complex128} if transform is fft_lm_to_uv else {}
+    transform(
+        _spilled(_plane(160, np.complex128)),
+        processing_function_threads=3,
+        fft_backend="pyfftw",
+        overwrite_input=True,
+        **extra,
+    )
+    assert threads == [3, 3]
+
+
+@pytest.mark.parametrize("dtype", [np.complex64, np.complex128])
+@pytest.mark.parametrize(
+    "n, layout",
+    [
+        (n, layout)
+        for n in (60, 80, 120, 160, 300, 600)
+        for layout in ("aligned", "spilled")
+    ]
+    + [(63, "aligned"), (143, "aligned"), (192, "spilled")],
+)
+def test_pyfftw_gives_one_thread_bits_with_three(n, layout, dtype):
+    """pyFFTW with 3 threads gives the bits of one thread: on the padded grids
+    of the numerical harness, aligned and spilled (the line path), and on 143
+    aligned and 192 spilled, whose bits change from 5 threads on (measured on
+    arm64 with pyFFTW 0.15.1)."""
+    values = _plane(n, dtype)
+    for one, three in zip(
+        _both_transforms(values, 1, layout, "pyfftw"),
+        _both_transforms(values, 3, layout, "pyfftw"),
+        strict=True,
+    ):
+        np.testing.assert_array_equal(three, one)
+
+
+@pytest.mark.parametrize("dtype", [np.complex64, np.complex128])
+@pytest.mark.parametrize("n", [60, 160, 182, 183, 256, 512])
+def test_scipy_with_three_workers_stays_within_rounding(n, dtype):
+    """scipy.fft with 3 workers stays within 8 eps of the peak of one worker;
+    its bits may depend on the workers at some of these sizes."""
+    values = _plane(n, dtype)
+    for one, three in zip(
+        _both_transforms(values, 1, "aligned", "scipy"),
+        _both_transforms(values, 3, "aligned", "scipy"),
+        strict=True,
+    ):
+        bound = 8 * np.finfo(dtype).eps * np.abs(one).max()
+        assert np.abs(three - one).max() <= bound

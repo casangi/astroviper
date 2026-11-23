@@ -1,9 +1,11 @@
 """Unit tests for astroviper.processing_functions.image_analysis.make_auto_mask."""
 
+import importlib
 import math
 
 import numpy as np
 import pytest
+import scipy.fft
 import scipy.signal
 import xarray as xr
 
@@ -680,3 +682,23 @@ def test_the_beam_may_come_in_any_dimension_order():
     transposed["BEAM"] = transposed.BEAM.transpose("beam_param", "polarization", ...)
     make_auto_mask(transposed, {})
     np.testing.assert_array_equal(transposed.MASK.values, xds.MASK.values)
+
+
+@pytest.mark.parametrize("size", [64, 182])
+def test_mask_convolution_with_three_workers_stays_within_rounding(size):
+    """The smoothing convolution under scipy.fft.set_workers(3) stays within 8
+    eps of the peak of one worker; scipy's bits may depend on the workers at
+    the padded size of the box of 182 (they do on arm64 with scipy 1.18.1)."""
+    module = importlib.import_module(
+        "astroviper.processing_functions.image_analysis.make_auto_mask"
+    )
+    rng = np.random.default_rng(2)
+    kernel = rng.random((37, 37))
+    box = rng.random((size, size)) > 0.7
+    results = []
+    for workers in (1, 3):
+        with scipy.fft.set_workers(workers):
+            results.append(module._convolve(box, kernel))
+    one, three = results
+    bound = 8 * np.finfo(one.dtype).eps * np.abs(one).max()
+    assert np.abs(three - one).max() <= bound

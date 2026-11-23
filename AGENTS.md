@@ -545,7 +545,10 @@ match them in any new kernel:
    is the most threads its processing functions compute with at once: a kernel that
    runs FFTs inside a parallel loop shares the count between them and never
    multiplies it (Asp gives each running plane `max(1, count / active)` FFT threads,
-   `FftThreads` in `aspclean/src/asp_clean.cpp`). The Python FFTs (`normalize_image`,
+   `FftThreads` in `aspclean/src/asp_clean.cpp`). The results do not depend on the
+   count, except the anti-alias gridders', whose atomic adds into shared cells sum in
+   the threads' order, and those of the Python FFTs, whose libraries may round
+   differently with another count at some sizes. The Python FFTs (`normalize_image`,
    the restore, `primary_beam_correction`, feather, `make_auto_mask`) pass the count to
    scipy.fft and pyfftw as it is: their scipy interfaces refuse `0` and read a
    negative `n` (down to `-os.cpu_count()`) as `os.cpu_count() + 1 + n`, and
