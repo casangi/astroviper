@@ -3488,6 +3488,7 @@ def _model_update_native_mtmfs(
     max_sidelobe_name,
     image_data_group_in_name,
     image_data_group_out_name,
+    processing_function_threads=1,
     *,
     input_checked=False,
 ):
@@ -3684,6 +3685,7 @@ def _model_update_native_mtmfs(
                 mask_threshold=deconvolve_params.get("mask_threshold", 0.9),
                 **divergence,
                 record_iteration_history=record_iteration_history,
+                processing_function_threads=processing_function_threads,
             )
             if not native_layout:
                 residual_view[...] = residual_work
@@ -4015,6 +4017,7 @@ def model_update_mtmfs_single_field(
             max_sidelobe_name,
             image_data_group_in_name,
             image_data_group_out_name,
+            processing_function_threads,
             input_checked=True,
         )
 

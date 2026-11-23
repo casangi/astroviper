@@ -234,13 +234,13 @@ struct Work {
         small_scale_bias = clamp_small_scale_bias(bias);
     }
 
-    int setup_from_psf(const T* psf) {
+    int setup_from_psf(const T* psf, int processing_function_threads) {
         if (!all_finite(psf, static_cast<std::size_t>(npsf) * nimg()))
             throw std::invalid_argument("psf must be finite");
         psf_ft.assign(npsf, std::vector<complex_t>(nspec(), complex_t(0, 0)));
         for (int order = 0; order < npsf; ++order)
             astroviper::fft::rfft2_half<T>(psf + static_cast<std::size_t>(order) * nimg(), nx, ny,
-                                           psf_ft[static_cast<std::size_t>(order)], 1);
+                                           psf_ft[static_cast<std::size_t>(order)], processing_function_threads);
 
         {
             const T* p0 = psf;
@@ -280,7 +280,8 @@ struct Work {
         std::vector<T> scale_img(nimg());
         for (int s = 0; s < nscales; ++s) {
             make_scale<T>(scale_img.data(), nx, ny, scales[static_cast<std::size_t>(s)]);
-            astroviper::fft::rfft2_half<T>(scale_img.data(), nx, ny, scale_ft[static_cast<std::size_t>(s)], 1);
+            astroviper::fft::rfft2_half<T>(scale_img.data(), nx, ny, scale_ft[static_cast<std::size_t>(s)],
+                                           processing_function_threads);
             extract_patch(scale_img.data(), nx, ny, nx / 2, ny / 2, psf_support_x, psf_support_y,
                           vec_scales[static_cast<std::size_t>(s)]);
         }
@@ -305,7 +306,7 @@ struct Work {
                         const std::vector<complex_t>& x1 = scale_ft[static_cast<std::size_t>(s1)];
                         const std::vector<complex_t>& x2 = scale_ft[static_cast<std::size_t>(s2)];
                         for (std::size_t k = 0; k < nspec(); ++k) work[k] = pf[k] * x1[k] * x2[k];
-                        astroviper::fft::irfft2_half<T>(work.data(), nx, ny, full.data(), 1);
+                        astroviper::fft::irfft2_half<T>(work.data(), nx, ny, full.data(), processing_function_threads);
                         // Remove both scale centers before extracting the PSF patch.
                         // Scale setup is complete, so reuse scale_img as scratch.
                         recenter_convolution<T>(full.data(), nx, ny, scale_img.data(), 2);
@@ -392,7 +393,7 @@ int taylor_hessian(const T* psf, int nterms, int nx, int ny, std::vector<float>&
                    std::vector<double>& hessian_condition_number, int& psf_support) {
     Work<T> w;
     w.init(nterms, nx, ny, scales, small_scale_bias);
-    const int rc = w.setup_from_psf(psf);
+    const int rc = w.setup_from_psf(psf, 1);
     scales = w.scales;
     psf_support = w.psf_support;
     if (rc == 0) {
@@ -407,7 +408,7 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
                      const std::vector<float>& scales, float small_scale_bias, int max_iter_per_cycle_updated, T gain,
                      T threshold_per_cycle, T mask_threshold,
                      const deconvolvers::DivergenceControl<T>& divergence, std::ptrdiff_t residual_term_stride,
-                     bool record_iteration_history) {
+                     bool record_iteration_history, int processing_function_threads) {
     if (max_iter_per_cycle_updated < 0) throw std::invalid_argument("max_iter_per_cycle_updated must be >= 0");
     if (!std::isfinite(static_cast<double>(gain)) ||
         !std::isfinite(static_cast<double>(threshold_per_cycle)) ||
@@ -428,7 +429,7 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
         !all_finite(model, static_cast<std::size_t>(nterms) * w.nimg()) ||
         (mask != nullptr && !all_finite(mask, w.nimg())))
         throw std::invalid_argument("residual, model and mask must be finite");
-    if (w.setup_from_psf(psf) == kSingularHessian)
+    if (w.setup_from_psf(psf, processing_function_threads) == kSingularHessian)
         throw std::runtime_error(
             "MT-Cleaner error : Non-invertible Hessian. Please check if the multi-frequency data "
             "selection is appropriate for a polynomial fit of the desired order.");
@@ -449,11 +450,11 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
     if (mask != nullptr) {
         std::vector<typename Work<T>::complex_t> mask_ft(nspec), work(nspec);
         std::vector<T> scratch(nimg);
-        astroviper::fft::rfft2_half<T>(mask, nx, ny, mask_ft, 1);
+        astroviper::fft::rfft2_half<T>(mask, nx, ny, mask_ft, processing_function_threads);
         for (int s = 0; s < ns; ++s) {
             std::vector<T>& sm = vec_scale_masks[static_cast<std::size_t>(s)];
             for (std::size_t k = 0; k < nspec; ++k) work[k] = mask_ft[k] * w.scale_ft[static_cast<std::size_t>(s)][k];
-            astroviper::fft::irfft2_half<T>(work.data(), nx, ny, sm.data(), 1);
+            astroviper::fft::irfft2_half<T>(work.data(), nx, ny, sm.data(), processing_function_threads);
             recenter_convolution<T>(sm.data(), nx, ny, scratch.data(), 1);
             if (mask_threshold > static_cast<T>(0))
                 for (std::size_t k = 0; k < nimg; ++k)
@@ -499,12 +500,12 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
         std::vector<T> scratch(nimg);
         for (int t = 0; t < nt; ++t) {
             astroviper::fft::rfft2_half<T>(residual + static_cast<std::ptrdiff_t>(t) * residual_term_stride, nx, ny,
-                                           dirty_ft, 1);
+                                           dirty_ft, processing_function_threads);
             for (int s = 0; s < ns; ++s) {
                 for (std::size_t k = 0; k < nspec; ++k)
                     work[k] = dirty_ft[k] * w.scale_ft[static_cast<std::size_t>(s)][k];
                 std::vector<T>& r = mat_r[static_cast<std::size_t>(w.ind2(t, s))];
-                astroviper::fft::irfft2_half<T>(work.data(), nx, ny, r.data(), 1);
+                astroviper::fft::irfft2_half<T>(work.data(), nx, ny, r.data(), processing_function_threads);
                 recenter_convolution<T>(r.data(), nx, ny, scratch.data(), 1);
             }
         }
@@ -696,11 +697,12 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
         std::vector<T> smooth_mod(nimg), scratch(nimg);
         std::vector<typename Work<T>::complex_t> model_ft(nspec), work(nspec);
         for (int t2 = 0; t2 < nt; ++t2) {
-            astroviper::fft::rfft2_half<T>(delta_model[static_cast<std::size_t>(t2)].data(), nx, ny, model_ft, 1);
+            astroviper::fft::rfft2_half<T>(delta_model[static_cast<std::size_t>(t2)].data(), nx, ny, model_ft,
+                                           processing_function_threads);
             for (int t1 = 0; t1 < nt; ++t1) {
                 const std::vector<typename Work<T>::complex_t>& pf = w.psf_ft[static_cast<std::size_t>(t1 + t2)];
                 for (std::size_t k = 0; k < nspec; ++k) work[k] = pf[k] * model_ft[k];
-                astroviper::fft::irfft2_half<T>(work.data(), nx, ny, smooth_mod.data(), 1);
+                astroviper::fft::irfft2_half<T>(work.data(), nx, ny, smooth_mod.data(), processing_function_threads);
                 recenter_convolution<T>(smooth_mod.data(), nx, ny, scratch.data(), 1);
                 T* d = residual + static_cast<std::ptrdiff_t>(t1) * residual_term_stride;
                 for (std::size_t k = 0; k < nimg; ++k) astroviper::scalar_sub(d, k, smooth_mod[k]);
@@ -742,10 +744,10 @@ template int taylor_hessian<double>(const double*, int, int, int, std::vector<fl
                                     std::vector<double>&, std::vector<double>&, int&);
 template CleanResult<float> clean<float>(float*, float*, const float*, const float*, int, int, int,
                                          const std::vector<float>&, float, int, float, float, float,
-                                         const deconvolvers::DivergenceControl<float>&, std::ptrdiff_t, bool);
+                                         const deconvolvers::DivergenceControl<float>&, std::ptrdiff_t, bool, int);
 template CleanResult<double> clean<double>(double*, double*, const double*, const double*, int, int, int,
                                            const std::vector<float>&, float, int, double, double, double,
-                                           const deconvolvers::DivergenceControl<double>&, std::ptrdiff_t, bool);
+                                           const deconvolvers::DivergenceControl<double>&, std::ptrdiff_t, bool, int);
 template void principal_solution<float>(float*, const double*, int, int, int);
 template void principal_solution<double>(double*, const double*, int, int, int);
 

@@ -48,7 +48,7 @@ def test_mtmfs_passes_every_argument_to_the_continuum_adapter(
         "_model_update_native_mtmfs",
         lambda *args, **kwargs: calls.append((args, kwargs)) or "results",
     )
-    arguments = tuple(object() for _ in range(7))
+    arguments = tuple(object() for _ in range(8))
     results = DECONVOLVERS["mtmfs"].deconvolve(*arguments, input_checked=input_checked)
     assert results == "results"
     assert calls == [(arguments, {"input_checked": input_checked})]

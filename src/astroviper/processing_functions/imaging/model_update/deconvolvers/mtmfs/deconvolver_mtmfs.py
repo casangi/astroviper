@@ -25,6 +25,7 @@ class DeconvolverMtmfs(Deconvolver):
         max_sidelobe_name,
         image_data_group_in_name,
         image_data_group_out_name,
+        processing_function_threads=1,
         *,
         input_checked=False,
     ):
@@ -50,6 +51,8 @@ class DeconvolverMtmfs(Deconvolver):
             Input data group.
         image_data_group_out_name : str
             Data group of the model.
+        processing_function_threads : int, optional
+            Threads of the C++ kernel's FFTs.
         input_checked : bool, optional
             Skip the configuration check, which the caller has made.
 
@@ -72,6 +75,7 @@ class DeconvolverMtmfs(Deconvolver):
             max_sidelobe_name,
             image_data_group_in_name,
             image_data_group_out_name,
+            processing_function_threads,
             input_checked=input_checked,
         )
 

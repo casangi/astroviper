@@ -20,6 +20,7 @@ Organised as:
 
 import pickle
 import runpy
+import subprocess
 import sys
 
 import numpy as np
@@ -1831,3 +1832,76 @@ def test_multiscale_mtmfs_updates_unaligned_strided_external_buffers(
     np.testing.assert_array_equal(actual_psf, psf)
     np.testing.assert_array_equal(backing[:, 1], -99.0)
     assert backing.base[0] == backing.base[-1] == 0xA5
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("shape", [(64, 64), (101, 97), (257, 263)])
+def test_clean_identical_for_every_thread_count(dtype, shape):
+    """2, 3 and 7 threads, 512 (more than the lines of any transform) and the
+    counts below 1 give the residual, the model and every returned value of one
+    thread, bit for bit. At these sizes pocketfft runs both passes of every
+    transform on several threads for a count of 2 or more; (101, 97) takes
+    Bluestein's algorithm along y and a prime-length pass along x, and
+    (257, 263) Bluestein's along both axes. The Hessians are those of hessian,
+    which runs one thread."""
+    ny, nx = shape
+    psf = make_psf_stack(2, nx, ny, dtype)
+    yy, xx = np.mgrid[0:ny, 0:nx]
+    blob = np.exp(-((yy - ny // 2) ** 2 + (xx - nx // 2 + 2) ** 2) / (2 * 5.0**2))
+    dirty = _dirty_from_model(psf, np.stack([blob, 0.2 * blob]).astype(dtype))
+    mask = np.zeros((ny, nx), dtype=dtype)
+    mask[8 : ny - 8, 8 : nx - 8] = 1.0
+    options = dict(
+        scales=[0.0, 4.0, 8.0],
+        max_iter_per_cycle_updated=60,
+        gain=0.2,
+        threshold_per_cycle=1e-5,
+        record_iteration_history=True,
+    )
+
+    def run(threads):
+        residual, model = dirty.copy(), np.zeros_like(dirty)
+        out = mtmfs.clean(
+            residual, psf, model, mask, processing_function_threads=threads, **options
+        )
+        return residual, model, out
+
+    residual_1, model_1, out_1 = run(1)
+    assert out_1["n_point_components"] > 0 and out_1["n_scale_components"] > 0
+    for threads in (2, 3, 7, 512, 0, -1):
+        residual, model, out = run(threads)
+        np.testing.assert_array_equal(residual, residual_1)
+        np.testing.assert_array_equal(model, model_1)
+        assert out.keys() == out_1.keys()
+        for key, value in out_1.items():
+            np.testing.assert_array_equal(out[key], value, err_msg=key)
+    reference = mtmfs.hessian(psf, scales=options["scales"])
+    for key in ("hessian", "inverse_hessian", "hessian_condition_number"):
+        np.testing.assert_array_equal(out_1[key], reference[key], err_msg=key)
+
+
+def test_clean_starts_fft_threads_only_for_a_count_above_one():
+    """In a new process, clean starts pocketfft's threads only for a count
+    above 1: the count reaches pocketfft, and a count below 1 runs one
+    thread."""
+    pytest.importorskip("psutil")
+    code = (
+        "import numpy as np, psutil\n"
+        "from astroviper.processing_functions.imaging.model_update.deconvolvers import mtmfs\n"
+        "yy, xx = np.mgrid[0:64, 0:64]\n"
+        "psf = np.exp(-((xx - 32) ** 2 + (yy - 32) ** 2) / 8.0)[None]\n"
+        "process = psutil.Process()\n"
+        "start = process.num_threads()\n"
+        "for threads in (1, 0, -1, 2):\n"
+        "    residual = 0.5 * np.roll(psf, (3, -2), axis=(1, 2))\n"
+        "    mtmfs.clean(residual, psf, np.zeros_like(residual),\n"
+        "                max_iter_per_cycle_updated=2, processing_function_threads=threads)\n"
+        "    print(process.num_threads() - start)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, timeout=300
+    )
+    assert result.returncode == 0, result.stderr
+    new_threads = [int(line) for line in result.stdout.split()]
+    assert new_threads[:3] == [0, 0, 0]
+    assert new_threads[3] > 0

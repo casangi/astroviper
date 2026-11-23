@@ -108,7 +108,7 @@ py::dict clean_impl(py::array residual, py::array psf, py::array model, py::obje
                     const std::vector<float>& scales, float small_scale_bias, int max_iter_per_cycle_updated, double gain,
                     double threshold_per_cycle, double mask_threshold, int max_iter_divergence,
                     double divergence_rms_factor, double divergence_peak_factor,
-                    bool record_iteration_history) {
+                    bool record_iteration_history, int processing_function_threads) {
     int nterms, ny, nx;
     stack_dims(residual, "residual", nterms, ny, nx);
     const std::vector<py::ssize_t> stack = {nterms, ny, nx};
@@ -156,7 +156,8 @@ py::dict clean_impl(py::array residual, py::array psf, py::array model, py::obje
         result = mtmfs::clean<T>(res, mod, psf_ptr, mask_ptr, nterms, nx, ny, scales, small_scale_bias,
                                  max_iter_per_cycle_updated, static_cast<T>(gain), static_cast<T>(threshold_per_cycle),
                                  static_cast<T>(mask_threshold), divergence,
-                                 ri.strides[0] / static_cast<py::ssize_t>(sizeof(T)), record_iteration_history);
+                                 ri.strides[0] / static_cast<py::ssize_t>(sizeof(T)), record_iteration_history,
+                                 processing_function_threads);
     }
 
     const int nscales = static_cast<int>(result.scales.size());
@@ -190,15 +191,18 @@ static py::dict clean_dispatch(py::array residual, py::array psf, py::array mode
                                const std::vector<float>& scales, float small_scale_bias, int max_iter_per_cycle_updated,
                                double gain, double threshold_per_cycle, double mask_threshold,
                                int max_iter_divergence, double divergence_rms_factor,
-                               double divergence_peak_factor, bool record_iteration_history) {
+                               double divergence_peak_factor, bool record_iteration_history,
+                               int processing_function_threads) {
     if (residual.dtype().equal(py::dtype::of<float>()))
         return clean_impl<float>(residual, psf, model, mask, scales, small_scale_bias, max_iter_per_cycle_updated, gain,
                                  threshold_per_cycle, mask_threshold, max_iter_divergence,
-                                 divergence_rms_factor, divergence_peak_factor, record_iteration_history);
+                                 divergence_rms_factor, divergence_peak_factor, record_iteration_history,
+                                 processing_function_threads);
     if (residual.dtype().equal(py::dtype::of<double>()))
         return clean_impl<double>(residual, psf, model, mask, scales, small_scale_bias, max_iter_per_cycle_updated, gain,
                                   threshold_per_cycle, mask_threshold, max_iter_divergence,
-                                  divergence_rms_factor, divergence_peak_factor, record_iteration_history);
+                                  divergence_rms_factor, divergence_peak_factor, record_iteration_history,
+                                  processing_function_threads);
     throw std::runtime_error(astroviper::dtype_error(residual, "residual", "float32 or float64"));
 }
 
@@ -287,7 +291,9 @@ PYBIND11_MODULE(_mtmfs_ext, m) {
           "components, its peak above divergence_peak_factor times its starting value, or a peak that is "
           "not finite (max_iter_divergence < 0 disables the first two tests). The "
           "residual is updated at the end of the call by a circular FFT convolution of the new components "
-          "with the PSF. Returns a dict with "
+          "with the PSF. processing_function_threads is the most threads each of its FFTs uses (fewer on small "
+          "images); a count below 1 runs one, and the results do not depend on the count. "
+          "Returns a dict with "
           "iterations_performed, peak_residual (max |residual[0]*mask|, not divided by the PSF peak), model_flux "
           "(sum of model[0]), converged (engine stop on threshold_per_cycle or empty search), diverged, "
           "stop_code (0 did not run, 1 spent max_iter_per_cycle_updated, 2 reached threshold_per_cycle or "
@@ -303,7 +309,8 @@ PYBIND11_MODULE(_mtmfs_ext, m) {
           py::arg("max_iter_per_cycle_updated") = 100, py::arg("gain") = 0.1, py::arg("threshold_per_cycle") = 0.0,
           py::arg("mask_threshold") = 0.9,
           py::arg("max_iter_divergence") = -1, py::arg("divergence_rms_factor") = 1.0,
-          py::arg("divergence_peak_factor") = 1.0, py::arg("record_iteration_history") = false);
+          py::arg("divergence_peak_factor") = 1.0, py::arg("record_iteration_history") = false,
+          py::arg("processing_function_threads") = 1);
 
     m.def("hessian", &hessian_dispatch,
           "Taylor Hessians and inverses for a (2*nterms-1, ny, nx) PSF stack, with 1 <= nterms <= 4. Returns a dict "
