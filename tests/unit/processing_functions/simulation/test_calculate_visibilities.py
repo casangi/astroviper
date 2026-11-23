@@ -452,6 +452,46 @@ def test_cpp_kernel_matches_numpy_for_the_exact_beam_polynomial():
 
 
 @pytest.mark.skipif("cpp" not in IMPLEMENTATIONS, reason="C++ kernel not built")
+@pytest.mark.parametrize("uvw_factor", [1.0, 2.0**50], ids=["vla", "beyond_2_51_turns"])
+def test_cpp_kernel_phase_is_that_of_the_direct_fourier_transform(uvw_factor):
+    """A unit source without a beam: the C++ kernel's visibility is cos_sin_turns(t) of
+    the direct Fourier transform times the wrapper's 1 / (1 - lmn_rot[2]), value for
+    value, with t = (u k0 + v k1 + w k2) * (frequency / c). The uvw times 2^50 take 65
+    percent of the phases to 2^51 turns or more."""
+    from astroviper.processing_functions.imaging.gridders.direct_fourier_transform.direct_fourier_transform_cpp import (
+        cos_sin_turns,
+    )
+    from astroviper.utils.coordinate_transforms import calculate_uvw_rotation
+
+    f = load_legacy("vla_airy")
+    pc = f["phase_center_ra_dec"][0]
+    src = f["point_source_ra_dec"][0, 0]
+    models = [
+        {
+            "func": "none",
+            "dish_diameter": 25.0,
+            "blockage_diameter": 0.0,
+            "max_rad_1GHz": 1.0,
+        }
+    ]
+    uvw = f["uvw"] * uvw_factor
+    flux = np.array([1.0, 0, 0, 1.0])[None, None, None, :]
+    vis = calculate_visibilities(
+        uvw, f["antenna1"], f["antenna2"], f["frequency"], np.array([0]),
+        flux, src[None, None, :], pc[None, :], None, np.zeros(27, int), pack_beam_models(models), np.zeros(3),
+        np.array([0, 5, 10, 15]), implementation="cpp",
+    )[..., 0]  # fmt: skip
+    rotation, lmn_rot = calculate_uvw_rotation(pc, src)
+    k = rotation @ lmn_rot  # as calculate_visibilities_cpp forms it
+    path = uvw[..., 0] * k[0] + uvw[..., 1] * k[1] + uvw[..., 2] * k[2]
+    turns = path[..., None] * (f["frequency"] / SPEED_OF_LIGHT)
+    cos, sin = cos_sin_turns(turns.ravel())
+    inverse_n = 1.0 / (1.0 - lmn_rot[2])
+    np.testing.assert_array_equal(vis.real, (cos * inverse_n).reshape(turns.shape))
+    np.testing.assert_array_equal(vis.imag, (sin * inverse_n).reshape(turns.shape))
+
+
+@pytest.mark.skipif("cpp" not in IMPLEMENTATIONS, reason="C++ kernel not built")
 def test_cpp_kernel_threads_and_validation():
     from scipy.special import j1
 

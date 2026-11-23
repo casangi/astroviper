@@ -63,7 +63,9 @@ def calculate_visibilities_cpp(
 ) -> np.ndarray:
     """C++ implementation of :func:`~astroviper.processing_functions.simulation.calculate_visibilities`.
 
-    Same parameters and result as the NumPy implementation; a
+    Same parameters as the NumPy implementation and the same result to
+    rounding: the kernel evaluates the phase as the direct Fourier transform
+    does (``cos_sin_of_turns``), the NumPy implementation with ``np.exp``. A
     ``processing_function_threads`` below 1 runs one thread.
     """
     from astroviper.processing_functions.simulation.visibility_kernel_cpp import (

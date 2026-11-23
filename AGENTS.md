@@ -43,7 +43,9 @@ See [README.md](README.md) for instructions.
   it). To change a flag for every kernel, edit that file — and only that file.
 - **Shared C++ code**: headers that several kernels use live in
   `src/astroviper/processing_functions/include/`, which every module has on
-  its include path; `fft.hpp` there is the FFT wrapper of the deconvolvers.
+  its include path; `fft.hpp` there is the FFT wrapper of the deconvolvers,
+  and `cos_sin_of_turns.hpp` the phase function of the direct Fourier
+  transform and the simulator's visibility kernel.
   The divergence test shared by the deconvolvers stays in
   `deconvolvers/include/plane_stop_test.hpp`. pocketfft has one configuration
   for every kernel, set in `cmake/AstroviperPybind.cmake` (the one-definition
