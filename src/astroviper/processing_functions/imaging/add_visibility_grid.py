@@ -280,6 +280,12 @@ def add_visibility_grid_single_field(
         Modifies ``img_xds`` in place (data variables and ``data_groups``
         attribute); no return value.
 
+    Raises
+    ------
+    ValueError
+        If ``img_xds`` and the measurement set have different numbers of
+        polarizations.
+
     See Also
     --------
     add_visibility_grid_mosaic : Mosaic (direction-dependent GCF) variant.
@@ -369,6 +375,13 @@ def add_visibility_grid_single_field(
 
     grid = img_xds[image_data_group_out["visibility"]].values
     normalization = img_xds[image_data_group_out["visibility_normalization"]].values
+    # The C++ kernel does not bounds-check the polarization map.
+    if grid.shape[2] != n_imag_pol:
+        raise ValueError(
+            "the grid polarization axis must match the measurement set: "
+            f"{grid.shape[2]} grid polarizations for {n_imag_pol} visibility "
+            "polarizations."
+        )
 
     vis_data = ms_xds[ms_data_group_in["correlated_data"]].values
     uvw = ms_xds[ms_data_group_in["uvw"]].values
