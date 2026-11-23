@@ -291,6 +291,9 @@ def add_uv_sampling_grid_single_field(
 
     Raises
     ------
+    ValueError
+        With ``gridder="direct_fourier_transform"``, if the image and the
+        measurement set have different numbers of polarizations.
     RuntimeError
         With ``gridder="direct_fourier_transform"``, from the kernel, if an
         image pixel lies beyond ``l**2 + m**2 < 1``.

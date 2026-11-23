@@ -130,6 +130,8 @@ def add_uv_sampling_grid_continuum_single_field(
 
     Raises
     ------
+    ValueError
+        As :func:`~astroviper.processing_functions.imaging.imaging_setup.make_point_spread_function.add_uv_sampling_grid_single_field`.
     RuntimeError
         As :func:`~astroviper.processing_functions.imaging.imaging_setup.make_point_spread_function.add_uv_sampling_grid_single_field`.
 

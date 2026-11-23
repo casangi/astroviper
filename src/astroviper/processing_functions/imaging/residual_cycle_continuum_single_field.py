@@ -588,6 +588,12 @@ def make_visibility_model_continuum_single_field(
     -------
     None
 
+    Raises
+    ------
+    ValueError
+        If ``model_xds`` and a measurement set of ``ps_xdt`` have different
+        numbers of polarizations.
+
     Notes
     -----
     For each processing-set partition this continuum implementation degrids each

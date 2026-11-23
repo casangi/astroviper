@@ -100,6 +100,8 @@ def add_visibility_grid_continuum_single_field(
 
     Raises
     ------
+    ValueError
+        As :func:`~astroviper.processing_functions.imaging.add_visibility_grid.add_visibility_grid_single_field`.
     RuntimeError
         As :func:`~astroviper.processing_functions.imaging.add_visibility_grid.add_visibility_grid_single_field`.
     """
