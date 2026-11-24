@@ -86,6 +86,7 @@ def workflow_arguments(tmp_path, observation, mode, restore):
             "max_psf_fraction": 0.8,
         },
         image_data_variables_keep=[
+            "primary_beam",
             "point_spread_function",
             "beam_fit_params_point_spread_function",
         ],
@@ -262,3 +263,59 @@ def test_failed_imaging_graph_does_not_publish_weights(
         disk = zarr.open_group(store, path=name, mode="r", use_consolidated=False)
         assert "WEIGHT_IMAGING" not in disk
         assert not any(key.startswith("_WEIGHT_IMAGING_") for key in disk.array_keys())
+
+
+@pytest.mark.parametrize("mode", ["cube", "mfs", "mvc"])
+@pytest.mark.parametrize(
+    "kept",
+    [
+        None,
+        [],
+        ["primary_beam"],
+        ["point_spread_function"],
+        ["primary_beam", "point_spread_function"],
+    ],
+)
+def test_beam_and_psf_retention_is_default_but_optional(
+    tmp_path, observation, mode, kept
+):
+    """Discard optional products only after restoration has used them."""
+    arguments = workflow_arguments(tmp_path, observation, mode, restore=True)
+    arguments["cycle_control_params"].update(
+        max_iter=1, max_cycles=1, max_iter_per_cycle=1
+    )
+    if kept is None:
+        arguments.pop("image_data_variables_keep")
+    else:
+        arguments["image_data_variables_keep"] = kept
+    original = None if kept is None else list(kept)
+    with dask.config.set(scheduler="synchronous"):
+        if mode == "cube":
+            applications.imaging.image_cube_single_field(
+                deconvolver="hogbom", **arguments
+            )
+        else:
+            applications.imaging.image_continuum_single_field(
+                deconvolver="mtmfs", continuum_mode=mode, **arguments
+            )
+    image = load_image(arguments["image_store"])
+    assert {
+        "SKY_MODEL",
+        "SKY_RESIDUAL",
+        "SKY_RESTORED",
+        "SKY_PRIMARY_BEAM_CORRECTED_RESTORED",
+    } <= set(image.data_vars)
+    for key, name in [
+        ("primary_beam", "PRIMARY_BEAM"),
+        ("point_spread_function", "POINT_SPREAD_FUNCTION"),
+    ]:
+        requested = kept is None or key in kept
+        assert (name in image) == requested
+        assert (key in image.attrs["data_groups"]["residual"]) == requested
+    if mode == "mvc":
+        assert ("COMMON_PRIMARY_BEAM" in image) == (
+            kept is None or "primary_beam" in kept
+        )
+    if "POINT_SPREAD_FUNCTION" in image and mode != "cube":
+        assert image.POINT_SPREAD_FUNCTION.sizes["frequency_polynomial_moment"] == 3
+    assert kept == original

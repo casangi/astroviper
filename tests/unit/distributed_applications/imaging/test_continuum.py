@@ -221,7 +221,6 @@ def test_continuum_image_for_disk_keeps_requested_products_without_copying_data(
     assert set(output.data_vars) == {
         "SKY_RESIDUAL",
         "SKY_MODEL",
-        "PRIMARY_BEAM",
         "POINT_SPREAD_FUNCTION",
     }
     assert output["SKY_RESIDUAL"].dims == (
@@ -280,7 +279,6 @@ def test_continuum_image_for_disk_keeps_registry_mask_and_role():
         "MASK",
         "SKY_MODEL",
         "SKY_RESIDUAL",
-        "PRIMARY_BEAM",
     }
     assert output.attrs["data_groups"]["residual"]["mask"] == "MASK"
 
@@ -305,7 +303,6 @@ def test_continuum_image_for_disk_keeps_restored_spectral_products():
         "BETA",
         "SKY_MODEL",
         "SKY_RESIDUAL",
-        "PRIMARY_BEAM",
     }
     assert output.attrs["data_groups"]["restored"] == {
         "alpha": "ALPHA",

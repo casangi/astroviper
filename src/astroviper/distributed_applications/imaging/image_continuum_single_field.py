@@ -690,10 +690,10 @@ def _continuum_image_for_disk(img_xds, image_data_variables_keep):
     registry = imaging_data_variables_and_dims_double_precision
     requested_names = {registry[key]["name"] for key in image_data_variables_keep}
     requested_names.update(
-        name
-        for name in ("PRIMARY_BEAM", "COMMON_PRIMARY_BEAM", "SKY_MODEL", "SKY_RESIDUAL")
-        if name in img_xds
+        name for name in ("SKY_MODEL", "SKY_RESIDUAL") if name in img_xds
     )
+    if "primary_beam" in image_data_variables_keep and "COMMON_PRIMARY_BEAM" in img_xds:
+        requested_names.add("COMMON_PRIMARY_BEAM")
     output = img_xds.copy(deep=False)
     # The XRADIO deletion accessor mutates its dataset in place; isolate the
     # attributes while retaining zero-copy views of the large arrays.
@@ -2716,9 +2716,11 @@ def image_continuum_single_field(
         ``I, V`` (circular), all four correlations give ``I, Q, U, V``. A sample
         is used only if none of its loaded correlations is flagged.
     image_data_variables_keep : list of str
-        Logical image-variable keys to retain on disk. Flat-sky model, residual,
-        and the compact primary-beam polynomial are always retained. Restoration
-        retains only its selected restored images and their clean-beam metadata.
+        Logical image-variable keys to retain on disk. Flat-sky model and residual
+        are always retained. Primary beam and PSF are included by default but
+        omitted when absent from an explicit keep list. Requesting primary_beam
+        also retains the MVC common beam. Restoration retains only its selected
+        restored images and their clean-beam metadata.
         A target restoring beam also retains metadata for the transformed residual.
         ALPHA, ALPHA_ERROR, and BETA are requested separately through spectral_products.
         MFS can retain Taylor UV grids; MVC cannot publish channel UV grids.
@@ -3195,9 +3197,9 @@ def image_continuum_single_field(
     wideband_primary_beam_memory_mode : {"recompute"}, optional
         Must be ``"recompute"``. Continuum imaging regenerates frequency-dependent
         channel beams for each residual update and retains only the fitted
-        ``PRIMARY_BEAM`` polynomial in public outputs. MVC also retains its
-        frequency-independent ``COMMON_PRIMARY_BEAM``. Channel-beam cache policies
-        are disabled.
+        ``PRIMARY_BEAM`` polynomial when primary_beam is requested for output.
+        That request also retains MVC's frequency-independent COMMON_PRIMARY_BEAM.
+        Channel-beam cache policies are disabled.
 
     cycle_acceleration : {"none", "conjugate_gradient", "nesterov_momentum"}, optional
         How each model update's increment ``z`` enters the model (Müller, Hsieh
@@ -3408,9 +3410,7 @@ def image_continuum_single_field(
     direct_fourier_transform = is_direct_fourier_transform(gridding_kernel_params)
     clean_mask_array = load_clean_mask(clean_mask, image_params["image_size"])
     image_data_variables_keep = list(
-        dict.fromkeys(
-            [*image_data_variables_keep, "sky_model", "sky_residual", "primary_beam"]
-        )
+        dict.fromkeys([*image_data_variables_keep, "sky_model", "sky_residual"])
     )
     if restore and restoring_beam is not None:
         image_data_variables_keep.append("beam_fit_params_sky_residual")

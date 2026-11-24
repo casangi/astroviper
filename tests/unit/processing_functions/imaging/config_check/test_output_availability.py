@@ -164,3 +164,14 @@ def test_public_drivers_reject_unavailable_outputs_before_opening_input(
             **config,
         )
     assert not output.exists()
+
+
+@pytest.mark.parametrize("mode", [CUBE_SINGLE_FIELD, CONTINUUM_SINGLE_FIELD])
+def test_distributed_fits_keeps_model_and_residual_with_empty_optional_list(mode):
+    from astroviper.processing_functions.imaging.config_check._output import (
+        check_kept_variables,
+    )
+
+    config = {"image_data_variables_keep": [], "restore": False}
+    check_kept_variables(config, mode=mode, fits=True, distributed=True)
+    assert config["image_data_variables_keep"] == []

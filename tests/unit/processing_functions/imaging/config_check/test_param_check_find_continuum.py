@@ -512,3 +512,17 @@ def test_ultra_inputs_need_the_roles_and_one_time(window_xds):
     )
     with pytest.raises(ValueError, match="one time"):
         _ultra_inputs(two_times)
+
+
+def test_first_round_requires_an_explicitly_retained_primary_beam():
+    with pytest.raises(ValueError, match="primary_beam in image_data_variables_keep"):
+        check_find_continuum_first_round(
+            {"polarization_coords": ["I"]},
+            "zarr",
+            image_data_variables_keep=["sky_residual"],
+        )
+    check_find_continuum_first_round(
+        {"polarization_coords": ["I"]},
+        "zarr",
+        image_data_variables_keep=["primary_beam"],
+    )

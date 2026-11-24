@@ -1376,9 +1376,9 @@ def residual_update_continuum_single_field(
     wideband_primary_beam_memory_mode : {"recompute"}, optional
         Must be ``"recompute"``. Continuum imaging regenerates frequency-dependent
         channel beams for each residual update and retains only the fitted
-        ``PRIMARY_BEAM`` polynomial in public outputs. MVC also retains its
-        frequency-independent ``COMMON_PRIMARY_BEAM``. Channel-beam cache policies
-        are disabled.
+        ``PRIMARY_BEAM`` polynomial when primary_beam is requested for output.
+        That request also retains MVC's frequency-independent COMMON_PRIMARY_BEAM.
+        Channel-beam cache policies are disabled.
 
     io_engine : {"chunk", "xradio"}, optional
         I/O engine of the node tasks. ``"chunk"`` reads and writes Zarr chunk

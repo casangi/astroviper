@@ -1056,9 +1056,9 @@ IMAGING_PARAM_DOCS = {
     "wideband_primary_beam_memory_mode": (
         'Must be ``"recompute"``. Continuum imaging regenerates frequency-dependent\n'
         "channel beams for each residual update and retains only the fitted\n"
-        "``PRIMARY_BEAM`` polynomial in public outputs. MVC also retains its\n"
-        "frequency-independent ``COMMON_PRIMARY_BEAM``. Channel-beam cache policies\n"
-        "are disabled."
+        "``PRIMARY_BEAM`` polynomial when primary_beam is requested for output.\n"
+        "That request also retains MVC's frequency-independent COMMON_PRIMARY_BEAM.\n"
+        "Channel-beam cache policies are disabled."
     ),
     "mvc_model_update_approximation": (
         "MVC approximation used to construct the Taylor residuals and PSFs.\n"
@@ -1090,6 +1090,15 @@ IMAGING_PARAM_DOCS = {
     "image_data_variables_keep": (
         'Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,\n'
         '``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).\n'
+        "The distributed cube writer does not publish UV grids; standalone\n"
+        "processing functions may retain their working grids in memory."
+    ),
+    "image_cube_single_field.image_data_variables_keep": (
+        'Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,\n'
+        '``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).\n'
+        "Model and residual are always retained. Primary beam and PSF are included\n"
+        "by default but are omitted when absent from an explicit keep list.\n"
+        "find_continuum_first_round requires primary_beam in the keep list.\n"
         "The distributed cube writer does not publish UV grids; standalone\n"
         "processing functions may retain their working grids in memory."
     ),
@@ -1153,9 +1162,11 @@ IMAGING_PARAM_DOCS = {
         "separate ``spectral_products`` analysis tool."
     ),
     "image_continuum_single_field.image_data_variables_keep": (
-        "Logical image-variable keys to retain on disk. Flat-sky model, residual,\n"
-        "and the compact primary-beam polynomial are always retained. Restoration\n"
-        "retains only its selected restored images and their clean-beam metadata.\n"
+        "Logical image-variable keys to retain on disk. Flat-sky model and residual\n"
+        "are always retained. Primary beam and PSF are included by default but\n"
+        "omitted when absent from an explicit keep list. Requesting primary_beam\n"
+        "also retains the MVC common beam. Restoration retains only its selected\n"
+        "restored images and their clean-beam metadata.\n"
         "A target restoring beam also retains metadata for the transformed residual.\n"
         "ALPHA, ALPHA_ERROR, and BETA are requested separately through spectral_products.\n"
         "MFS can retain Taylor UV grids; MVC cannot publish channel UV grids.\n"

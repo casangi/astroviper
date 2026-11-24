@@ -841,6 +841,9 @@ def image_cube_single_field(
     image_data_variables_keep : list of str, optional
         Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
         ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
+        Model and residual are always retained. Primary beam and PSF are included
+        by default but are omitted when absent from an explicit keep list.
+        find_continuum_first_round requires primary_beam in the keep list.
         The distributed cube writer does not publish UV grids; standalone
         processing functions may retain their working grids in memory.
     restore : bool, optional

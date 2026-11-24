@@ -990,7 +990,11 @@ def image_cube_single_field(
                 check_find_continuum_first_round,
             )
 
-            check_find_continuum_first_round(image_params, output_image_format)
+            check_find_continuum_first_round(
+                image_params,
+                output_image_format,
+                image_data_variables_keep=image_data_variables_keep,
+            )
 
     from astroviper.utils.io import check_image_output_destination
 
@@ -1043,9 +1047,7 @@ def image_cube_single_field(
 
     clean_mask_array = load_clean_mask(clean_mask, image_params["image_size"])
     image_data_variables_keep = list(
-        dict.fromkeys(
-            [*image_data_variables_keep, "sky_model", "sky_residual", "primary_beam"]
-        )
+        dict.fromkeys([*image_data_variables_keep, "sky_model", "sky_residual"])
     )
     if restore and restoring_beam is not None:
         image_data_variables_keep.append("beam_fit_params_sky_residual")
@@ -1082,14 +1084,13 @@ def image_cube_single_field(
         image_data_variables_keep = list(image_data_variables_keep) + [
             "beam_fit_params_point_spread_function"
         ]
-    # find_continuum reads these variables of the cube (of the point spread
-    # function only its beams).
+    # find_continuum requires an explicitly requested primary beam and reads
+    # the PSF beam metadata without requiring the full PSF image.
     if find_continuum_first_round:
         image_data_variables_keep = list(image_data_variables_keep) + [
             variable
             for variable in (
                 "sky_residual",
-                "primary_beam",
                 "beam_fit_params_point_spread_function",
             )
             if variable not in image_data_variables_keep

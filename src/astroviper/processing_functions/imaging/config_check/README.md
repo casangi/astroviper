@@ -493,7 +493,8 @@ Stokes I index and the channel range of a `find_continuum_ultra` frequency
 task called without `input_checked`.
 
 `check_find_continuum_first_round` requires the Stokes I plane and a Zarr
-output (FITS is refused) when `image_cube_single_field` makes the first round.
+output (FITS is refused), with `primary_beam` explicitly included in
+`image_data_variables_keep`, when `image_cube_single_field` makes the first round.
 `check_find_continuum_first_round_store` refuses a first-round store that is
 missing, incomplete or of another version, that was made with another primary
 beam limit, Stokes I index, tile shape or data variables than the call's, that

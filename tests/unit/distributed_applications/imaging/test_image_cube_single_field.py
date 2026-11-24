@@ -909,7 +909,7 @@ def _image_first_round(
             "max_psf_fraction": 0.8,
             "primary_beam_limit": 0.2,
         },
-        image_data_variables_keep=["sky_residual"],
+        image_data_variables_keep=["sky_residual", "primary_beam"],
         processing_set_data_group_name="base",
         n_mapping_parallelism={"frequency": n_tasks},
         image_chunking={"frequency": 1, "l": FIRST_ROUND_TILE, "m": FIRST_ROUND_TILE},

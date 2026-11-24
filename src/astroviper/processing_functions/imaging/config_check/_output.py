@@ -115,6 +115,8 @@ def check_kept_variables(
     # --- Effective output set ---
     # Restoration adds mandatory outputs locally; never append to the caller list.
     effective = set(kept)
+    if distributed:
+        effective.update(("sky_model", "sky_residual"))
     if config.get("restore", False):
         output = config.get("restoration_output", "primary_beam_corrected")
         if output in ("apparent", "both"):

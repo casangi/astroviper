@@ -154,7 +154,9 @@ def _check_frequency_chunks(n_mapping_parallelism):
     )
 
 
-def check_find_continuum_first_round(image_params, output_image_format):
+def check_find_continuum_first_round(
+    image_params, output_image_format, *, image_data_variables_keep=None
+):
     """Require the Stokes I plane of which the imager makes the first round,
     in a Zarr image.
 
@@ -165,7 +167,17 @@ def check_find_continuum_first_round(image_params, output_image_format):
     output_image_format : str
         Output format of ``image_cube_single_field``; find_continuum reads
         Zarr image stores only.
+    image_data_variables_keep : sequence of str or None, optional
+        Explicit retained products. When supplied, must include primary_beam
+        because find_continuum reads the saved beam.
     """
+    if (
+        image_data_variables_keep is not None
+        and "primary_beam" not in image_data_variables_keep
+    ):
+        raise ValueError(
+            "find_continuum_first_round requires primary_beam in image_data_variables_keep."
+        )
     if "I" not in list(image_params["polarization_coords"]):
         raise ValueError(
             "find_continuum_first_round needs Stokes I in "
