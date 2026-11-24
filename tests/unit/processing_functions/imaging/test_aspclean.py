@@ -1764,3 +1764,36 @@ class TestMaskCoverage:
         mask[64, 65] = 0.0
         out, *_ = self._clean(psf, dirty, mask, 1, asp_min_mask_coverage=0.99)
         np.testing.assert_array_equal(out["components"][0, :3], [64, 64, 0])
+
+
+def test_asp_native_alignment_contract(unaligned_array):
+    """Use external unaligned buffers in place and retain equivalent dtype support."""
+    import numpy as np
+    from astroviper.processing_functions.imaging.deconvolvers.aspclean._aspclean_ext import (
+        clean as asp,
+    )
+
+    r = np.zeros((16, 16))
+    r[8, 8] = 1
+    p = r.copy()
+    model = r * 0
+    kwargs = dict(residual=r, psf=p, model=model, max_iter_per_cycle_updated=1)
+    reference = {
+        k: v.copy() if isinstance(v, np.ndarray) else v for k, v in kwargs.items()
+    }
+    asp(**reference)
+    for key, value in kwargs.items():
+        if not isinstance(value, np.ndarray) or value.dtype.alignment == 1:
+            continue
+        for offset in range(1, value.dtype.alignment):
+            trial = {
+                k: v.copy() if isinstance(v, np.ndarray) else v
+                for k, v in kwargs.items()
+            }
+            trial[key] = unaligned_array(value, offset)
+            asp(**trial)
+            for name, expected in reference.items():
+                if isinstance(expected, np.ndarray):
+                    np.testing.assert_array_equal(trial[name], expected)
+            assert trial[key].base[0] == 0xA5
+            assert trial[key].base[-1] == 0xA5

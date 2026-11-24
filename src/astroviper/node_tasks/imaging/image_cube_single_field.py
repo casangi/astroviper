@@ -119,12 +119,18 @@ def _visibility_to_image_frequency_maps(ps_xdt, img_xds):
     image channel.
     """
     from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        get_frequency_boundaries,
         map_visibility_frequencies_to_image,
     )
 
     return {
         ms_name: map_visibility_frequencies_to_image(
-            ms_xdt.frequency.values, img_xds.frequency.values
+            ms_xdt.frequency.values,
+            img_xds.frequency.values,
+            full_image_frequencies=img_xds.frequency.attrs.get(
+                "full_image_frequencies"
+            ),
+            frequency_boundaries=get_frequency_boundaries(img_xds, ms_xdt),
         )
         for ms_name, ms_xdt in ps_xdt.items()
     }
@@ -1256,6 +1262,13 @@ def image_cube_single_field(
         time_coords=image_params["time_coords"],
         do_sky_coords=False,
     )
+    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        task_frequency_boundaries,
+    )
+
+    img_xds.frequency.attrs["frequency_boundaries"] = task_frequency_boundaries(
+        task_coords, image_params
+    )
     img_xds = _with_image_spectral_reference(img_xds, image_frequency_attrs)
     T_make_empty_image = time.time() - start
 
@@ -1277,6 +1290,10 @@ def image_cube_single_field(
                 data_selection,
                 processing_set_data_group_name,
                 frequency_coords=task_coords["frequency"]["data"],
+                frequency_boundaries=img_xds.frequency.attrs["frequency_boundaries"],
+                observation_frequency_boundaries=task_coords["frequency"].get(
+                    "observation_frequency_boundaries"
+                ),
                 instrument_polarization_basis=instrument_polarization_basis,
                 data_group=data_group,
                 processing_function_threads=processing_function_threads,
@@ -1315,6 +1332,14 @@ def image_cube_single_field(
             "deconvolution": ImagingDict(),
             "image_statistics": {},
         }
+    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        attach_observation_frequency_boundaries,
+        without_frequency_mapping_metadata,
+    )
+
+    ps_xdt = attach_observation_frequency_boundaries(
+        ps_xdt, task_coords["frequency"].get("observation_frequency_boundaries")
+    )
     T_load = time.time() - start
 
     # ---- Imaging cycle loops, one frequency channel at a time ----
@@ -1412,7 +1437,8 @@ def image_cube_single_field(
     for chan_index in range(n_chan):
         start = time.time()
         ps_chan = _select_processing_set_channel(ps_xdt, frequency_maps, chan_index)
-        if ps_chan is None:
+        use_whole_chunk = ps_chan is None
+        if use_whole_chunk:
             # No visibility channel maps onto this image channel: hand over
             # views of the whole chunk (see _whole_processing_set_channel for
             # what the science function grids onto it).
@@ -1422,6 +1448,12 @@ def image_cube_single_field(
             )
             ps_chan = _whole_processing_set_channel(ps_xdt)
         img_chan = _select_image_channel(img_xds, chan_index)
+        if use_whole_chunk:
+            # Preserve the existing empty-channel fallback's single-plane rule.
+            # Its input deliberately includes channels assigned to other planes.
+            img_chan.frequency.attrs = dict(img_chan.frequency.attrs)
+            img_chan.frequency.attrs.pop("full_image_frequencies", None)
+            img_chan.frequency.attrs.pop("frequency_boundaries", None)
         if accumulator is None:
             accumulator = _ImageChunkAccumulator(
                 img_xds, chan_index, min(chunk_channels, n_chan - chan_index)
@@ -1485,6 +1517,7 @@ def image_cube_single_field(
 
         # ---- A whole on-disk frequency chunk is done: statistics, write, free ----
         chunk_xds = accumulator.assemble()
+        chunk_xds = without_frequency_mapping_metadata(chunk_xds)
         chunk_task_coords = _chunk_task_coords(
             task_coords, data_selection, accumulator.start, accumulator.stop
         )

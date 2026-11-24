@@ -98,11 +98,17 @@ def _frequency_map(ms_xds, img_xds, chan_mode):
     """The image channel of every visibility channel."""
     if chan_mode == "cube":
         from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+            get_frequency_boundaries,
             map_visibility_frequencies_to_image,
         )
 
         frequency_map = map_visibility_frequencies_to_image(
-            ms_xds.frequency.values, img_xds.frequency.values
+            ms_xds.frequency.values,
+            img_xds.frequency.values,
+            full_image_frequencies=img_xds.frequency.attrs.get(
+                "full_image_frequencies"
+            ),
+            frequency_boundaries=get_frequency_boundaries(img_xds, ms_xds),
         )
     else:  # continuum: every channel onto image channel 0
         frequency_map = np.zeros(ms_xds.sizes["frequency"], dtype=np.int64)
@@ -233,8 +239,9 @@ def add_dft_image_single_field(
     ------
     ValueError
         If the image and the measurement set have different numbers of
-        polarizations, or (from the kernel) if an image pixel lies beyond
-        ``l**2 + m**2 < 1``.
+        polarizations.
+    RuntimeError
+        From the kernel, if an image pixel lies beyond ``l**2 + m**2 < 1``.
     """
     from astroviper.processing_functions.imaging.gridders.direct_fourier_transform_cpp import (
         dft_image,
@@ -906,6 +913,8 @@ def add_dft_image_continuum_single_field(
         For fewer than one plane, a reference frequency that is not finite
         and positive, an existing output of another shape, or as
         :func:`add_dft_image_single_field`.
+    RuntimeError
+        As :func:`add_dft_image_single_field`.
     """
     if not input_checked:
         from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (

@@ -287,6 +287,18 @@ def test_automatic_chunking_and_validation_errors(tmp_path):
         run(tmp_path, implementation="fortran")
 
 
+def test_spectral_windows_share_a_processing_set(tmp_path):
+    c_band = {**FREQ_PARAMS, "freq_start": 5e9, "spectral_window_name": "CBand"}
+    run(tmp_path)
+    run(tmp_path, frequency_params=c_band, overwrite=False)
+    run(tmp_path)  # replaces VLA_SBand and keeps VLA_CBand
+    ps = open_processing_set(str(tmp_path / "vla_sim.ps.zarr"))
+    assert set(ps.children) == {"VLA_SBand", "VLA_CBand"}
+    assert ps["VLA_SBand"].ds.frequency.values[0] == FREQ_PARAMS["freq_start"]
+    assert ps["VLA_CBand"].ds.frequency.values[0] == c_band["freq_start"]
+    assert str(check_datatree(ps)) == "No schema issues found"
+
+
 def test_disk_sources_through_the_driver_match_the_processing_function(tmp_path):
     """Limb-darkened disks are sliced per chunk and reach the processing function unchanged."""
     from astroviper.processing_functions.simulation import (
@@ -640,6 +652,15 @@ def test_pdf_and_notebook_reports(tmp_path, monkeypatch):
     assert "No noise was simulated" in html
     assert "the sky image of the simulation" in html
     assert "CPU, memory and I/O were not recorded" in html
+
+
+def test_report_of_a_spectral_window_added_to_a_processing_set(tmp_path):
+    """The report is of the MSv4 written, not the first of the processing set."""
+    c_band = {**FREQ_PARAMS, "freq_start": 5e9, "spectral_window_name": "CBand"}
+    run(tmp_path, frequency_params=c_band)
+    result, _ = run(tmp_path, report="html")
+    text = _report_text(result["report"])
+    assert "VLA_SBand" in text and "VLA_CBand" not in text
 
 
 def test_unknown_report_format_is_refused(tmp_path):

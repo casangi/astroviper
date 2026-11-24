@@ -1,12 +1,13 @@
 """Unit tests for the C++ direct Fourier transform extension.
 
 Coverage:
-  * cos(2 pi t), sin(2 pi t) of the kernels against NumPy, special angles exact
+  * cos(2 pi t), sin(2 pi t) of the kernels against NumPy, special angles exact,
+    the reduction exact at every magnitude
   * dft_image, dft_image_uv_sampling and dft_predict against a NumPy evaluation of
     their definitions (w term and 1/n included), every output dtype
   * the samples skipped (non-finite uvw, NaN or zero weight, NaN visibility)
     and the normalization (sum of the weights of the samples imaged, zero
-    visibilities included)
+    visibilities included); an image without pixels
   * accumulation over calls; the NaN-skip contract of the prediction
   * results independent of the thread count (bit for bit) and repeatable
   * binding input validation; unpickled arrays (Dask) are taken in place
@@ -206,6 +207,53 @@ def test_cos_sin_turns_special_angles_are_exact():
     np.testing.assert_array_equal(sin_values, [0, 1, 0, -1, 0, -1, 0, 0, 1])
 
 
+def test_cos_sin_turns_reduce_exactly_at_every_magnitude():
+    """The value at t is the value at t - rint(t), exactly reduced, below and
+    above 2^51 turns, where every double is a multiple of 1/2 (and from 2^52 on an
+    integer): cos is 1 or -1 and sin 0 there."""
+    rng = np.random.default_rng(15)
+    turns = np.concatenate(
+        [
+            rng.uniform(-(2.0**51), 2.0**51, 20_000),
+            2.0**51 + rng.integers(0, 2**52, 20_000) / 2.0,
+            np.exp(rng.uniform(np.log(2.0**51), np.log(1e308), 20_000)),
+        ]
+    ) * rng.choice([-1.0, 1.0], 60_000)
+    cos_values, sin_values = cos_sin_turns(turns)
+    reduced_cos, reduced_sin = cos_sin_turns(turns - np.rint(turns))
+    np.testing.assert_array_equal(cos_values, reduced_cos)
+    np.testing.assert_array_equal(sin_values, reduced_sin)
+    edges = np.array(
+        [2.0**51 + 0.5, 2.0**51 + 1, -(2.0**51 + 3), 2.0**52 - 0.5, 2.0**52 + 1]
+        + [2.0**53 + 2, 2.0**60, np.finfo(float).max]
+    )
+    cos_values, sin_values = cos_sin_turns(edges)
+    np.testing.assert_array_equal(cos_values, [-1, 1, 1, -1, 1, 1, 1, 1])
+    np.testing.assert_array_equal(sin_values, 0)
+
+
+def test_transforms_reduce_phases_beyond_2_51_turns_exactly():
+    """At l = 1/2, u = 2^52 + 2 and 2^52 + 1 wavelengths (frequency c, w = 0)
+    have the phases 2^51 + 1 and 2^51 + 1/2 turns: exp(i phase) is 1 and -1."""
+    n = np.sqrt(0.75)
+    maps = (np.zeros(1, dtype=np.int64),) * 3  # frequency, time, polarization
+    uvw = np.zeros((1, 2, 3))
+    uvw[0, :, 0] = [2.0**52 + 2, 2.0**52 + 1]
+    frequency, l, m = np.array([C]), np.array([0.5]), np.array([0.0])  # noqa: E741
+    vis = np.zeros((1, 2, 1, 1), dtype=np.complex128)
+    dft_predict(np.ones((1, 1, 1, 1, 1)), vis, uvw, frequency, *maps, l, m)
+    np.testing.assert_array_equal(vis.ravel(), [1 / n, -1 / n])
+    weight = np.array([1.0, 2.0]).reshape(1, 2, 1, 1)
+    image, normalization = np.zeros((1, 1, 1, 1, 1), dtype=complex), np.zeros((1, 1, 1))
+    dft_image(
+        image, normalization, np.ones_like(vis), uvw, frequency, *maps, weight, l, m
+    )
+    np.testing.assert_array_equal(image.ravel(), [-n])
+    psf, normalization = np.zeros((1, 1, 1, 1, 1)), np.zeros((1, 1, 1))
+    dft_image_uv_sampling(psf, normalization, uvw, frequency, *maps, weight, l, m)
+    np.testing.assert_array_equal(psf.ravel(), [-n])
+
+
 @pytest.mark.parametrize("dtype", [np.complex128, np.complex64, np.float64, np.float32])
 def test_dft_image_matches_the_definition(dtype):
     inp = _inputs()
@@ -309,6 +357,22 @@ def test_zero_visibility_counts_in_the_normalization():
     dft_image_uv_sampling(psf, psf_normalization, *_uv_sampling_args(inp))
     np.testing.assert_array_equal(normalization, psf_normalization)
     np.testing.assert_array_equal(image / normalization[..., None, None], 1.0)
+
+
+@pytest.mark.parametrize("n_l, n_m", [(3, 0), (0, 0), (0, 3)])
+def test_an_image_without_pixels_sums_only_the_normalization(n_l, n_m):
+    """An image with no row or no column (n_m = 0 divided by zero) gets the
+    normalization of any image of the samples."""
+    inp = _inputs(n_l=n_l, n_m=n_m)
+    one_pixel = _inputs(n_l=1, n_m=1)  # the same samples
+    image, normalization = _empty(inp)
+    dft_image(image, normalization, *_image_args(inp))
+    expected_image, expected = _empty(one_pixel)
+    dft_image(expected_image, expected, *_image_args(one_pixel))
+    np.testing.assert_array_equal(normalization, expected)
+    psf, psf_normalization = _empty(inp, dtype=np.float64)
+    dft_image_uv_sampling(psf, psf_normalization, *_uv_sampling_args(inp))
+    np.testing.assert_array_equal(psf_normalization, expected)
 
 
 def test_calls_accumulate():
@@ -432,9 +496,9 @@ def test_binding_validation():
         dft_image(image[0], normalization, *args)
     with pytest.raises(RuntimeError, match="normalization must have shape"):
         dft_image(image, normalization[:, :1], *args)
-    with pytest.raises(RuntimeError, match="normalization must be float64"):
+    with pytest.raises(RuntimeError, match="normalization.*expected native float64"):
         dft_image(image, normalization.astype(np.float32), *args)
-    with pytest.raises(RuntimeError, match="image must be"):
+    with pytest.raises(RuntimeError, match="image has wrong dtype"):
         dft_image(image.real.astype(np.int64), normalization, *args)
     read_only = image.copy()
     read_only.setflags(write=False)
@@ -462,11 +526,13 @@ def test_binding_validation():
     with pytest.raises(TypeError):
         dft_image(image, normalization, *_image_args(bad))
     vis = np.zeros(inp["vis_data"].shape, dtype=np.complex128)
-    with pytest.raises(RuntimeError, match="vis_data must be complex64 or complex128"):
+    with pytest.raises(
+        RuntimeError, match="vis_data.*expected native complex64 or complex128"
+    ):
         dft_predict(image, vis.real.copy(), *_predict_args(inp))
-    with pytest.raises(RuntimeError, match="model must be"):
+    with pytest.raises(RuntimeError, match="model has wrong dtype"):
         dft_predict(image.real.astype(np.int32), vis, *_predict_args(inp))
-    with pytest.raises(RuntimeError, match="image must be float32 or float64"):
+    with pytest.raises(RuntimeError, match="image.*expected native float32 or float64"):
         dft_image_uv_sampling(image, normalization, *_uv_sampling_args(inp))
 
 
@@ -504,3 +570,100 @@ def test_pickled_uv_sampling_arrays_are_accepted_in_place(dtype):
     dft_image_uv_sampling(psf, normalization, *args)
     assert psf.__array_interface__["data"][0] == psf_ptr
     assert np.any(psf != 0) and np.all(normalization > 0)
+
+
+def test_dft_image_native_alignment_contract(unaligned_array):
+    """Use external unaligned buffers in place and retain equivalent dtype support."""
+    import numpy as np
+
+    from astroviper.processing_functions.imaging.gridders.direct_fourier_transform_cpp import (
+        dft_image,
+    )
+
+    uvw = np.zeros((1, 1, 3))
+    freq = np.array([1e9])
+    imap = np.zeros(1, dtype=np.int64)
+    wt = np.ones((1, 1, 1, 1))
+    dft = dict(
+        uvw=uvw,
+        frequency_coord=freq,
+        frequency_map=imap,
+        time_map=imap,
+        pol_map=imap,
+        l=np.arange(4) * 0.001,
+        m=np.arange(4) * 0.001,
+        processing_function_threads=1,
+    )
+    kwargs = dict(
+        dft,
+        image=np.zeros((1, 1, 1, 4, 4)),
+        normalization=np.zeros((1, 1, 1)),
+        vis_data=np.ones((1, 1, 1, 1), dtype=np.complex128),
+        weight=wt,
+    )
+    reference = {
+        k: v.copy() if isinstance(v, np.ndarray) else v for k, v in kwargs.items()
+    }
+    dft_image(**reference)
+    for key, value in kwargs.items():
+        if not isinstance(value, np.ndarray) or value.dtype.alignment == 1:
+            continue
+        for offset in range(1, value.dtype.alignment):
+            trial = {
+                k: v.copy() if isinstance(v, np.ndarray) else v
+                for k, v in kwargs.items()
+            }
+            trial[key] = unaligned_array(value, offset)
+            dft_image(**trial)
+            for name, expected in reference.items():
+                if isinstance(expected, np.ndarray):
+                    np.testing.assert_array_equal(trial[name], expected)
+            assert trial[key].base[0] == 0xA5
+            assert trial[key].base[-1] == 0xA5
+
+
+def test_dft_predict_native_alignment_contract(unaligned_array):
+    """Use external unaligned buffers in place and retain equivalent dtype support."""
+    import numpy as np
+
+    from astroviper.processing_functions.imaging.gridders.direct_fourier_transform_cpp import (
+        dft_predict,
+    )
+
+    uvw = np.zeros((1, 1, 3))
+    freq = np.array([1e9])
+    imap = np.zeros(1, dtype=np.int64)
+    dft = dict(
+        uvw=uvw,
+        frequency_coord=freq,
+        frequency_map=imap,
+        time_map=imap,
+        pol_map=imap,
+        l=np.arange(4) * 0.001,
+        m=np.arange(4) * 0.001,
+        processing_function_threads=1,
+    )
+    kwargs = dict(
+        dft,
+        model=np.ones((1, 1, 1, 4, 4)),
+        vis_data=np.zeros((1, 1, 1, 1), dtype=np.complex128),
+    )
+    reference = {
+        k: v.copy() if isinstance(v, np.ndarray) else v for k, v in kwargs.items()
+    }
+    dft_predict(**reference)
+    for key, value in kwargs.items():
+        if not isinstance(value, np.ndarray) or value.dtype.alignment == 1:
+            continue
+        for offset in range(1, value.dtype.alignment):
+            trial = {
+                k: v.copy() if isinstance(v, np.ndarray) else v
+                for k, v in kwargs.items()
+            }
+            trial[key] = unaligned_array(value, offset)
+            dft_predict(**trial)
+            for name, expected in reference.items():
+                if isinstance(expected, np.ndarray):
+                    np.testing.assert_array_equal(trial[name], expected)
+            assert trial[key].base[0] == 0xA5
+            assert trial[key].base[-1] == 0xA5

@@ -35,6 +35,7 @@ here serve both inputs.
 
 from __future__ import annotations
 
+import base64
 import errno
 import json
 import os
@@ -44,6 +45,8 @@ from itertools import product
 import numcodecs
 import numpy as np
 from xarray.backends import BackendArray
+
+from astroviper.utils.param_docs import shares_param_docs
 
 # Zarr v3 ``data_type`` -> little-endian NumPy dtype string.
 _V3_DTYPE = {
@@ -99,17 +102,63 @@ def _np_dtype(meta_dtype):
     return np.dtype(meta_dtype)
 
 
+def _decode_float_fill_value(fill):
+    """Decode one JSON float, including Zarr v3 big-endian IEEE hex bits."""
+    if isinstance(fill, str) and fill.startswith("0x"):
+        formats = {4: ">e", 8: ">f", 16: ">d"}
+        fmt = formats.get(len(fill) - 2)
+        if fmt is None:
+            raise ValueError(
+                f"Invalid hexadecimal float fill {fill!r}: expected 4, 8 or 16 hex digits."
+            )
+        return struct.unpack(fmt, bytes.fromhex(fill[2:]))[0]
+    return float(fill)
+
+
+def _decode_fill_value(fill, dtype, *, zarr_format):
+    """Decode JSON numeric/v2 byte fills to a scalar, without array copies."""
+    if fill is None:
+        return None
+    if zarr_format == 2 and dtype.kind in "SV":
+        return dtype.type(base64.b64decode(fill, validate=True))
+    if dtype.kind == "c" and isinstance(fill, (list, tuple)):
+        # Decode each component independently, preserving NaNs, infinities and
+        # signed zeros without complex arithmetic or data-sized temporaries.
+        fill = complex(
+            _decode_float_fill_value(fill[0]), _decode_float_fill_value(fill[1])
+        )
+    elif dtype.kind == "f":
+        fill = _decode_float_fill_value(fill)
+    return dtype.type(fill) if dtype.kind in "biufc" else fill
+
+
+def _check_v3_codec_endianness(codecs, array_path):
+    """Reject unsupported big-endian data and shard-index bytes before I/O."""
+    for codec in codecs:
+        config = codec.get("configuration", {})
+        if codec["name"] == "bytes" and config.get("endian") == "big":
+            raise NotImplementedError(
+                f"Big-endian Zarr v3 bytes codecs are not supported by the "
+                f"chunk I/O engine: {array_path}. Use a little-endian store."
+            )
+        if codec["name"] == "sharding_indexed":
+            _check_v3_codec_endianness(config.get("codecs", []), array_path)
+            _check_v3_codec_endianness(config.get("index_codecs", []), array_path)
+
+
 def _read_array_meta(array_path):
     """Read just one array's Zarr metadata (no data, no group/tree open).
 
     Supports Zarr v3 (``zarr.json``, optionally ``sharding_indexed``) and v2
     (``.zarray`` + ``.zattrs``). Returns a small plain dict.
+    Big-endian v3 data/index codecs raise ``NotImplementedError`` before I/O.
     """
     v3_path = os.path.join(array_path, "zarr.json")
     if os.path.exists(v3_path):
         with open(v3_path) as fh:
             m = json.load(fh)
         codecs = m["codecs"]
+        _check_v3_codec_endianness(codecs, array_path)
         sharding = next((c for c in codecs if c["name"] == "sharding_indexed"), None)
         key = m.get("chunk_key_encoding", {}).get("configuration", {})
         return {
@@ -121,7 +170,9 @@ def _read_array_meta(array_path):
             "sep": key.get("separator", "/"),
             "codecs": codecs,
             "sharding": sharding["configuration"] if sharding else None,
-            "fill_value": m.get("fill_value"),
+            "fill_value": _decode_fill_value(
+                m.get("fill_value"), _np_dtype(m["data_type"]), zarr_format=3
+            ),
             "bool_encoded": m.get("attributes", {}).get("dtype") == "bool",
         }
 
@@ -141,7 +192,9 @@ def _read_array_meta(array_path):
         "compressor": m.get("compressor"),
         "filters": m.get("filters"),
         "order": m.get("order", "C"),
-        "fill_value": m.get("fill_value"),
+        "fill_value": _decode_fill_value(
+            m.get("fill_value"), np.dtype(m["dtype"]), zarr_format=2
+        ),
         "bool_encoded": attrs.get("dtype") == "bool",
     }
 
@@ -403,7 +456,7 @@ def read_array_region(
         if out is not None and not relative_indices
         else np.empty(bounds, dtype=values_dtype)
     )
-    fill = meta["fill_value"] if meta["fill_value"] is not None else 0
+    fill = _fill_value(meta)
 
     sharding = meta["sharding"]
     unit_shape = tuple(sharding["chunk_shape"]) if sharding else oc
@@ -695,6 +748,7 @@ def _read_arrays_concurrently(reads, processing_function_threads):
     return results
 
 
+@shares_param_docs
 def load_processing_set(
     input_data_store,
     sel_parms,
@@ -706,6 +760,9 @@ def load_processing_set(
     load_correlated_data=True,
     *,
     map_frequencies,
+    full_image_frequencies=None,
+    frequency_boundaries=None,
+    observation_frequency_boundaries=None,
 ):
     """Reconstruct a minimal processing set for cube imaging from chunk blobs.
 
@@ -741,19 +798,38 @@ def load_processing_set(
         (e.g. ``{"correlated_data": "VISIBILITY", "uvw": "UVW", ...}``), passed
         down from the distributed graph.
     processing_set_data_group_name : str
-        Name to register the data group under in ``attrs["data_groups"]``.
+        Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
     frequency_coords : array-like
         Frequency values for this task's channels (``task_coords["frequency"]["data"]``).
     instrument_polarization_basis : str
-        ``"linear"`` or ``"circular"``; used to label the polarization axis.
+        Correlation (instrument) polarization basis the gridding is performed in:
+        ``"linear"`` or ``"circular"``. The residual update grids and degrids the
+        correlations of this basis and the model update deconvolves in the
+        Stokes basis, in which the image is written. The Stokes planes requested
+        in ``image_params["polarization_coords"]`` fix the correlations that are
+        loaded and gridded: the two parallel hands give ``I, Q`` (linear) or
+        ``I, V`` (circular), all four correlations give ``I, Q, U, V``. A sample
+        is used only if none of its loaded correlations is flagged.
     processing_function_threads : int, optional
-        Maximum number of threads used to read this MS's arrays concurrently.
-        Default ``1`` (serial).  File reads and the numcodecs decode both
-        release the GIL, so threading overlaps the per-array I/O latency.
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
     load_correlated_data : bool, optional
         If false, omit the observed correlated-data array. This is used by
         cached-grid MFS residual updates, which require only UVW, flags, and
         imaging weights to predict and grid the model contribution.
+    frequency_boundaries : dict, optional
+        Precomputed image-channel acceptance intervals (Hz), keyed by channel
+        centre. Each pair gives the lowest and highest accepted float64
+        frequency, both inclusive. Only task-local channel records are needed.
+        When omitted, use the supplied image axis to infer channel widths.
+    observation_frequency_boundaries : dict, optional
+        Single-channel image boundaries keyed by observation name, computed
+        from each observation's full frequency axis before selection.
+    full_image_frequencies : array-like, optional
+        Original, unpartitioned image-frequency axis (Hz), retained for legacy
+        callers. Mapping and boundary checks use this axis, with observations
+        required to belong to the local image-frequency subset. Precomputed
+        ``frequency_boundaries`` take precedence when supplied.
     map_frequencies : callable
         ``map_frequencies(visibility_frequencies, task_frequencies)`` returns
         the index of the task frequency each selected channel is imaged onto
@@ -845,7 +921,24 @@ def load_processing_set(
         # use: execution blocks converted to LSRK have channel centres a few
         # kHz apart, so their frequencies never equal the image's exactly.
         try:
-            map_frequencies(child_frequency_values, task_frequency_values)
+            mapping_context = (
+                {"full_image_frequencies": full_image_frequencies}
+                if full_image_frequencies is not None
+                else {}
+            )
+            if frequency_boundaries is not None:
+                mapping_context["frequency_boundaries"] = frequency_boundaries
+            if observation_frequency_boundaries is not None:
+                if ms_name not in observation_frequency_boundaries:
+                    raise ValueError(
+                        f"Missing frequency boundaries for observation {ms_name!r}."
+                    )
+                mapping_context["frequency_boundaries"] = (
+                    observation_frequency_boundaries[ms_name]
+                )
+            map_frequencies(
+                child_frequency_values, task_frequency_values, **mapping_context
+            )
         except ValueError as exc:
             raise ValueError(
                 f"Selected frequencies for {ms_name!r} do not map onto the task "
@@ -892,6 +985,10 @@ def load_processing_set(
                 coords[coord_name] = (c_dims, values)
 
         ds = xr.Dataset(data_vars=data_vars, coords=coords)
+        if observation_frequency_boundaries is not None:
+            ds.frequency.attrs["image_frequency_boundaries"] = (
+                observation_frequency_boundaries[ms_name]
+            )
         ds.attrs["data_groups"] = {processing_set_data_group_name: dict(data_group)}
         nodes[ms_name] = ds
 
@@ -936,11 +1033,20 @@ def _encode_chunk_blob(chunk, meta):
 
 
 def _fill_value(meta):
-    """The fill value used to pad partial (array-edge) chunks before encoding."""
+    """Return the explicit fill or a dtype-specific compatibility default.
+
+    Zarr v2 leaves missing data with a null fill undefined. Match zarr-python's
+    deterministic defaults for reads, skipped chunks and edge padding: zero
+    (including raw bytes), empty strings, or NaT for datetimes/timedeltas.
+    Only a scalar is allocated; explicit fills are returned unchanged.
+    """
     fill = meta["fill_value"]
-    if fill is None or (isinstance(fill, float) and np.isnan(fill)):
-        fill = np.nan if meta["dtype"].kind in "fc" else 0
-    return fill
+    if fill is not None:
+        return fill
+    dtype = meta["dtype"]
+    if dtype.kind in "Mm":
+        return np.full((), "NaT", dtype=dtype)[()]
+    return np.zeros((), dtype=dtype)[()]
 
 
 def _task_chunk_grid(dims, shape, chunk_shape, task_coords, array_path):

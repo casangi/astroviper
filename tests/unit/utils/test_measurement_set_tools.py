@@ -178,8 +178,7 @@ def test_write_visibility_chunk(empty_store):
     np.testing.assert_array_equal(ms.WEIGHT.values[3:, :, :2], 0.5)
 
 
-def test_overwrite_guard(empty_store):
-    ps_store, _, pc = empty_store
+def _small_measurement_set():
     ant = read_telescope_layout("vla.d", antenna_selection=[0, 1])
     tc = make_time_coordinate(
         {"time_start": "2019-10-03T19:00:00.000", "time_delta": 60.0, "n_samples": 2}
@@ -189,8 +188,39 @@ def test_overwrite_guard(empty_store):
     )
     names, uniq, upc = resolve_fields(np.array([[1.0, 0.5]]), None, 2)
     ms = make_empty_visibility_xds(tc, fc, ["XX"], ant, names)
-    fs = make_field_and_source_xds(uniq, upc)
+    return ms, ant, make_field_and_source_xds(uniq, upc)
+
+
+def test_overwrite_guard(empty_store, tmp_path):
+    ps_store, _, _ = empty_store
+    ms, ant, fs = _small_measurement_set()
     with pytest.raises(FileExistsError):
         create_empty_measurement_set_v4_on_disk(
-            ps_store, "x", ms, ant, fs, {}, overwrite=False
+            ps_store, "vla_sim", ms, ant, fs, {}, overwrite=False
         )
+    not_a_processing_set = tmp_path / "not_a_processing_set"
+    not_a_processing_set.mkdir()
+    with pytest.raises(FileExistsError):
+        create_empty_measurement_set_v4_on_disk(
+            str(not_a_processing_set), "x", ms, ant, fs, {}, overwrite=False
+        )
+    create_empty_measurement_set_v4_on_disk(
+        str(not_a_processing_set), "x", ms, ant, fs, {}, overwrite=True
+    )
+    root = zarr.open_group(str(not_a_processing_set), mode="r")
+    assert root.attrs["type"] == "processing_set"
+
+
+def test_measurement_sets_share_a_processing_set(empty_store):
+    ps_store, _, _ = empty_store
+    ms, ant, fs = _small_measurement_set()
+    for overwrite in (False, True):  # added, then replaced
+        create_empty_measurement_set_v4_on_disk(
+            ps_store, "x", ms, ant, fs, {}, overwrite=overwrite
+        )
+    zarr.consolidate_metadata(ps_store)
+    ps_xdt = open_processing_set(ps_store)
+    assert set(ps_xdt.children) == {"vla_sim", "x"}
+    assert ps_xdt["vla_sim"].ds.sizes["frequency"] == 4
+    assert ps_xdt["x"].ds.sizes["frequency"] == 2
+    assert str(check_datatree(ps_xdt)) == "No schema issues found"
