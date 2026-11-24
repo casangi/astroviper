@@ -364,3 +364,38 @@ def test_continuum_restoration_collects_inputs_only_for_flat_noise(
         assert captured == [None]
     else:
         assert captured == [{}]  # Restoration consumed every retained input.
+
+
+@pytest.mark.parametrize("mode", [None, "mfs", "mvc"])
+@pytest.mark.parametrize("output", ["apparent", "primary_beam_corrected", "both"])
+def test_invalid_target_preserves_public_products_and_temporary_inputs(
+    mode, output, monkeypatch
+):
+    import importlib
+
+    backend = importlib.import_module("astroviper.processing_functions.imaging.restore")
+
+    def unexpected_restore(*args, **kwargs):
+        pytest.fail("Target containment must be checked before convolution")
+
+    monkeypatch.setattr(backend, "_restore_image_arrays", unexpected_restore)
+    image, _, _ = image_case(mode)
+    apparent_inputs = {} if output in ("apparent", "both") else None
+    finalized = finalize_image_products(
+        image,
+        continuum_mode=mode,
+        deconvolver="mtmfs" if mode else "hogbom",
+        apparent_inputs=apparent_inputs,
+    )
+    original = finalized.copy(deep=True)
+    saved = None if apparent_inputs is None else dict(apparent_inputs)
+    with pytest.raises(ValueError, match="cannot be achieved"):
+        restore_finalized_image(
+            finalized,
+            restoration_output=output,
+            restoring_beam=[5e-5, 1.5e-5, 0.0],
+            apparent_inputs=apparent_inputs,
+        )
+    xr.testing.assert_identical(finalized, original)
+    if apparent_inputs is not None:
+        assert all(apparent_inputs[key] is value for key, value in saved.items())

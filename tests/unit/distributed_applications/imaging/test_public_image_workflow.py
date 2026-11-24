@@ -319,3 +319,53 @@ def test_beam_and_psf_retention_is_default_but_optional(
     if "POINT_SPREAD_FUNCTION" in image and mode != "cube":
         assert image.POINT_SPREAD_FUNCTION.sizes["frequency_polynomial_moment"] == 3
     assert kept == original
+
+
+@pytest.mark.parametrize("mode", ["cube", "mfs", "mvc"])
+def test_impossible_target_stops_at_first_psf_fit(
+    tmp_path, observation, mode, monkeypatch
+):
+    import importlib
+
+    fit_module = importlib.import_module(
+        "astroviper.processing_functions.image_analysis.point_spread_function_gaussian_fit"
+    )
+    original_fit = fit_module.point_spread_function_gaussian_fit
+    fits = []
+
+    def fitted(*args, **kwargs):
+        image = original_fit(*args, **kwargs)
+        fits.append(True)
+        # The exact fitted numbers are irrelevant: force a known native beam
+        # whose minor axis exceeds the target's, despite its smaller area.
+        image.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.values[...] = [3e-5, 2e-5, 0.0]
+        return image
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("An impossible target must stop before residual/model updates")
+
+    monkeypatch.setattr(fit_module, "point_spread_function_gaussian_fit", fitted)
+    for module, function in [
+        ("residual_update", "residual_update_cube_single_field"),
+        ("model_update", "model_update_cube_single_field"),
+        ("image_continuum_single_field", "model_update_mtmfs_single_field"),
+    ]:
+        monkeypatch.setattr(
+            importlib.import_module(
+                "astroviper.processing_functions.imaging." + module
+            ),
+            function,
+            unexpected,
+        )
+    arguments = workflow_arguments(tmp_path, observation, mode, restore=True)
+    arguments["restoring_beam"] = [5e-5, 1.5e-5, 0.0]
+    with dask.config.set(scheduler="synchronous"), pytest.raises(ValueError):
+        if mode == "cube":
+            applications.imaging.image_cube_single_field(
+                deconvolver="hogbom", **arguments
+            )
+        else:
+            applications.imaging.image_continuum_single_field(
+                deconvolver="mtmfs", continuum_mode=mode, **arguments
+            )
+    assert fits == [True]

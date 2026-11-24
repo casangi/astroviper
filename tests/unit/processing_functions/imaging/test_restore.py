@@ -1006,49 +1006,20 @@ def test_corrected_restore_to_a_target_keeps_one_spectrum_besides_the_beam(
 @pytest.mark.parametrize("output", OUTPUTS)
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
 @pytest.mark.parametrize("consume_model", [False, True])
-def test_planes_not_contained_or_without_a_fit_keep_their_residual(
-    output, dtype, consume_model, monkeypatch
+@pytest.mark.parametrize(
+    "invalid_beam", [(12.0, 4.0, TARGET_PIXELS[2]), (np.nan, np.nan, np.nan)]
+)
+def test_impossible_target_raises_before_any_plane_changes(
+    output, dtype, consume_model, invalid_beam
 ):
-    """Their model is restored with the target and their residual added as it
-    is; one warning names them, with the growth factor."""
-    import toolviper.utils.logger as logger
-
-    messages = []
-    monkeypatch.setattr(logger, "warning", messages.append)
-    beams = {
-        (0, 0): _radians(PSF_PIXELS),
-        (0, 1): _radians((12.0, 4.0, TARGET_PIXELS[2])),
-        (0, 2): (np.nan, np.nan, np.nan),
-    }
-    xds = _target_inputs(dtype, nf=3, beams=beams)
-    residual = xds.SKY_RESIDUAL.values.copy()
-    model = xds.SKY_MODEL.values.copy()
-    primary_beam = xds.PRIMARY_BEAM.values.copy()
-    restored = _restored(xds, output, consume_model, TARGET)
-    kernel_ft = _clean_beam_kernel_ft(TARGET, 64, 64, _pixel_size(xds), dtype, 1)
-    for f, q in np.ndindex(3, 2):
-        if f == 0:
-            continue
-        if output != "primary_beam_corrected":
-            expected = _convolve_with_clean_beam(model[0, f, q], kernel_ft, 1)
-            expected += residual[0, f, q]
-            np.testing.assert_array_equal(restored["SKY_RESTORED"][0, f, q], expected)
-        if output != "apparent":
-            expected = primary_beam_corrected_plane(
-                primary_beam[0, f, q],
-                0.2,
-                model[0, f, q],
-                residual[0, f, q],
-                kernel_ft=kernel_ft,
-            )
-            np.testing.assert_array_equal(
-                restored["SKY_PRIMARY_BEAM_CORRECTED_RESTORED"][0, f, q], expected
-            )
-    frequency = xds.frequency.values.tolist()
-    assert len(messages) == 1
-    assert "(time index, frequency in Hz)" in messages[0]
-    assert f"[((0, {frequency[1]}), 1.2" in messages[0]
-    assert f"Without a PSF fit: [(0, {frequency[2]})]" in messages[0]
+    beams = {(0, 0): _radians(PSF_PIXELS), (0, 1): _radians(invalid_beam)}
+    xds = _target_inputs(dtype, nf=2, beams=beams)
+    original = xds.copy(deep=True)
+    with pytest.raises(ValueError, match="cannot be achieved") as error:
+        _restored(xds, output, consume_model, TARGET)
+    assert "frequency in Hz" in str(error.value)
+    assert str(xds.frequency.values[1]) in str(error.value)
+    xr.testing.assert_identical(xds, original)
 
 
 @pytest.mark.parametrize("output", OUTPUTS)
@@ -1096,8 +1067,8 @@ def test_target_equal_within_the_tolerance_scales_the_residual(
 def test_restored_beam_variable_holds_the_target_in_every_plane():
     beams = {
         (0, 0): _radians(PSF_PIXELS),
-        (0, 1): (0.0, 0.0, 0.0),  # a flagged channel
-        (0, 2): (np.nan, np.nan, np.nan),  # a failed fit
+        (0, 1): _radians((4.0, 2.0, 0.2)),
+        (0, 2): _radians((3.0, 1.5, -0.2)),
     }
     xds = _target_inputs(np.float32, nf=3, beams=beams)
     residual = xds.SKY_RESIDUAL.copy(deep=True)

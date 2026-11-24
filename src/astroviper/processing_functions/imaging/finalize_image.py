@@ -370,6 +370,8 @@ def restore_finalized_image(
     model, residual = out[mn].transpose(*dims), reference.transpose(*dims)
     pixel = abs(float(out.l.values[1] - out.l.values[0]))
     workers = processing_function_threads if processing_function_threads > 0 else -1
+    if restoring_beam is not None:
+        transforms = _correcting_transforms(beam.values[:, :, 0], restoring_beam, pixel)
     requested = []
     if restoration_output in ("primary_beam_corrected", "both"):
         requested.append(("SKY_PRIMARY_BEAM_CORRECTED_RESTORED", model, residual))
@@ -446,7 +448,6 @@ def restore_finalized_image(
     )
     if restoring_beam is not None:
         converted = residual.copy(deep=True)
-        transforms = _correcting_transforms(beam.values[:, :, 0], restoring_beam, pixel)
         for (ti, pi), (covariance, ratio) in transforms.items():
             for pol in range(residual.sizes["polarization"]):
                 converted.values[ti, pi, pol] = _residual_to_beam(

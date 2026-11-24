@@ -1,6 +1,5 @@
 import numpy as np
 import scipy.fft
-import toolviper.utils.logger as logger
 import xarray as xr
 
 from astroviper.utils.data_group_tools import (
@@ -498,7 +497,7 @@ def _correcting_transforms(beam, restoring_beam, pixel_size, plane_coordinate=No
     pixel_size : float
         Absolute image-cell size in radians.
     plane_coordinate : tuple, optional
-        ``(name, values)`` of the plane axis, by which the warning names the
+        ``(name, values)`` of the plane axis, by which the error names the
         planes; their indices by default.
 
     Returns
@@ -506,9 +505,8 @@ def _correcting_transforms(beam, restoring_beam, pixel_size, plane_coordinate=No
     dict
         ``(time, plane)`` to ``(covariance_pixels, area_ratio)`` of
         :func:`_multiply_by_correcting_transform`. A plane whose PSF beam is
-        the target, has no fit or is not contained by the target is left out:
-        its residual is kept unconvolved and unscaled. The last two are named
-        in one warning.
+        the target needs no transform. An undefined native beam or a target
+        that cannot contain a native beam raises ValueError before restoration.
     """
     from astroviper.processing_functions.image_analysis.common_beam import (
         _correcting_covariance,
@@ -537,10 +535,10 @@ def _correcting_transforms(beam, restoring_beam, pixel_size, plane_coordinate=No
         without_fit = [
             (time_index, values[plane_index]) for time_index, plane_index in no_fit
         ]
-        logger.warning(
-            f"restoring_beam {list(map(float, restoring_beam))} rad: the residual "
-            f"of these (time index, {name}) planes is kept unconvolved and "
-            "unscaled. Not contained by the target (growth factor that would "
+        raise ValueError(
+            f"restoring_beam {list(map(float, restoring_beam))} rad cannot be "
+            f"achieved for these (time index, {name}) planes. "
+            "Not contained by the target (growth factor that would "
             f"contain them): {growth}. Without a PSF fit: {without_fit}."
         )
     return transforms
@@ -701,8 +699,9 @@ def _restore_image_arrays(
 
     With ``restoring_beam`` every plane is restored to that beam: the model is
     convolved with its clean beam, built once per call, and the residual is
-    taken from the plane's beam to it (:func:`_restore_plane_to_beam`), except
-    where :func:`_correcting_transforms` keeps the residual.
+    taken from the plane's beam to it (:func:`_restore_plane_to_beam`).
+    Invalid native beams or an impossible target cause an error before any
+    output is written.
 
     Parameters
     ----------
@@ -779,6 +778,11 @@ def _restore_image_arrays(
                 "primary_beam polarization must be singleton or match the image."
             )
 
+    if restoring_beam is not None:
+        transforms = _correcting_transforms(
+            beam[:, :, 0], restoring_beam, pixel_size, plane_coordinate
+        )
+
     workers = (
         processing_function_threads
         if processing_function_threads and processing_function_threads > 0
@@ -803,9 +807,6 @@ def _restore_image_arrays(
             )
             if model.any()
             else None
-        )
-        transforms = _correcting_transforms(
-            beam[:, :, 0], restoring_beam, pixel_size, plane_coordinate
         )
 
     for time_index in range(nt):
@@ -1110,13 +1111,12 @@ def restore_image(
         since CASA 5.6 (CAS-12148): the model is convolved with the unit-peak
         target beam, and the residual with the Gaussian that takes the plane's
         PSF beam to the target, times the ratio of the beam areas, so it is in
-        Jy per target beam. ``SKY_RESIDUAL`` records the residual at the target beam, preserving the public restoration identity. A plane whose PSF
-        beam the target does not contain, or that has no PSF fit, keeps its
-        residual unconvolved and unscaled, as ``tclean`` does, and is named in a
-        warning. The continuum imager refuses a target that does not contain its
-        PSF beam, and any target when its PSF fit failed, right after that fit
-        in its first imaging cycle: the residual update has run, but no model
-        update. With primary-beam correction a restore cutoff below 1e-3 is
+        Jy per target beam. SKY_RESIDUAL records the residual at the target beam,
+        preserving the public restoration identity. A target that cannot contain
+        every native beam, or an undefined native beam, raises ValueError. Imaging
+        checks this immediately after fitting the PSF beam, before any model
+        update; standalone restoration checks its supplied beam metadata before
+        convolution. With primary-beam correction a restore cutoff below 1e-3 is
         refused (``primary_beam_limit``; in cube imaging that of
         ``cycle_control_params``, where 0 restores at 0.2): in the transform to
         the target, the float32 rounding of the residual divided by the primary
@@ -1164,8 +1164,8 @@ def restore_image(
     Gaussian fit.  Frequencies whose beam-fit parameters are non-finite or
     non-positive have no defined clean beam; without ``restoring_beam`` their
     restored plane falls back to the residual (the model cannot be restored
-    without a beam), with a target their model is restored with the target and
-    their residual added unconvolved and unscaled.
+    without a beam). With a target, an undefined native beam or an impossible
+    target raises ValueError before restoration.
 
     With ``restoring_beam`` the residual is multiplied in the uv plane by
     ``H = (Omega_T / Omega_p) exp(-2 pi^2 f^T D f)``, with ``D`` the covariance
@@ -1269,6 +1269,13 @@ def restore_image(
     beam_name = resolve_restoration_product(
         img_xds, image_data_group_in_residual_name, beam_fit_params_key
     )
+    if restoring_beam is not None:
+        _correcting_transforms(
+            img_xds[beam_name].values[:, :, beam_polarization_index],
+            restoring_beam,
+            abs(float(img_xds.l.values[1] - img_xds.l.values[0])),
+            ("frequency in Hz", img_xds.frequency.values.tolist()),
+        )
     if correct:
         primary_beam_name = resolve_restoration_product(
             img_xds, image_data_group_in_residual_name, primary_beam_key

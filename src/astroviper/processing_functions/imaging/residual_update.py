@@ -27,6 +27,7 @@ def imaging_setup_single_field(
     primary_beam_params=None,
     *,
     input_checked: bool = False,
+    restoring_beam=None,
 ):
     """Perform the once-per-chunk imaging setup before the imaging cycle loop.
 
@@ -181,6 +182,28 @@ def imaging_setup_single_field(
         using an input_params dictionary, its input_checked entry also carries this
         flag. Set it only for an unchanged configuration in the same imaging mode.
 
+    restoring_beam : list of float or None, optional
+        ``None`` restores each plane with its own PSF fit [CASA ``tclean``
+        ``restoringbeam=''``]. ``[major, minor, pa]`` (FWHM and position angle
+        in radians, as ``BEAM_FIT_PARAMS``; ``major >= minor > 0``,
+        ``|pa| <= pi``) restores every plane to that beam as ``tclean`` does
+        since CASA 5.6 (CAS-12148): the model is convolved with the unit-peak
+        target beam, and the residual with the Gaussian that takes the plane's
+        PSF beam to the target, times the ratio of the beam areas, so it is in
+        Jy per target beam. SKY_RESIDUAL records the residual at the target beam,
+        preserving the public restoration identity. A target that cannot contain
+        every native beam, or an undefined native beam, raises ValueError. Imaging
+        checks this immediately after fitting the PSF beam, before any model
+        update; standalone restoration checks its supplied beam metadata before
+        convolution. With primary-beam correction a restore cutoff below 1e-3 is
+        refused (``primary_beam_limit``; in cube imaging that of
+        ``cycle_control_params``, where 0 restores at 0.2): in the transform to
+        the target, the float32 rounding of the residual divided by the primary
+        beam, large near its nulls, would spread over the corrected image. The
+        beam is recorded as ``BEAM_FIT_PARAMS_SKY_RESTORED``. For
+        ``tclean``'s ``restoringbeam='common'``, see
+        :func:`~astroviper.processing_functions.image_analysis.common_beam.common_beam`.
+
     Returns
     -------
     img_xds : xarray.Dataset
@@ -309,6 +332,20 @@ def imaging_setup_single_field(
         fitting_method=psf_fitting_method,
         input_checked=True,
     )
+    if restoring_beam is not None:
+        from astroviper.processing_functions.imaging.restore import (
+            _correcting_transforms,
+        )
+
+        beam_name = img_xds.attrs["data_groups"][image_data_group_out_name][
+            "beam_fit_params_point_spread_function"
+        ]
+        _correcting_transforms(
+            img_xds[beam_name].values[:, :, 0],
+            restoring_beam,
+            abs(float(img_xds.l.values[1] - img_xds.l.values[0])),
+            ("frequency in Hz", img_xds.frequency.values.tolist()),
+        )
     T_psf_fit = time.time() - start
 
     import pandas as pd

@@ -131,14 +131,10 @@ def _image_continuum(processing_set, image_store, **kwargs):
     return xr.open_zarr(str(image_store)).load()
 
 
-def test_a_cube_target_equal_to_the_psf_beam_restores_bit_for_bit(
+def test_a_cube_target_matching_one_channel_must_still_contain_the_others(
     processing_set, tmp_path, monkeypatch
 ):
-    """Channel 0 is restored to its own PSF beam as without a target; the
-    target is kept although the caller's list (left unchanged) does not have
-    it, the PSF beams not (only a report keeps them), and every task gets the
-    target as three floats. Without a target the restored beam is the PSF
-    beam of Stokes I, which the restore applies to Stokes Q too."""
+    """Matching one channel's beam is insufficient when another cannot reach it."""
     reference = _image_cube(
         processing_set,
         tmp_path / "none.img.zarr",
@@ -163,26 +159,13 @@ def test_a_cube_target_equal_to_the_psf_beam_restores_bit_for_bit(
         node_tasks.imaging, "image_cube_single_field", recording_node_task
     )
     keep = ["sky_residual", "sky_model"]
-    image = _image_cube(
-        processing_set, tmp_path / "target.img.zarr", keep, restoring_beam=target
-    )
-
+    with pytest.raises(ValueError, match="cannot be achieved"):
+        _image_cube(
+            processing_set, tmp_path / "target.img.zarr", keep, restoring_beam=target
+        )
     assert keep == ["sky_residual", "sky_model"]
     assert received == [list(target)]
     assert all(type(value) is float for value in received[0])
-    channel = {"frequency": 0}
-    for name in ("SKY_RESTORED", "SKY_PRIMARY_BEAM_CORRECTED_RESTORED"):
-        np.testing.assert_array_equal(
-            image[name].isel(channel).values, reference[name].isel(channel).values
-        )
-    for name in ("SKY_RESIDUAL", "SKY_MODEL"):
-        np.testing.assert_array_equal(image[name].values, reference[name].values)
-    assert "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION" not in image
-    restored_beam = image.BEAM_FIT_PARAMS_SKY_RESTORED.values
-    assert restored_beam.shape == reference.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.shape
-    np.testing.assert_array_equal(
-        restored_beam.reshape(-1, 3), np.tile(target, (restored_beam.size // 3, 1))
-    )
 
 
 @pytest.fixture(scope="module")
@@ -320,29 +303,20 @@ def test_zarr_restored_beams_are_filled_before_the_report(
     assert "No restoring beam: every plane was restored with the PSF fit" in text
 
 
-def test_fits_rows_are_filled_before_the_report(
+def test_target_with_missing_fit_raises_before_report(
     flagged_processing_set, tmp_path, monkeypatch
 ):
-    """With a restoring beam: the report starts once the rows of the flagged
-    channel are filled, and names that channel as without a PSF fit in the
-    section of the point spread function (its centre channel) and in that of
-    the restoring beam."""
-    import html
+    def unexpected_report(*args, **kwargs):
+        pytest.fail("An invalid target must not reach reporting")
 
-    from astropy.io import fits
-
-    image_store = tmp_path / "target_fits"
-
-    def read_rows():
-        with fits.open(image_store / "SKY_RESIDUAL.fits") as hdulist:
-            beams = hdulist["BEAMS"].data
-            return np.stack([beams[column] for column in ("BMAJ", "BMIN")], -1)
-
-    recorded = _record_at_report(monkeypatch, read_rows)
-    with dask.config.set(scheduler="synchronous"):
-        result = image_cube_single_field(
+    monkeypatch.setattr("astroviper.utils.report.make_report", unexpected_report)
+    with (
+        dask.config.set(scheduler="synchronous"),
+        pytest.raises(ValueError, match="Without a PSF fit"),
+    ):
+        image_cube_single_field(
             ps_store=flagged_processing_set,
-            image_store=str(image_store),
+            image_store=str(tmp_path / "target_fits"),
             image_params=_image_params(flagged_processing_set),
             imaging_weights_params={"weighting": "natural"},
             cycle_control_params=CYCLE_CONTROL_PARAMS,
@@ -355,11 +329,6 @@ def test_fits_rows_are_filled_before_the_report(
             output_image_format="fits",
             report="html",
         )
-    assert len(recorded) == 1 and np.all(recorded[0] > 0)
-    with open(result["report"], encoding="utf-8") as file:
-        text = html.unescape(file.read())
-    assert "The beam fit of the centre channel failed" in text
-    assert text.count("<td>no fit</td>") == 1
 
 
 def test_a_continuum_target_equal_to_the_psf_beam_restores_bit_for_bit(
@@ -371,8 +340,6 @@ def test_a_continuum_target_equal_to_the_psf_beam_restores_bit_for_bit(
     target the restored beam, kept although the default list does not have
     it, is the PSF beam of Stokes I, which the restore applies to Stokes Q
     too."""
-    import astroviper.processing_functions.imaging.image_continuum_single_field as continuum_processing
-
     reference = _image_continuum(processing_set, tmp_path / "none.img.zarr")
     psf_beam = reference.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.values
     np.testing.assert_array_equal(
@@ -386,15 +353,18 @@ def test_a_continuum_target_equal_to_the_psf_beam_restores_bit_for_bit(
     target = psf_beam.reshape(-1, 3)[0]
 
     received = []
-    restore = continuum_processing.restore_continuum_image
+    import importlib
+
+    finalizer = importlib.import_module(
+        "astroviper.processing_functions.imaging.finalize_image"
+    )
+    restore = finalizer.restore_finalized_image
 
     def recording_restore(*args, **kwargs):
         received.append(kwargs["restoring_beam"])
         return restore(*args, **kwargs)
 
-    monkeypatch.setattr(
-        continuum_processing, "restore_continuum_image", recording_restore
-    )
+    monkeypatch.setattr(finalizer, "restore_finalized_image", recording_restore)
     keep = ["sky_residual"]
     image = _image_continuum(
         processing_set,

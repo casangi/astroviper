@@ -19,6 +19,7 @@ def imaging_preparation_single_field(
     task_id=0,
     *,
     input_checked: bool = False,
+    restoring_beam=None,
 ):
     """Run the once-per-chunk imaging setup before the imaging cycle loop.
 
@@ -409,6 +410,28 @@ def imaging_preparation_single_field(
         using an input_params dictionary, its input_checked entry also carries this
         flag. Set it only for an unchanged configuration in the same imaging mode.
 
+    restoring_beam : list of float or None, optional
+        ``None`` restores each plane with its own PSF fit [CASA ``tclean``
+        ``restoringbeam=''``]. ``[major, minor, pa]`` (FWHM and position angle
+        in radians, as ``BEAM_FIT_PARAMS``; ``major >= minor > 0``,
+        ``|pa| <= pi``) restores every plane to that beam as ``tclean`` does
+        since CASA 5.6 (CAS-12148): the model is convolved with the unit-peak
+        target beam, and the residual with the Gaussian that takes the plane's
+        PSF beam to the target, times the ratio of the beam areas, so it is in
+        Jy per target beam. SKY_RESIDUAL records the residual at the target beam,
+        preserving the public restoration identity. A target that cannot contain
+        every native beam, or an undefined native beam, raises ValueError. Imaging
+        checks this immediately after fitting the PSF beam, before any model
+        update; standalone restoration checks its supplied beam metadata before
+        convolution. With primary-beam correction a restore cutoff below 1e-3 is
+        refused (``primary_beam_limit``; in cube imaging that of
+        ``cycle_control_params``, where 0 restores at 0.2): in the transform to
+        the target, the float32 rounding of the residual divided by the primary
+        beam, large near its nulls, would spread over the corrected image. The
+        beam is recorded as ``BEAM_FIT_PARAMS_SKY_RESTORED``. For
+        ``tclean``'s ``restoringbeam='common'``, see
+        :func:`~astroviper.processing_functions.image_analysis.common_beam.common_beam`.
+
     Returns
     -------
     controller : CycleController
@@ -488,6 +511,7 @@ def imaging_preparation_single_field(
         psf_fitting_method=psf_fitting_method,
         gridding_kernel_params=gridding_kernel_params,
         primary_beam_params=primary_beam_params,
+        restoring_beam=restoring_beam,
         input_checked=True,
     )
     T_setup = time.time() - start
@@ -870,13 +894,12 @@ def image_cube_single_field(
         since CASA 5.6 (CAS-12148): the model is convolved with the unit-peak
         target beam, and the residual with the Gaussian that takes the plane's
         PSF beam to the target, times the ratio of the beam areas, so it is in
-        Jy per target beam. ``SKY_RESIDUAL`` records the residual at the target beam, preserving the public restoration identity. A plane whose PSF
-        beam the target does not contain, or that has no PSF fit, keeps its
-        residual unconvolved and unscaled, as ``tclean`` does, and is named in a
-        warning. The continuum imager refuses a target that does not contain its
-        PSF beam, and any target when its PSF fit failed, right after that fit
-        in its first imaging cycle: the residual update has run, but no model
-        update. With primary-beam correction a restore cutoff below 1e-3 is
+        Jy per target beam. SKY_RESIDUAL records the residual at the target beam,
+        preserving the public restoration identity. A target that cannot contain
+        every native beam, or an undefined native beam, raises ValueError. Imaging
+        checks this immediately after fitting the PSF beam, before any model
+        update; standalone restoration checks its supplied beam metadata before
+        convolution. With primary-beam correction a restore cutoff below 1e-3 is
         refused (``primary_beam_limit``; in cube imaging that of
         ``cycle_control_params``, where 0 restores at 0.2): in the transform to
         the target, the float32 rounding of the residual divided by the primary
@@ -1142,6 +1165,7 @@ def image_cube_single_field(
         psf_fitting_method=psf_fitting_method,
         gridding_kernel_params=gridding_kernel_params,
         primary_beam_params=primary_beam_params,
+        restoring_beam=restoring_beam if restore else None,
         task_id=task_id,
         input_checked=True,
     )

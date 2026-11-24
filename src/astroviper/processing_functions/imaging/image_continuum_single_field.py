@@ -4610,13 +4610,12 @@ def restore_continuum_image(
         since CASA 5.6 (CAS-12148): the model is convolved with the unit-peak
         target beam, and the residual with the Gaussian that takes the plane's
         PSF beam to the target, times the ratio of the beam areas, so it is in
-        Jy per target beam. ``SKY_RESIDUAL`` records the residual at the target beam, preserving the public restoration identity. A plane whose PSF
-        beam the target does not contain, or that has no PSF fit, keeps its
-        residual unconvolved and unscaled, as ``tclean`` does, and is named in a
-        warning. The continuum imager refuses a target that does not contain its
-        PSF beam, and any target when its PSF fit failed, right after that fit
-        in its first imaging cycle: the residual update has run, but no model
-        update. With primary-beam correction a restore cutoff below 1e-3 is
+        Jy per target beam. SKY_RESIDUAL records the residual at the target beam,
+        preserving the public restoration identity. A target that cannot contain
+        every native beam, or an undefined native beam, raises ValueError. Imaging
+        checks this immediately after fitting the PSF beam, before any model
+        update; standalone restoration checks its supplied beam metadata before
+        convolution. With primary-beam correction a restore cutoff below 1e-3 is
         refused (``primary_beam_limit``; in cube imaging that of
         ``cycle_control_params``, where 0 restores at 0.2): in the transform to
         the target, the float32 rounding of the residual divided by the primary
@@ -4643,6 +4642,7 @@ def restore_continuum_image(
         Spectral diagnostics are calculated only by the separate analysis tool.
     """
     from astroviper.processing_functions.imaging.finalize_image import (
+        _restoring_beams,
         finalize_image_products,
         public_continuum_layout,
         restore_finalized_image,
@@ -4698,6 +4698,23 @@ def restore_continuum_image(
     mode = _resolve_restoration_continuum_mode(
         img_xds, img_xds[residual_name], continuum_mode
     )
+    if restoring_beam is not None:
+        from astroviper.processing_functions.imaging.restore import (
+            _correcting_transforms,
+        )
+
+        native_beam, _, _ = _restoring_beams(
+            img_xds,
+            image_data_group_in_residual_name,
+            img_xds[residual_name],
+            "beam_fit_params_point_spread_function",
+            0,
+        )
+        _correcting_transforms(
+            native_beam.values[:, :, 0],
+            restoring_beam,
+            abs(float(img_xds.l.values[1] - img_xds.l.values[0])),
+        )
     apparent_inputs = {} if restoration_output in ("apparent", "both") else None
     finalized = finalize_image_products(
         img_xds,

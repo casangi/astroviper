@@ -876,46 +876,27 @@ def test_continuum_target_equal_to_the_psf_beam_gives_the_none_result(
             np.testing.assert_array_equal(restored[1][name], restored[0][name])
 
 
-def test_mfs_target_that_does_not_contain_the_psf_beam_keeps_the_residual(
-    monkeypatch,
-):
-    """A direct call restores the model with the target and keeps the
-    residual; one warning names the planes."""
-    import toolviper.utils.logger as logger
+def test_mfs_impossible_target_raises_before_finalization(monkeypatch):
+    import importlib
 
-    from astroviper.processing_functions.imaging.restore import _restore_image_arrays
-
-    messages = []
-    monkeypatch.setattr(logger, "warning", messages.append)
-    image = _continuum_target_image(np.float64)
-    narrow = [5.0e-5, 1.5e-5, 0.3]
-    divided = {
-        name: _divide_taylor_polynomials(
-            image[name], image.PRIMARY_BEAM_TAYLOR, 0.2, **options
-        ).values
-        for name, options in (
-            ("SKY_MODEL", {"outside_value": 0.0}),
-            ("SKY_RESIDUAL", {}),
-        )
-    }
-    expected = _restore_image_arrays(
-        divided["SKY_RESIDUAL"],
-        divided["SKY_MODEL"],
-        np.broadcast_to(narrow, (1, 2, 1, 3)),
-        1.0e-5,
-        output="apparent",
-    )[0]["apparent"]
-
-    result, _ = restore_continuum_for_numerics(
-        image,
-        restoration_output="primary_beam_corrected",
-        restoring_beam=narrow,
-        continuum_mode="mfs",
+    finalizer = importlib.import_module(
+        "astroviper.processing_functions.imaging.finalize_image"
     )
 
-    np.testing.assert_array_equal(result.SKY_PRIMARY_BEAM_CORRECTED_RESTORED, expected)
-    assert len(set(messages)) == 1
-    assert "(0, 0)" in messages[0] and "(0, 1)" in messages[0]
+    def unexpected(*args, **kwargs):
+        pytest.fail("An invalid target must be rejected before finalization")
+
+    monkeypatch.setattr(finalizer, "finalize_image_products", unexpected)
+    image = _continuum_target_image(np.float64)
+    original = image.copy(deep=True)
+    with pytest.raises(ValueError, match="cannot be achieved"):
+        restore_continuum_for_numerics(
+            image,
+            restoration_output="primary_beam_corrected",
+            restoring_beam=[5e-5, 1.5e-5, 0.3],
+            continuum_mode="mfs",
+        )
+    xr.testing.assert_identical(image, original)
 
 
 def test_continuum_restored_beam_variable_holds_the_target():

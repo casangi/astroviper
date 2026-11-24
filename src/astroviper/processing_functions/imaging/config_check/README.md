@@ -109,9 +109,10 @@ imaging restores at `cycle_control_params['primary_beam_limit']`, or at 0.2
 for 0.
 `beam_fit_params_sky_restored` can be kept only with `restore=True`. Whether
 the target contains a plane's PSF beam, and whether that plane has a PSF fit,
-is known only after the PSF fit: the cube restore keeps the residual of such a
-plane unscaled and warns, and the continuum append node refuses the target
-right after its PSF fit.
+is known only after the PSF fit. Cube setup and the continuum append node
+reject an impossible target or a missing fit immediately after fitting the
+PSF, before any model update. Standalone restoration checks the supplied
+beam metadata before convolution.
 
 Output requests must match the selected workflow and restoration products.
 Restored images and spectral products require `restore=True`; alpha products
