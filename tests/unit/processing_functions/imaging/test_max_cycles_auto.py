@@ -17,6 +17,7 @@ made after every residual update on the residual it has just made.
 
 import copy
 import importlib
+import sys
 
 import numpy as np
 import pytest
@@ -577,6 +578,7 @@ def _image(
     restore=False,
     gridding_kernel_params=None,
     auto_mask_params=None,
+    fft_backend="scipy",
     **visibilities,
 ):
     from xradio.image import make_empty_sky_image
@@ -615,7 +617,7 @@ def _image(
         processing_set_data_group_name="base",
         deconvolver=deconvolver,
         single_precision_image=False,
-        fft_backend="scipy",
+        fft_backend=fft_backend,
         image_data_variables_keep=["sky_residual", "sky_model"],
         restore=restore,
         gridding_kernel_params=gridding_kernel_params,
@@ -624,6 +626,43 @@ def _image(
 
 
 STOKES_I, STOKES_Q = Key(time=0, pol=0, chan=0), Key(time=0, pol=1, chan=0)
+
+
+class TestFftBackend:
+    """The processing function hands its fft_backend to the FFT module."""
+
+    FUNCTIONS = ("fft2", "ifft2", "rfft2", "irfft2", "ifft", "irfft", "set_workers")
+
+    @classmethod
+    def backends(cls, monkeypatch, fft_backend, **arguments):
+        """(calling module, function, fft_backend) of every call of FUNCTIONS,
+        the FFT module's functions that take fft_backend."""
+        module = importlib.import_module("astroviper.processing_functions.fft")
+        seen = set()
+
+        def spy_of(name, real):
+            def spy(*args, **kwargs):
+                caller = sys._getframe(1).f_globals["__name__"].rsplit(".", 1)[-1]
+                seen.add((caller, name, kwargs["fft_backend"]))
+                return real(*args, **kwargs)
+
+            return spy
+
+        for name in cls.FUNCTIONS:
+            monkeypatch.setattr(module, name, spy_of(name, getattr(module, name)))
+        _image({"max_cycles": 2}, fft_backend=fft_backend, **arguments)
+        return seen
+
+    @pytest.mark.parametrize("fft_backend", ["numpy", "scipy", "pyfftw"])
+    def test_the_restore(self, monkeypatch, fft_backend):
+        """Every call of FUNCTIONS in a run that restores carries the
+        processing function's fft_backend; their callers are the gridder
+        normalization and the restore."""
+        seen = self.backends(monkeypatch, fft_backend, restore=True)
+        assert {backend for _, _, backend in seen} == {fft_backend}
+        assert {caller for caller, _, _ in seen} == {"normalize_image", "restore"}
+        restore = {name for caller, name, _ in seen if caller == "restore"}
+        assert restore == {"rfft2", "ifft", "irfft"}
 
 
 class TestAutoMaskFlag:

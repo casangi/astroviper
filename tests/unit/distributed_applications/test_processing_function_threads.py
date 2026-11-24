@@ -5,16 +5,14 @@ C++ kernel and Python FFT that takes a count, and resolves ``0``. Six runs of
 the cube, continuum and simulator applications give the same results with 1 and
 3 threads. The anti-alias gridders are left out of the identity: they add into
 shared grid cells with atomic adds, so their sums depend on the order of the
-threads (``test_anti_alias_grid_cpp.py``). Arrays written through scipy.fft
-compare within 8 eps of their peak: scipy's bits may depend on its worker count
-at some sizes. Small simulated inputs, 64 x 64 images, the synchronous
-scheduler.
+threads (``test_anti_alias_grid_cpp.py``). The MT-MFS spatial-Hessian check
+runs its FFTs on one thread. Small simulated inputs, 64 x 64 images, the
+synchronous scheduler.
 """
 
 import importlib
 import importlib.machinery
 import importlib.util
-import inspect
 import json
 import os
 import pkgutil
@@ -81,6 +79,12 @@ EXTENSIONS = {
     f"{PF}.image_analysis.psf_gaussian_fit_cpp._psf_gaussian_fit_ext",
     f"{PF}.simulation.visibility_kernel_cpp._visibility_kernel_ext",
 }
+# Callers that hand the FFT module one thread whatever the count.
+ONE_THREAD = {
+    f"{PF}.imaging.config_check._spatial_hessian.check_psf_spatial_hessian",
+}
+FFT = f"{PF}.fft"
+FFT_FUNCTIONS = ("fft2", "ifft2", "rfft2", "irfft2", "ifft", "irfft", "set_workers")
 HESSIAN_CALLERS = {
     f"{PF}.imaging.config_check.param_check_model_update.check_model_products",
     f"{PF}.imaging.image_continuum_single_field."
@@ -122,38 +126,32 @@ WEIGHTS = {
     "grid_imaging_weights_cpp.grid_imaging_weights",
     "grid_imaging_weights_cpp.degrid_imaging_weights",
 }
-FFTW_IFFT2 = "pyfftw.interfaces.scipy_fft.ifft2"
-FFTW_FFT2 = "pyfftw.interfaces.scipy_fft.fft2"
+FFTW_IFFT2 = "fft.ifft2[pyfftw]"
+FFTW_FFT2 = "fft.fft2[pyfftw]"
 GRIDDED_IMAGING = {AA_GRID, AA_UV_SAMPLING, AA_DEGRID, FFTW_IFFT2, FFTW_FFT2}
-RESTORE_AND_MASK = {
-    "scipy.fft.rfft2",
-    "scipy.fft.irfft2",
-    "scipy.fft.ifft",
-    "scipy.fft.irfft",
-    "scipy.fft.set_workers",
-}
+RESTORE = {"fft.rfft2[pyfftw]", "fft.ifft[pyfftw]", "fft.irfft[pyfftw]"}
+MASK_FFTS = {"fft.rfft2[scipy]", "fft.irfft2[scipy]", "fft.set_workers[scipy]"}
+SPATIAL_HESSIAN = {"fft.rfft2[numpy]"}
 MTMFS = {"mtmfs.clean", "mtmfs.hessian"}
 VISIBILITY_KERNEL = "visibility_kernel_cpp.calculate_visibilities"
 # The entry points each run reaches, and no others; R6's report runs the
 # point spread function application (uv sampling and ifft2).
 REACHED = {
-    "R1": GRIDDED_IMAGING | WEIGHTS | RESTORE_AND_MASK | {"hogbom.clean_cube"},
-    "R2": GRIDDED_IMAGING | WEIGHTS | RESTORE_AND_MASK | MTMFS,
+    "R1": GRIDDED_IMAGING | WEIGHTS | RESTORE | MASK_FFTS | {"hogbom.clean_cube"},
+    "R2": GRIDDED_IMAGING | WEIGHTS | RESTORE | MASK_FFTS | MTMFS | SPATIAL_HESSIAN,
     "R3": GRIDDED_IMAGING | {"hogbom.clean_cube"},
     "R4": WEIGHTS | {AA_UV_SAMPLING, FFTW_IFFT2, "_psf_gaussian_fit_ext.fit_psf_beam"},
     "R5": WEIGHTS | {AA_UV_SAMPLING, FFTW_IFFT2},
     "R6": {VISIBILITY_KERNEL, AA_DEGRID, FFTW_FFT2, AA_UV_SAMPLING, FFTW_IFFT2},
-    "R7": {"scipy.fft.fft2", "scipy.fft.ifft2"},
-    "I1": DFT_KERNELS | WEIGHTS | RESTORE_AND_MASK | {"hogbom.clean_cube"},
+    "R7": {"fft.fft2[scipy]", "fft.ifft2[scipy]"},
+    "I1": DFT_KERNELS | WEIGHTS | RESTORE | MASK_FFTS | {"hogbom.clean_cube"},
     "I2": DFT_KERNELS | {"hogbom.clean_cube_many_threads"},
     "I3": DFT_KERNELS | {"aspclean.clean_cube"},
-    "I4": DFT_KERNELS | MTMFS,
+    "I4": DFT_KERNELS | MTMFS | SPATIAL_HESSIAN,
     "I5": {VISIBILITY_KERNEL, DFT_PREDICT},
     "I6": {VISIBILITY_KERNEL, AA_DEGRID, FFTW_FFT2},
 }
 IDENTITY_RUNS = ("I1", "I2", "I3", "I4", "I5", "I6")
-# Written through scipy.fft by the restore.
-WITHIN_ROUNDING = {"I1": ("SKY_RESTORED", "SKY_RESTORED_PRIMARY_BEAM_CORRECTED")}
 
 
 def _signature_parameters(function):
@@ -187,9 +185,10 @@ class _Recorder:
     """Records (entry point, count, caller) of every call of an entry point.
 
     The callers read each native function at the attribute of ``NATIVE`` and
-    ``NO_COUNT``, and the FFTs at ``scipy.fft`` and
-    ``pyfftw.interfaces.scipy_fft``, at call time. An FFT called without
-    ``workers`` records ``scipy.fft.get_workers()``.
+    ``NO_COUNT``, and the FFT module's functions at ``FFT``, at call time; an
+    FFT is labelled with its ``fft_backend``. An FFT called without a count
+    records ``scipy.fft.get_workers()``, the count of the module's
+    ``set_workers``.
     """
 
     def __init__(self, monkeypatch):
@@ -205,27 +204,9 @@ class _Recorder:
                 )
                 label = f"{module_name.rsplit('.', 1)[-1]}.{name}"
                 monkeypatch.setattr(module, name, self._native(label, real, position))
-        for module_name in ("scipy.fft", "pyfftw.interfaces.scipy_fft"):
-            module = importlib.import_module(module_name)
-            for name in module.__all__:
-                real = getattr(module, name)
-                if name == "set_workers" or not callable(real):
-                    continue
-                try:
-                    parameters = list(inspect.signature(real).parameters)
-                except (TypeError, ValueError):
-                    continue
-                if "workers" in parameters:
-                    position = parameters.index("workers")
-                    wrapper = self._fft(f"{module_name}.{name}", real, position)
-                    monkeypatch.setattr(module, name, wrapper)
-        real_set_workers = scipy.fft.set_workers
-
-        def set_workers(workers):
-            self.calls.append(("scipy.fft.set_workers", workers, self._caller()))
-            return real_set_workers(workers)
-
-        monkeypatch.setattr(scipy.fft, "set_workers", set_workers)
+        module = importlib.import_module(FFT)
+        for name in FFT_FUNCTIONS:
+            monkeypatch.setattr(module, name, self._fft(name, getattr(module, name)))
 
     @staticmethod
     def _caller():
@@ -245,12 +226,15 @@ class _Recorder:
 
         return wrapper
 
-    def _fft(self, label, real, position):
+    def _fft(self, name, real):
         def wrapper(*args, **kwargs):
-            workers = kwargs.get(
-                "workers", args[position] if len(args) > position else None
-            )
-            count = scipy.fft.get_workers() if workers is None else workers
+            if name == "set_workers":
+                count = args[0] if args else kwargs[COUNT]
+            else:
+                count = kwargs.get(COUNT)
+            if count is None:
+                count = scipy.fft.get_workers()
+            label = f"fft.{name}[{kwargs['fft_backend']}]"
             self.calls.append((label, count, self._caller()))
             return real(*args, **kwargs)
 
@@ -566,16 +550,6 @@ def _same(a, b):
     return bool(np.array_equal(a, b, equal_nan=a.dtype.kind in "fc"))
 
 
-def _within_rounding(a, b):
-    if a.shape != b.shape or a.dtype != b.dtype:
-        return False
-    nan = np.isnan(b)
-    if not np.array_equal(np.isnan(a), nan):
-        return False
-    bound = 8 * np.finfo(b.dtype).eps * np.nanmax(np.abs(b))
-    return bool(np.all(np.abs(a[~nan] - b[~nan]) <= bound))
-
-
 def _record(result):
     """The model update record without the timings."""
     return {
@@ -615,14 +589,20 @@ def test_every_binding_with_a_count_is_listed():
 
 @pytest.mark.parametrize("run", sorted(RUNS))
 def test_every_entry_point_gets_the_count(run, three_thread_runs):
-    """A run at 3 threads hands 3 to every entry point it reaches, and reaches
-    exactly those of its row of REACHED."""
+    """A run at 3 threads hands 3 to every entry point it reaches, but in the
+    calls of ONE_THREAD's callers (at most 1), and reaches exactly those of its
+    row of REACHED."""
     outcome = three_thread_runs[run]
     assert outcome["error"] is None, repr(outcome["error"])
     calls = outcome["calls"]
     assert {label for label, _, _ in calls} == REACHED[run]
-    counts = {(label, count) for label, count, _ in calls if label != "mtmfs.hessian"}
+    counts = {
+        (label, count)
+        for label, count, caller in calls
+        if label != "mtmfs.hessian" and caller not in ONE_THREAD
+    }
     assert {count for _, count in counts} == {3}, sorted(counts, key=str)
+    assert {count for _, count, caller in calls if caller in ONE_THREAD} <= {1}
     hessian_callers = {caller for label, _, caller in calls if label == "mtmfs.hessian"}
     assert hessian_callers <= HESSIAN_CALLERS
     if run == "R6":
@@ -659,12 +639,16 @@ def test_the_count_is_recorded(three_thread_runs):
 
 @pytest.mark.parametrize("application", sorted(ZERO_RUNS))
 def test_zero_is_resolved(application, inputs, tmp_path, monkeypatch):
-    """With 3 CPUs and one worker thread, 0 becomes 3 for every entry point and
-    in the records."""
+    """With 3 CPUs and one worker thread, 0 becomes 3 for every entry point, but
+    in the calls of ONE_THREAD's callers, and in the records."""
     monkeypatch.setattr("dask.system.CPU_COUNT", 3)
     outcome = _recorded_run(ZERO_RUNS[application], inputs, 0, tmp_path)
     assert outcome["error"] is None, repr(outcome["error"])
-    counts = {count for label, count, _ in outcome["calls"] if label != "mtmfs.hessian"}
+    counts = {
+        count
+        for label, count, caller in outcome["calls"]
+        if label != "mtmfs.hessian" and caller not in ONE_THREAD
+    }
     assert counts == {3}
     if application in ("cube", "continuum", "simulator"):
         assert outcome["result"]["compute_resources"][COUNT] == 3
@@ -715,10 +699,7 @@ def test_one_and_three_threads_give_the_same_results(
     with xr.open_zarr(one_output) as a, xr.open_zarr(three["output"]) as b:
         assert sorted(a.data_vars) == sorted(b.data_vars)
         for name in a.data_vars:
-            if name in WITHIN_ROUNDING.get(run, ()):
-                assert _within_rounding(a[name].values, b[name].values), name
-            else:
-                assert _same(a[name].values, b[name].values), name
+            assert _same(a[name].values, b[name].values), name
     one_record, three_record = _record(one_result), _record(three["result"])
     assert one_record.keys() == three_record.keys() and one_record
     for key, value in one_record.items():

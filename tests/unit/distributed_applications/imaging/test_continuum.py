@@ -741,6 +741,7 @@ def _run_tw_hydra_continuum(
     clear_cache=True,
     scheduler="synchronous",
     processing_set_data_group_name="base",
+    fft_backend="pyfftw",
     image_data_variables_keep=(
         "sky_model",
         "sky_residual",
@@ -791,6 +792,7 @@ def _run_tw_hydra_continuum(
             processing_set_data_group_name=processing_set_data_group_name,
             single_precision_image=single_precision_image,
             processing_function_threads=1,
+            fft_backend=fft_backend,
             n_mapping_parallelism={"frequency": n_chunks},
             overwrite=True,
             memory_mode="in_memory",
@@ -2398,6 +2400,37 @@ def _run_wideband_scopes(tmp_path, store, continuum_mode, weighting, scopes):
             },
         )
     return images
+
+
+@pytest.mark.parametrize("fft_backend", ["numpy", "scipy", "pyfftw"])
+def test_the_restore_takes_the_application_fft_backend(
+    tmp_path, wideband_store, monkeypatch, fft_backend
+):
+    """The continuum application hands its fft_backend to the final restore."""
+    import astroviper.processing_functions.imaging.image_continuum_single_field as processing
+
+    received = []
+    original_restore = processing.restore_continuum_image
+
+    def recorded_restore(*args, **kwargs):
+        received.append(kwargs["fft_backend"])
+        return original_restore(*args, **kwargs)
+
+    monkeypatch.setattr(processing, "restore_continuum_image", recorded_restore)
+    _run_tw_hydra_continuum(
+        wideband_store,
+        tmp_path / "restored.img.zarr",
+        open_processing_set(str(wideband_store)),
+        1,
+        "mfs",
+        {"weighting": "natural"},
+        restore=True,
+        fft_backend=fft_backend,
+        image_param_overrides={
+            "cell_size": np.array([-8.0, 8.0]) * np.pi / (180 * 3600)
+        },
+    )
+    assert received == [fft_backend]
 
 
 @pytest.mark.parametrize(

@@ -2082,6 +2082,35 @@ def test_finalization_passes_mtmfs_to_restoration(monkeypatch):
     assert received["deconvolver"] == "mtmfs"
 
 
+@pytest.mark.parametrize("fft_backend", [None, "numpy", "scipy", "pyfftw"])
+def test_finalization_passes_its_fft_backend_to_restoration(monkeypatch, fft_backend):
+    """The finalize node hands fft_backend to the restore, "pyfftw" without one."""
+    image = _model_dataset(0.25).rename({"SKY_MODEL": "SKY_RESIDUAL"})
+    image.attrs["data_groups"] = {"residual": {"sky": "SKY_RESIDUAL"}}
+    received = {}
+
+    def fake_restore(image, **kwargs):
+        received.update(kwargs)
+        image["SKY_RESTORED_FLAT_NOISE"] = image["SKY_RESIDUAL"].copy()
+        return image, pd.DataFrame({"T_restore": [0.0]})
+
+    monkeypatch.setattr(continuum_processing, "restore_continuum_image", fake_restore)
+    params = {
+        "prepared_continuum_image": True,
+        "static_xds": xr.Dataset(),
+        "model_xds": _model_dataset(0.75),
+        "restore": True,
+        "deconvolver": "mtmfs",
+    }
+    if fft_backend is not None:
+        params["fft_backend"] = fft_backend
+    continuum_node.continuum_finalize_node(
+        {"image": image, "residual_converged": True}, params
+    )
+
+    assert received["fft_backend"] == (fft_backend or "pyfftw")
+
+
 def _acceleration_image(seed, scale=1.0):
     """Residual Taylor stacks in ``[scale / 2, scale)`` on two polarization planes."""
     rng = np.random.default_rng(seed)

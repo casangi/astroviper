@@ -3981,6 +3981,7 @@ def continuum_finalize_node(
             restoring_beam=input_params.get("restoring_beam"),
             continuum_mode=continuum_mode,
             input_checked=True,
+            fft_backend=input_params.get("fft_backend", "pyfftw"),
         )
 
         input_data["timing_restore"] = restore_timing_df.reset_index(drop=True)

@@ -1453,6 +1453,7 @@ def image_cube_single_field(
             primary_beam_limit=(
                 cycle_control_params.get("primary_beam_limit", 0.0) or 0.2
             ),
+            fft_backend=fft_backend,
         )
         accumulate_timing(timing, restore_return_df)
 

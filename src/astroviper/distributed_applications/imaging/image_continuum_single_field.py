@@ -4384,6 +4384,7 @@ def image_continuum_single_field(
                 "restoring_beam": input_params["restoring_beam"],
                 "primary_beam_limit": primary_beam_limit,
                 "processing_function_threads": processing_function_threads,
+                "fft_backend": fft_backend,
             }
             finalized, final_timings = compute_continuum_finalization_graph(
                 final_payload, final_params
