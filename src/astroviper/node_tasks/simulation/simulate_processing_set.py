@@ -63,6 +63,7 @@ def simulate_processing_set(
     sky_model_image: str | None = None,
     sky_model_image_predict: dict | None = None,
     io_engine: str = "chunk",
+    fft_backend: str = "pyfftw",
 ):
     """Simulate the visibilities of one time/frequency chunk and write them to disk.
 
@@ -224,6 +225,10 @@ def simulate_processing_set(
     implementation : {"numpy", "cpp"}
         Visibility kernel implementation: ``"cpp"`` (multithreaded C++, default) or
         ``"numpy"`` (vectorised NumPy reference).
+    fft_backend : {"numpy", "scipy", "pyfftw"}, default "pyfftw"
+        FFT library: ``"numpy"`` (``numpy.fft``), ``"scipy"`` (``scipy.fft``) or
+        ``"pyfftw"`` (FFTW through pyFFTW). The three round differently; the C++
+        kernels' FFTs do not use it.
     task_coords : dict
         Per-chunk coordinate mapping; ``task_coords[<parallel dim>]`` supplies
         this chunk's parallel coordinate values (``"data"``) and its
@@ -333,6 +338,7 @@ def simulate_processing_set(
         sky_components=components_chunk,
         sky_model_image=model_image,
         sky_model_image_predict=sky_model_image_predict,
+        fft_backend=fft_backend,
     )
     if not graph_mode:
         return xds

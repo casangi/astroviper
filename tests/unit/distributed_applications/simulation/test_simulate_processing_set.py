@@ -702,3 +702,64 @@ def test_io_engines_write_the_same_visibilities(tmp_path):
         np.testing.assert_array_equal(
             loaded["chunk"][name].values, loaded["xradio"][name].values, err_msg=name
         )
+
+
+def _gridded_sky_model_image(tmp_path):
+    from xradio.image import make_empty_sky_image, write_image
+
+    arcsec = np.pi / (180 * 3600)
+    image = make_empty_sky_image(
+        phase_center=PC[0],
+        image_size=[64, 64],
+        cell_size=[-10 * arcsec, 10 * arcsec],
+        frequency_coords=[3.2e9],
+        pol_coords=["I"],
+        time_coords=[0],
+    )
+    sky = np.zeros((1, 1, 1, 64, 64))
+    sky[0, 0, 0, 40, 20] = 2.0
+    image["SKY"] = (("time", "frequency", "polarization", "l", "m"), sky)
+    store = str(tmp_path / "model.img.zarr")
+    write_image(image, store, out_format="zarr", overwrite=True)
+    return store
+
+
+@pytest.mark.parametrize("fft_backend", ["numpy", "scipy", "pyfftw"])
+def test_the_fft_backend_reaches_the_gridded_prediction_and_the_report(
+    tmp_path, fft_backend, monkeypatch
+):
+    """With a sky model image predicted by gridding and an HTML report, every
+    transform of the FFT module, the prediction's and those of the report's
+    point spread function, runs in the library of the simulator's fft_backend."""
+    from astroviper.processing_functions import fft
+
+    seen = []
+    for name in ("fft2", "ifft2"):
+        real = getattr(fft, name)
+
+        def spy(*args, _real=real, _name=name, **kwargs):
+            seen.append((_name, kwargs["fft_backend"]))
+            return _real(*args, **kwargs)
+
+        monkeypatch.setattr(fft, name, spy)
+    result, _ = run(
+        tmp_path,
+        point_source_flux=None,
+        point_source_ra_dec=None,
+        sky_model_image=_gridded_sky_model_image(tmp_path),
+        sky_model_image_predict={"predict": "gridded"},
+        uvw_params={"w_term": False},
+        noise_params=None,
+        report="html",
+        fft_backend=fft_backend,
+    )
+    assert result["report"]
+    assert {name for name, _ in seen} == {"fft2", "ifft2"}
+    assert {value for _, value in seen} == {fft_backend}
+
+
+@pytest.mark.parametrize("fft_backend", ["SciPy", "fftw", "NumPy"])
+def test_unknown_fft_backend_is_refused(tmp_path, fft_backend):
+    with pytest.raises(AssertionError, match="fft_backend"):  # the param.json schema
+        run(tmp_path, fft_backend=fft_backend)
+    assert not (tmp_path / "vla_sim.ps.zarr").exists()

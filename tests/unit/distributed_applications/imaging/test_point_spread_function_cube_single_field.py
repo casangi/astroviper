@@ -263,3 +263,51 @@ def test_both_io_engines_and_fits_write_the_same_cube(tmp_path):
         rtol=0,
         atol=1e-12,
     )
+
+
+def _spy_fft_backends(monkeypatch):
+    """The fft_backend of every transform of the FFT module, in call order."""
+    from astroviper.processing_functions import fft
+
+    seen = []
+    for name in ("fft2", "ifft2"):
+        real = getattr(fft, name)
+
+        def spy(*args, _real=real, **kwargs):
+            seen.append(kwargs["fft_backend"])
+            return _real(*args, **kwargs)
+
+        monkeypatch.setattr(fft, name, spy)
+    return seen
+
+
+@pytest.mark.parametrize("fft_backend", ["numpy", "scipy", "pyfftw"])
+def test_the_fft_backend_reaches_the_transforms(ps_store, fft_backend, monkeypatch):
+    """The application hands fft_backend through its node tasks to the gridder
+    normalization: every transform of the FFT module runs in that library."""
+    from xradio.measurement_set import open_processing_set
+
+    seen = _spy_fft_backends(monkeypatch)
+    frequency_coords = open_processing_set(ps_store).xr_ps.get_freq_axis().values
+    psf_module.point_spread_function_cube_single_field(
+        ps_store,
+        _image_params(frequency_coords),
+        {"weighting": "natural"},
+        instrument_polarization_basis="circular",
+        processing_set_data_group_name="base",
+        fft_backend=fft_backend,
+    )
+    assert seen and set(seen) == {fft_backend}
+
+
+@pytest.mark.parametrize("fft_backend", ["SciPy", "fftw", "NumPy"])
+def test_an_unknown_fft_backend_is_refused(ps_store, fft_backend):
+    """The schema refuses a misspelt library before any work."""
+    with pytest.raises(AssertionError, match="fft_backend"):  # the param.json schema
+        psf_module.point_spread_function_cube_single_field(
+            ps_store,
+            _image_params([3e9]),
+            {"weighting": "natural"},
+            instrument_polarization_basis="circular",
+            fft_backend=fft_backend,
+        )

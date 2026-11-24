@@ -44,6 +44,7 @@
         "thread_info": { "type": ["dict"], "nullable": true },
         "check_schema": { "type": "boolean" },
         "monitor_resources_seconds": { "type": ["int", "float"], "nullable": true, "min": 0 },
-        "report": { "type": ["str"], "nullable": true, "allowed": ["html", "pdf", "notebook"] }
+        "report": { "type": ["str"], "nullable": true, "allowed": ["html", "pdf", "notebook"] },
+        "fft_backend": { "type": ["str"], "allowed": ["numpy", "pyfftw", "scipy"] }
     }
 }

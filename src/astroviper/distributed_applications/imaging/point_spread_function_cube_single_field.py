@@ -33,6 +33,7 @@ def point_spread_function_cube_single_field(
     mpi_cluster_setup: dict[str, Any] | None = None,
     io_engine: str = "chunk",
     output_image_format: str = "zarr",
+    fft_backend: str = "pyfftw",
     *,
     input_checked=False,
     gridder: str = "anti_alias",
@@ -215,6 +216,10 @@ def point_spread_function_cube_single_field(
     output_image_format : {"zarr", "fits"}, optional
         Format of ``image_store``: a Zarr store, or a directory with one FITS
         file per variable (``io_engine="chunk"`` only). Default ``"zarr"``.
+    fft_backend : {"numpy", "scipy", "pyfftw"}, default "pyfftw"
+        FFT library: ``"numpy"`` (``numpy.fft``), ``"scipy"`` (``scipy.fft``) or
+        ``"pyfftw"`` (FFTW through pyFFTW). The three round differently; the C++
+        kernels' FFTs do not use it.
     compute_backend : str
         Engine used to execute the map/reduce graph. ``"dask"`` (default) builds
         a ``dask.delayed`` graph with
@@ -526,6 +531,7 @@ def point_spread_function_cube_single_field(
     input_params["instrument_polarization_basis"] = instrument_polarization_basis
     input_params["single_precision_image"] = single_precision_image
     input_params["processing_function_threads"] = processing_function_threads
+    input_params["fft_backend"] = fft_backend
     input_params["psf_fitting_method"] = psf_fitting_method
     input_params["gridding_kernel_params"] = gridding_kernel_params
     input_params["gridder"] = gridder

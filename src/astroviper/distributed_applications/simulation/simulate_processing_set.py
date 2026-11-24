@@ -117,6 +117,7 @@ def simulate_processing_set(
     check_schema: bool = True,
     monitor_resources_seconds: float | None = None,
     report: str | None = None,
+    fft_backend: str = "pyfftw",
 ) -> dict:
     """Simulate the visibilities of a sky of analytic components and write them as an MSv4 processing set.
 
@@ -357,6 +358,10 @@ def simulate_processing_set(
         ``<name>_report_files`` next to the output store. It is made after
         the output is written: a failure while making it is logged and leaves
         the results intact. ``None`` (default): no report.
+    fft_backend : {"numpy", "scipy", "pyfftw"}, default "pyfftw"
+        FFT library: ``"numpy"`` (``numpy.fft``), ``"scipy"`` (``scipy.fft``) or
+        ``"pyfftw"`` (FFTW through pyFFTW). The three round differently; the C++
+        kernels' FFTs do not use it.
 
     Returns
     -------
@@ -712,6 +717,7 @@ def simulate_processing_set(
         "direction_frame": direction_frame,
         "processing_function_threads": processing_function_threads,
         "implementation": implementation,
+        "fft_backend": fft_backend,
     }
     # dish diameters are resolved here once so the node tasks never fail late
     dish_diameters_of_beam_models(beam_models)
@@ -832,6 +838,7 @@ def simulate_processing_set(
             compute_backend=compute_backend,
             mpi_cluster_setup=mpi_cluster_setup,
             thread_info=thread_info,
+            fft_backend=fft_backend,
         )
     return result
 

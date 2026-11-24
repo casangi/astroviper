@@ -38,6 +38,7 @@ def _sky_image_visibilities(
     pointing_ra_dec,
     w_term,
     processing_function_threads,
+    fft_backend,
 ):
     """Visibilities of ``sky_image`` through the one beam of every antenna."""
     from astroviper.processing_functions.simulation.antenna_beams import (
@@ -77,6 +78,7 @@ def _sky_image_visibilities(
         gridding_kernel_params=predict.get("gridding_kernel_params"),
         fft_padding=predict.get("fft_padding", 1.2),
         processing_function_threads=processing_function_threads,
+        fft_backend=fft_backend,
     )
 
 
@@ -118,6 +120,7 @@ def simulate_processing_set(
     sky_components: list | None = None,
     sky_model_image: xr.Dataset | None = None,
     sky_model_image_predict: dict | None = None,
+    fft_backend: str = "pyfftw",
 ) -> tuple[xr.Dataset, dict]:
     """Simulate the visibilities of a sky of analytic components for a block of times and channels.
 
@@ -280,6 +283,10 @@ def simulate_processing_set(
         ``{"predict": "gridded", "gridding_kernel_params": ...,
         "fft_padding": 1.2}``, FFT and degridding with an anti-aliasing kernel,
         which has no w term and so needs ``uvw_params["w_term"]`` False.
+    fft_backend : {"numpy", "scipy", "pyfftw"}, default "pyfftw"
+        FFT library: ``"numpy"`` (``numpy.fft``), ``"scipy"`` (``scipy.fft``) or
+        ``"pyfftw"`` (FFTW through pyFFTW). The three round differently; the C++
+        kernels' FFTs do not use it.
 
     Returns
     -------
@@ -379,6 +386,7 @@ def simulate_processing_set(
             pointing_ra_dec,
             uvw_params["w_term"],
             processing_function_threads,
+            fft_backend,
         )
         timing["T_sky_image"] = _time.time() - start
 

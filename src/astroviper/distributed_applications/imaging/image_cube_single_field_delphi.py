@@ -76,6 +76,7 @@ def image_cube_single_field_delphi(
     compute_backend: str = "dask",
     mpi_cluster_setup: dict[str, Any] | None = None,
     processing_function_threads: int = 1,
+    fft_backend: str = "pyfftw",
     *,
     input_checked=False,
 ) -> dict:
@@ -203,6 +204,10 @@ def image_cube_single_field_delphi(
         ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
         numpy.fft takes no count: under ``"numpy"`` the Python FFTs run one
         thread.
+    fft_backend : {"numpy", "scipy", "pyfftw"}, default "pyfftw"
+        FFT library: ``"numpy"`` (``numpy.fft``), ``"scipy"`` (``scipy.fft``) or
+        ``"pyfftw"`` (FFTW through pyFFTW). The three round differently; the C++
+        kernels' FFTs do not use it.
 
     input_checked : bool, optional
         Skip configuration checks already performed by the calling layer.
@@ -333,6 +338,7 @@ def image_cube_single_field_delphi(
         "primary_beam_params": primary_beam_params,
         "psf_fitting_method": PSF_FITTING_METHOD,
         "processing_function_threads": processing_function_threads,
+        "fft_backend": fft_backend,
         "compute_backend": compute_backend,
     }
     # graphviper arms teardown_force_exit_seconds at the end of a compute and
@@ -437,6 +443,7 @@ def image_cube_single_field_delphi(
         image_data_variables_keep=IMAGE_DATA_VARIABLES_KEEP,
         processing_set_data_group_name=processing_set_data_group_name,
         processing_function_threads=processing_function_threads,
+        fft_backend=fft_backend,
         n_mapping_parallelism=n_mapping_parallelism,
         overwrite=overwrite,
         restore=True,

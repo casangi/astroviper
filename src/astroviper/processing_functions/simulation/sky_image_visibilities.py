@@ -30,6 +30,7 @@ def sky_image_visibilities(
     gridding_kernel_params: dict | None = None,
     fft_padding: float = 1.2,
     processing_function_threads: int = 1,
+    fft_backend: str = "pyfftw",
 ) -> np.ndarray:
     """Visibilities of a Stokes sky image on the simulated baselines.
 
@@ -63,6 +64,8 @@ def sky_image_visibilities(
         FFT padding of ``predict="gridded"``.
     processing_function_threads : int, optional
         Threads of the prediction kernels.
+    fft_backend : {"numpy", "scipy", "pyfftw"}, default "pyfftw"
+        FFT library of ``predict="gridded"``.
 
     Returns
     -------
@@ -209,6 +212,7 @@ def sky_image_visibilities(
             processing_function_threads=processing_function_threads,
             complex_dtype=np.complex128,
             gcf_xds=kernel,
+            fft_backend=fft_backend,
         )
         get_visibility_grid_single_field(
             ms_xds,
