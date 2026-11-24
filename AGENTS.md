@@ -264,6 +264,19 @@ PSF beam fit is switchable
 `processing_functions/image_analysis/psf_gaussian_fit_cpp/`) that reproduces
 `tclean`'s restoring beam exactly on the same PSF.
 
+**FFTs in Python.** Every FFT done in Python (the gridder normalization, the
+restore, the automatic mask, the MT-MFS spatial-Hessian check, the Zernike beams
+and the fringe fit) goes through `processing_functions/fft.py`, in the library
+`fft_backend` names: `"numpy"`, `"scipy"` or `"pyfftw"`; the three round
+differently. The shifts (and their fold into sign checkerboards on even axes),
+the frequencies and `next_fast_len`, which also sizes the gridders' grids
+(`processing_functions/imaging/utils/fft_sizing.py`), do not depend on it. No
+other module imports `numpy.fft`, `scipy.fft`, `scipy.fftpack` or pyFFTW, or a
+scipy.signal or astropy function that transforms inside (the list is in
+`tests/unit/test_fft_module_rule.py`); `check_fft_backend` imports the library
+by name to check that it is installed. The deconvolvers' C++ kernels transform
+with pocketfft through `processing_functions/include/fft.hpp`.
+
 **PSF of twice the image size.** The PSF that `exact_psf_subtraction`
 subtracts (cube Hogbom only; Asp and continuum imaging refuse the option)
 has twice the `l` and `m` extents of `img_xds`, so it cannot share its
@@ -548,7 +561,11 @@ match them in any new kernel:
    beam, which sums the model and residual spectra before one inverse); numpy
    and pyFFTW read it through one aligned row. The automatic mask's padded
    transforms take three padded planes under every option, pyFFTW's through
-   direct plans.
+   direct plans. Under `"pyfftw"` the Zernike beams and the fringe search go
+   through pyFFTW's interface: 4 and 3 output planes when it plans, 3 and 2
+   after, against 2 under `"numpy"` and `"scipy"`. The MT-MFS spatial-Hessian
+   check takes scipy's peak under every option, plus numpy's double-precision
+   copies of a block of 8 lines in single precision.
 3. **In-place output.** Accumulators (`grid`, `normalization`) and CLEAN buffers
    (residual/model cubes) are written through `mutable_data()` pointers; they
    are *not* returned. Repeated calls accumulate (e.g. summing over MSes).
@@ -585,7 +602,8 @@ match them in any new kernel:
    `"pyfftw"`, takes it as an unsigned int (a negative count raises `OverflowError`);
    the direct `pyfftw.FFTW` plans of the restore and the automatic mask read it as
    scipy.fft does; numpy.fft takes no count: under `"numpy"` the Python FFTs run one
-   thread. Outside the count are the
+   thread. The MT-MFS spatial-Hessian check, the Zernike beams and the fringe fit,
+   which have no count, run one thread. Outside the count are the
    BLAS and OpenMP threads of NumPy and SciPy, and the I/O threads of the chunk
    reads, which read up to the count of arrays at once, each with its own pool of up
    to `_READ_CONCURRENCY` threads (`utils/chunk_io/zarr_chunks.py`). Concurrent

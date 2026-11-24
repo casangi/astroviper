@@ -139,6 +139,7 @@ def _target_files():
         "processing_functions/imaging/config_check/param_check_residual_update.py",
         "processing_functions/imaging/config_check/param_check_model_update.py",
         "processing_functions/imaging/config_check/param_check_driver_workflow.py",
+        "processing_functions/imaging/config_check/_spatial_hessian.py",
         "processing_functions/imaging/imaging_setup/make_point_spread_function.py",
         "processing_functions/imaging/residual_update/make_undeconvolved_image.py",
         "processing_functions/imaging/gridders/anti_alias/degrid_visibility_grid.py",

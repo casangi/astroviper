@@ -35,6 +35,7 @@ import numpy as np
 import xarray as xr
 from scipy.special import jn_zeros
 
+from astroviper.processing_functions import fft
 from astroviper.processing_functions.imaging.primary_beam.airy_disk import (
     CASA_AIRY_N_SAMPLE,
     CASA_AIRY_TWIDDLE,  # noqa: F401  (re-exported; part of the public API)
@@ -297,6 +298,7 @@ def make_zernike_jones_beam(
     parallactic_angle: np.ndarray,
     frequency: np.ndarray,
     beam_params: dict | None = None,
+    fft_backend: str = "numpy",
 ) -> xr.Dataset:
     """Jones beam images from Zernike aperture coefficients.
 
@@ -317,6 +319,8 @@ def make_zernike_jones_beam(
     beam_params : dict, optional
         ``mueller_selection`` (decides which Jones elements are needed),
         ``image_size``, ``fov_scaling``, ``zernike_freq_interp``.
+    fft_backend : {"numpy", "scipy", "pyfftw"}, default "numpy"
+        FFT library of the inverse transform of the aperture.
 
     Returns
     -------
@@ -381,8 +385,12 @@ def make_zernike_jones_beam(
                 aperture[outside] = 0.0
                 plane = np.zeros((image_size[0], image_size[1]), dtype=np.complex128)
                 plane[sl_l, sl_m] = aperture
-                jones[i_pa, i_chan, i_pol] = np.fft.fftshift(
-                    np.fft.ifft2(np.fft.ifftshift(plane))
+                jones[i_pa, i_chan, i_pol] = fft.fftshift(
+                    fft.ifft2(
+                        fft.ifftshift(plane),
+                        processing_function_threads=1,
+                        fft_backend=fft_backend,
+                    )
                 ) / (image_size[0] * image_size[1])
             abs_max = np.abs(jones[i_pa, i_chan]).max(axis=(1, 2))
             has_p = 0 in needed_pol
@@ -507,6 +515,7 @@ def evaluate_beam_models(
     site_position: np.ndarray,
     beam_params: dict | None = None,
     direction_frame: str = "icrs",
+    fft_backend: str = "numpy",
 ) -> tuple[list, np.ndarray]:
     """Prepare beam models for a chunk: parallactic angles and Zernike → Jones images.
 
@@ -533,6 +542,8 @@ def evaluate_beam_models(
     site_position : np.ndarray, [3], metres (ITRF)
     beam_params : dict, optional
     direction_frame : str
+    fft_backend : {"numpy", "scipy", "pyfftw"}, default "numpy"
+        FFT library of :func:`make_zernike_jones_beam`.
 
     Returns
     -------
@@ -559,7 +570,9 @@ def evaluate_beam_models(
     for model, kind in zip(models, kinds, strict=True):
         if kind == "aperture_polynomial_coefficients":
             evaluated.append(
-                make_zernike_jones_beam(model, pa_subset, frequency, params)
+                make_zernike_jones_beam(
+                    model, pa_subset, frequency, params, fft_backend
+                )
             )
         elif kind == "beam_polynomial_coefficients":
             evaluated.append(

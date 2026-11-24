@@ -532,3 +532,36 @@ def test_gaussian_requires_valid_integer_extents_and_angular_cells(size, cells):
             cell_size=cells,
             precision="float64",
         )
+
+
+@pytest.mark.parametrize("fft_backend", ["numpy", "scipy", "pyfftw"])
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_each_fft_backend_transforms_the_psf_to_rounding(
+    dtype, fft_backend, monkeypatch
+):
+    """The check transforms each PSF order in the library of its fft_backend, on
+    one thread, in the precision of the PSF and within 8 eps of the peak of
+    numpy.fft's own transform."""
+    from astroviper.processing_functions import fft
+
+    rng = np.random.default_rng(7)
+    psfs = (coupled_psfs(size=64) + 1e-3 * rng.standard_normal((3, 64, 64))).astype(
+        dtype
+    )
+    calls = []
+    real = fft.rfft2
+
+    def spy(x, **kwargs):
+        result = real(x, **kwargs)
+        calls.append((x.copy(), result.copy(), kwargs))
+        return result
+
+    monkeypatch.setattr(fft, "rfft2", spy)
+    check_psf_spatial_hessian(psfs, precision="float64", fft_backend=fft_backend)
+    assert len(calls) == 3
+    for x, result, kwargs in calls:
+        assert kwargs == {"processing_function_threads": 1, "fft_backend": fft_backend}
+        expected = np.fft.rfft2(x)
+        assert result.dtype == expected.dtype
+        bound = 8 * np.finfo(dtype).eps * np.abs(expected).max()
+        assert np.abs(result - expected).max() <= bound
