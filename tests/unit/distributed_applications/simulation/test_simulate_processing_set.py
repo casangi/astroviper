@@ -1,5 +1,7 @@
 """Full-stack tests of the simulate_processing_set distributed application."""
 
+import sys
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -756,6 +758,37 @@ def test_the_fft_backend_reaches_the_gridded_prediction_and_the_report(
     assert result["report"]
     assert {name for name, _ in seen} == {"fft2", "ifft2"}
     assert {value for _, value in seen} == {fft_backend}
+
+
+@pytest.mark.parametrize("fft_backend", ["numpy", "scipy", "pyfftw"])
+def test_zernike_beams_take_the_simulator_fft_backend(
+    tmp_path, monkeypatch, fft_backend
+):
+    """In a run with point sources and aperture-coefficient (Zernike) beams,
+    every ifft2 call of the FFT module comes from make_zernike_jones_beam, in
+    the simulator's fft_backend, on one thread."""
+    from astroviper.processing_functions import fft
+
+    calls = []
+    real = fft.ifft2
+
+    def spy(*args, **kwargs):
+        caller = sys._getframe(1).f_code.co_name
+        calls.append(
+            (caller, kwargs["fft_backend"], kwargs["processing_function_threads"])
+        )
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(fft, "ifft2", spy)
+    run(
+        tmp_path,
+        beam_models=[
+            read_aperture_polynomial_coefficients("EVLA_avg_zcoeffs_SBand_lookup")
+        ],
+        beam_params={"image_size": [64, 64]},
+        fft_backend=fft_backend,
+    )
+    assert calls and set(calls) == {("make_zernike_jones_beam", fft_backend, 1)}
 
 
 @pytest.mark.parametrize("fft_backend", ["SciPy", "fftw", "NumPy"])

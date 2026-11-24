@@ -338,6 +338,7 @@ def simulate_processing_set(
         site_position,
         params,
         direction_frame,
+        fft_backend=fft_backend,
     )
     packed_models = pack_beam_models(evaluated_models)
     timing["T_beams"] = _time.time() - start
