@@ -40,7 +40,7 @@ def next_fft_friendly_size(target, even=False):
     >>> next_fft_friendly_size(13500)       # already 2**2 * 3**3 * 5**3
     13500
     >>> next_fft_friendly_size(1001, even=True)
-    1008
+    1024
     """
     target = int(target)
     if target <= 0:

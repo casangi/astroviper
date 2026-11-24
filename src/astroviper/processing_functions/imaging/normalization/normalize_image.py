@@ -125,7 +125,7 @@ def ifft_norm_img_xds(
         worker.  Set to a higher value only when calling outside of a dask
         context (e.g. in a notebook or test).
     fft_backend : {"numpy", "scipy", "pyfftw"}, optional
-        FFT library to use.  Default is ``"scipy"``.  Use ``"pyfftw"`` for
+        FFT library to use.  Default is ``"pyfftw"``.  Use ``"pyfftw"`` for
         potentially faster transforms when pyfftw is installed; plan caching
         is especially beneficial when the same grid shape is transformed
         repeatedly across imaging cycles.
