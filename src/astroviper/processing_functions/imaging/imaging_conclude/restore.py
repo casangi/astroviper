@@ -1,8 +1,8 @@
 import numpy as np
-import scipy.fft
 import toolviper.utils.logger as logger
 import xarray as xr
 
+from astroviper.processing_functions import fft
 from astroviper.utils.data_group_tools import (
     create_data_groups_in_and_out,
     modify_data_groups_xds,
@@ -150,8 +150,10 @@ def _elliptical_gaussian_kernel(ny, nx, major_fwhm_pix, minor_fwhm_pix, pa, dtyp
     return u.astype(dtype, copy=False)
 
 
-def _inverse_rfft2(spectrum, shape, workers):
-    """``scipy.fft.irfft2(spectrum, s=shape, workers=workers)``, element for
+def _inverse_rfft2(spectrum, shape, workers, fft_backend="scipy"):
+    """The inverse real transform of ``spectrum`` to ``shape`` in the library
+    ``fft_backend`` names; under ``"scipy"``
+    ``scipy.fft.irfft2(spectrum, s=shape, workers=workers)``, element for
     element, without its hidden temporary. ``spectrum`` is overwritten.
 
     scipy's two-axis inverse real FFT (pocketfft in scipy 1.17, ducc0 in
@@ -166,15 +168,29 @@ def _inverse_rfft2(spectrum, shape, workers):
     the same result, without the temporary.
     """
     ny, nx = shape
-    spectrum = scipy.fft.ifft(
-        spectrum, axis=-2, norm="forward", overwrite_x=True, workers=workers
+    spectrum = fft.ifft(
+        spectrum,
+        axis=-2,
+        norm="forward",
+        overwrite_x=True,
+        processing_function_threads=workers,
+        fft_backend=fft_backend,
     )
-    image = scipy.fft.irfft(spectrum, n=nx, axis=-1, norm="forward", workers=workers)
+    image = fft.irfft(
+        spectrum,
+        n=nx,
+        axis=-1,
+        norm="forward",
+        processing_function_threads=workers,
+        fft_backend=fft_backend,
+    )
     image *= image.dtype.type(np.longdouble(1) / np.longdouble(ny * nx))
     return image
 
 
-def _clean_beam_kernel_ft(beam_params, ny, nx, delta, dtype, workers):
+def _clean_beam_kernel_ft(
+    beam_params, ny, nx, delta, dtype, workers, fft_backend="scipy"
+):
     """FFT of the centred clean beam of one frequency, ``None`` without a beam.
 
     ``beam_params`` are ``[major, minor, pa]`` (FWHM and position angle in
@@ -188,10 +204,14 @@ def _clean_beam_kernel_ft(beam_params, ny, nx, delta, dtype, workers):
         ny, nx, major / delta, minor / delta, pa, dtype
     )
     # centre shifted to the origin; only the transform is kept
-    return scipy.fft.rfft2(scipy.fft.ifftshift(kernel), workers=workers)
+    return fft.rfft2(
+        fft.ifftshift(kernel),
+        processing_function_threads=workers,
+        fft_backend=fft_backend,
+    )
 
 
-def _convolve_with_clean_beam(plane, kernel_ft, workers):
+def _convolve_with_clean_beam(plane, kernel_ft, workers, fft_backend="scipy"):
     """``plane`` convolved with the clean beam whose transform is ``kernel_ft``.
 
     A real FFT at the dtype of the plane; the spectrum is multiplied in place
@@ -199,9 +219,11 @@ def _convolve_with_clean_beam(plane, kernel_ft, workers):
     spectrum and the output are live besides the plane.
     """
     ny, nx = plane.shape
-    plane_ft = scipy.fft.rfft2(plane, workers=workers)
+    plane_ft = fft.rfft2(
+        plane, processing_function_threads=workers, fft_backend=fft_backend
+    )
     np.multiply(plane_ft, kernel_ft, out=plane_ft)
-    return _inverse_rfft2(plane_ft, (ny, nx), workers)
+    return _inverse_rfft2(plane_ft, (ny, nx), workers, fft_backend)
 
 
 def _multiply_by_correcting_transform(spectrum, covariance_pixels, area_ratio, nx):
@@ -217,8 +239,8 @@ def _multiply_by_correcting_transform(spectrum, covariance_pixels, area_ratio, n
     neither it nor its products with the spectrum are subnormal (slow on x86).
     """
     (c00, c01), (_, c11) = covariance_pixels
-    f0 = scipy.fft.fftfreq(spectrum.shape[0])
-    f1 = scipy.fft.rfftfreq(nx)
+    f0 = fft.fftfreq(spectrum.shape[0])
+    f1 = fft.rfftfreq(nx)
     cross = 2.0 * c01 * f1
     along_m = c11 * f1 * f1
     real = np.finfo(spectrum.dtype)
@@ -237,18 +259,21 @@ def _multiply_by_correcting_transform(spectrum, covariance_pixels, area_ratio, n
         spectrum[start : start + rows.size] *= block.astype(real.dtype, copy=False)
 
 
-def _correcting_spectrum(residual_plane, covariance_pixels, area_ratio, workers):
+def _correcting_spectrum(
+    residual_plane, covariance_pixels, area_ratio, workers, fft_backend="scipy"
+):
     """``rfft2`` of a residual plane times the correcting transform.
 
     Non-finite residual pixels are zero for the transform, in a copy freed
     right after it. Returns the spectrum and whether every pixel is finite.
     """
     finite = bool(np.isfinite(residual_plane).all())
-    spectrum = scipy.fft.rfft2(
+    spectrum = fft.rfft2(
         residual_plane
         if finite
         else np.where(np.isfinite(residual_plane), residual_plane, 0),
-        workers=workers,
+        processing_function_threads=workers,
+        fft_backend=fft_backend,
     )
     _multiply_by_correcting_transform(
         spectrum, covariance_pixels, area_ratio, residual_plane.shape[1]
@@ -256,7 +281,9 @@ def _correcting_spectrum(residual_plane, covariance_pixels, area_ratio, workers)
     return spectrum, finite
 
 
-def _residual_to_beam(residual_plane, covariance_pixels, area_ratio, workers):
+def _residual_to_beam(
+    residual_plane, covariance_pixels, area_ratio, workers, fft_backend="scipy"
+):
     """``R (*) K``: a residual plane taken to the target beam, as a new plane.
 
     ``D = 0`` scales the residual by the area ratio without a transform.
@@ -265,15 +292,16 @@ def _residual_to_beam(residual_plane, covariance_pixels, area_ratio, workers):
     if not covariance_pixels.any():
         return residual_plane * residual_plane.dtype.type(area_ratio)
     spectrum, finite = _correcting_spectrum(
-        residual_plane, covariance_pixels, area_ratio, workers
+        residual_plane, covariance_pixels, area_ratio, workers, fft_backend
     )
-    plane = _inverse_rfft2(spectrum, residual_plane.shape, workers)
+    plane = _inverse_rfft2(spectrum, residual_plane.shape, workers, fft_backend)
     del spectrum
     if not finite:
         plane[~np.isfinite(residual_plane)] = np.nan
     return plane
 
 
+@shares_param_docs
 def primary_beam_corrected_plane(
     primary_beam_plane,
     primary_beam_limit,
@@ -282,6 +310,7 @@ def primary_beam_corrected_plane(
     kernel_ft=None,
     workers=1,
     out=None,
+    fft_backend="scipy",
 ):
     """One plane of the primary beam corrected restored image.
 
@@ -312,10 +341,14 @@ def primary_beam_corrected_plane(
         ``None`` (no clean beam) leaves the divided model unconvolved, as the
         restore step leaves the model unrestored.
     workers : int, optional
-        Threads handed to ``scipy.fft``.
+        Threads handed to the library of ``fft_backend``; ``"numpy"`` runs one.
     out : numpy.ndarray, optional
         Plane, at the dtype of the residual plane, the result is written to;
         a new one by default.
+    fft_backend : {"numpy", "scipy", "pyfftw"}, default "scipy"
+        FFT library: ``"numpy"`` (``numpy.fft``), ``"scipy"`` (``scipy.fft``) or
+        ``"pyfftw"`` (FFTW through pyFFTW). The three round differently; the C++
+        kernels' FFTs do not use it.
 
     Returns
     -------
@@ -336,7 +369,9 @@ def primary_beam_corrected_plane(
     convolve = kernel_ft is not None and out.any()
     if convolve:
         # only the spectrum of the divided model is kept; ``out`` is reused
-        scaled = scipy.fft.rfft2(out, workers=workers)
+        scaled = fft.rfft2(
+            out, processing_function_threads=workers, fft_backend=fft_backend
+        )
         np.multiply(scaled, kernel_ft, out=scaled)
     else:
         scaled = out.copy()
@@ -344,7 +379,7 @@ def primary_beam_corrected_plane(
     np.divide(residual_plane, primary_beam_plane, out=out, where=inside)
     del inside
     if convolve:
-        scaled = _inverse_rfft2(scaled, out.shape, workers)
+        scaled = _inverse_rfft2(scaled, out.shape, workers, fft_backend)
     # NaN outside the cutoff stays NaN
     out += scaled
     return out
@@ -582,6 +617,7 @@ def _restore_plane_to_beam(
     corrected_plane=None,
     primary_beam_plane=None,
     primary_beam_limit=0.2,
+    fft_backend="scipy",
 ):
     """Restore one plane to the target beam into the given output planes.
 
@@ -615,14 +651,20 @@ def _restore_plane_to_beam(
     if corrected_plane is None and covariance_pixels.any():
         # One inverse transform of rfft2(R) H + rfft2(M) B_T.
         spectrum, finite = _correcting_spectrum(
-            residual_plane, covariance_pixels, area_ratio, workers
+            residual_plane, covariance_pixels, area_ratio, workers, fft_backend
         )
         if convolve_model:
-            model_spectrum = scipy.fft.rfft2(model_plane, workers=workers)
+            model_spectrum = fft.rfft2(
+                model_plane,
+                processing_function_threads=workers,
+                fft_backend=fft_backend,
+            )
             model_spectrum *= kernel_ft
             spectrum += model_spectrum
             del model_spectrum
-        apparent_plane[...] = _inverse_rfft2(spectrum, apparent_plane.shape, workers)
+        apparent_plane[...] = _inverse_rfft2(
+            spectrum, apparent_plane.shape, workers, fft_backend
+        )
         del spectrum
         if not finite:
             apparent_plane[~np.isfinite(residual_plane)] = np.nan
@@ -640,7 +682,7 @@ def _restore_plane_to_beam(
         )
         if kernel_ft is not None and corrected_plane.any():
             corrected_plane[...] = _convolve_with_clean_beam(
-                corrected_plane, kernel_ft, workers
+                corrected_plane, kernel_ft, workers, fft_backend
             )
         quotient = np.full_like(corrected_plane, np.nan)
         np.divide(
@@ -654,12 +696,18 @@ def _restore_plane_to_beam(
             corrected_plane[blank] = np.nan
             quotient[blank] = 0
             del blank
-            spectrum = scipy.fft.rfft2(quotient, workers=workers)
+            spectrum = fft.rfft2(
+                quotient,
+                processing_function_threads=workers,
+                fft_backend=fft_backend,
+            )
             del quotient
             _multiply_by_correcting_transform(
                 spectrum, covariance_pixels, area_ratio, corrected_plane.shape[1]
             )
-            corrected_plane += _inverse_rfft2(spectrum, corrected_plane.shape, workers)
+            corrected_plane += _inverse_rfft2(
+                spectrum, corrected_plane.shape, workers, fft_backend
+            )
             del spectrum
         else:
             quotient *= quotient.dtype.type(area_ratio)
@@ -669,12 +717,12 @@ def _restore_plane_to_beam(
     if apparent_plane is not None:
         if convolve_model:
             apparent_plane[...] = _convolve_with_clean_beam(
-                model_plane, kernel_ft, workers
+                model_plane, kernel_ft, workers, fft_backend
             )
         else:
             apparent_plane.fill(0)
         apparent_plane += _residual_to_beam(
-            residual_plane, covariance_pixels, area_ratio, workers
+            residual_plane, covariance_pixels, area_ratio, workers, fft_backend
         )
     return corrected_seconds
 
@@ -691,6 +739,7 @@ def _restore_image_arrays(
     consume_model=False,
     restoring_beam=None,
     plane_coordinate=None,
+    fft_backend="scipy",
 ):
     """Restore generic image planes without assuming an axis coordinate name.
 
@@ -714,9 +763,10 @@ def _restore_image_arrays(
     pixel_size : float
         Absolute image-cell size in radians.
     processing_function_threads : int, optional
-        Number of workers supplied to SciPy FFT operations, as given: SciPy
-        refuses ``0`` and reads a negative ``n`` (down to
-        ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
+        Threads of the transforms, handed to the library of ``fft_backend`` as
+        given: scipy.fft and pyFFTW refuse ``0`` and read a negative ``n``
+        (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``;
+        ``"numpy"`` runs one thread.
     primary_beam : numpy.ndarray, optional
         Primary-beam power with the same image-plane layout as ``residual``.
         Required for a primary-beam-corrected output.
@@ -733,6 +783,8 @@ def _restore_image_arrays(
         ``(name, values)`` of the plane axis, by which the warning of
         :func:`_correcting_transforms` names the planes; their indices by
         default.
+    fft_backend : {"numpy", "scipy", "pyfftw"}, default "scipy"
+        FFT library of the transforms.
 
     Returns
     -------
@@ -796,7 +848,13 @@ def _restore_image_arrays(
     if restoring_beam is not None:
         target_kernel_ft = (
             _clean_beam_kernel_ft(
-                restoring_beam, ny, nx, pixel_size, residual.dtype, workers
+                restoring_beam,
+                ny,
+                nx,
+                pixel_size,
+                residual.dtype,
+                workers,
+                fft_backend,
             )
             if model.any()
             else None
@@ -815,6 +873,7 @@ def _restore_image_arrays(
                     pixel_size,
                     residual.dtype,
                     workers,
+                    fft_backend,
                 )
                 transform = None
             else:
@@ -851,6 +910,7 @@ def _restore_image_arrays(
                             else None
                         ),
                         primary_beam_limit=primary_beam_limit,
+                        fft_backend=fft_backend,
                     )
                     continue
                 # Corrected restoration must precede an apparent restoration
@@ -868,6 +928,7 @@ def _restore_image_arrays(
                         kernel_ft=kernel_ft,
                         workers=workers,
                         out=corrected[time_index, plane_index, polarization_index],
+                        fft_backend=fft_backend,
                     )
                     corrected_seconds += time.time() - start
 
@@ -880,7 +941,7 @@ def _restore_image_arrays(
                         apparent_plane[...] = residual_plane
                     else:
                         apparent_plane[...] = _convolve_with_clean_beam(
-                            model_plane, kernel_ft, workers
+                            model_plane, kernel_ft, workers, fft_backend
                         )
                         apparent_plane += residual_plane
                     apparent_seconds += time.time() - start
@@ -984,6 +1045,7 @@ def restore_image(
     primary_beam_limit: float = 0.2,
     primary_beam_key: str = "primary_beam",
     overwrite: bool = True,
+    fft_backend: str = "scipy",
     *,
     input_checked: bool = False,
 ):
@@ -1020,10 +1082,11 @@ def restore_image(
     Efficiency
     ----------
     The work is done plane by plane so no full-cube temporaries are allocated
-    beyond the requested restored cubes.  The convolution is a real FFT
-    (``scipy.fft.rfft2`` / ``irfft2``, the inverse done in two in-place steps
-    that give the same result without scipy's hidden copy of the spectrum,
-    see ``_inverse_rfft2``) at the image dtype (single-precision
+    beyond the requested restored cubes.  The convolution is a real FFT in
+    the library of ``fft_backend`` (the inverse done in two steps, the first
+    in place, which under ``"scipy"`` give ``scipy.fft.irfft2``'s result
+    without its hidden copy of the spectrum, see ``_inverse_rfft2``) at the
+    image dtype (single-precision
     images stay single precision), and the clean beam's FFT is computed once per
     frequency and reused for every polarization (the beam plane itself is freed
     as soon as it is transformed).  Per polarization at most two extra planes
@@ -1147,6 +1210,10 @@ def restore_image(
     overwrite : bool, optional
         If ``True`` an existing restored data group / output variable is
         overwritten.  Default ``True``.
+    fft_backend : {"numpy", "scipy", "pyfftw"}, default "scipy"
+        FFT library: ``"numpy"`` (``numpy.fft``), ``"scipy"`` (``scipy.fft``) or
+        ``"pyfftw"`` (FFTW through pyFFTW). The three round differently; the C++
+        kernels' FFTs do not use it.
 
     Returns
     -------
@@ -1193,6 +1260,9 @@ def restore_image(
     import pandas as pd
 
     if not input_checked:
+        from astroviper.processing_functions.imaging.config_check._common import (
+            check_fft_backend,
+        )
         from astroviper.processing_functions.imaging.config_check._predicates import (
             check_primary_beam_limit,
             check_restoration_output,
@@ -1202,6 +1272,7 @@ def restore_image(
         )
 
         check_restoration_output(restoration_output)
+        check_fft_backend(fft_backend)
         check_primary_beam_limit(primary_beam_limit)
         if restoring_beam is not None:
             check_restoring_beam(restoring_beam)
@@ -1304,6 +1375,7 @@ def restore_image(
         consume_model=(consume_model and model_sky_name != residual_sky_name),
         restoring_beam=restoring_beam,
         plane_coordinate=("frequency in Hz", residual_da["frequency"].values.tolist()),
+        fft_backend=fft_backend,
     )
     consume = bool(array_timing["consumed_model"])
     if correct:

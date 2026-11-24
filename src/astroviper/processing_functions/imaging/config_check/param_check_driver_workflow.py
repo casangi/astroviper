@@ -3,6 +3,7 @@
 import numpy as np
 
 from astroviper.processing_functions.imaging.config_check._common import (
+    check_fft_backend,
     require_boolean,
     require_finite_real,
     require_integer,
@@ -37,7 +38,8 @@ def check_driver_workflow(config, *, mode, require_complete=False):
     TypeError
         If the primary-beam limit is not a real scalar.
     ValueError
-        If memory mode, backend, output policy or restoring beam is invalid.
+        If memory mode, backend, output policy, FFT library or restoring beam is
+        invalid.
     NotImplementedError
         If mosaic imaging is requested.
     """
@@ -77,6 +79,11 @@ def check_driver_workflow(config, *, mode, require_complete=False):
         )
 
         check_restoration_output(config["restoration_output"])
+
+    # --- FFT library of the restore ---
+    # Refuse an unknown or missing library before any product is restored.
+    if "fft_backend" in config:
+        check_fft_backend(config["fft_backend"])
 
     # --- Primary-beam cutoff ---
     # The fractional cutoff must be one finite value in the interval [0, 1].

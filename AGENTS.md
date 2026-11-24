@@ -537,7 +537,18 @@ match them in any new kernel:
    the interface's under `"pyfftw"` (4 planes with the roll when it plans, then
    3). numpy computes single-precision forward transforms in double precision and
    copies the lines of each call to double and back: 32 rows of a plane for a
-   block of 8 lines of an aligned plane, 4 per line of an unaligned one.
+   block of 8 lines of an aligned plane, 4 per line of an unaligned one. The
+   restore's forward transforms write a new half spectrum, and its inverse works
+   in place along the first axis and writes the output plane: its convolution
+   keeps the spectrum and the output (2 planes) besides the plane under every
+   option, pyFFTW's through direct `pyfftw.FFTW` plans, numpy's with its
+   double-precision copies of a block of 8 lines in single precision. Under
+   `"scipy"` an unaligned plane is copied whole before its forward transform (1
+   plane, as at the gridder normalization; 3 planes in a restore to a target
+   beam, which sums the model and residual spectra before one inverse); numpy
+   and pyFFTW read it through one aligned row. The automatic mask's padded
+   transforms take three padded planes under every option, pyFFTW's through
+   direct plans.
 3. **In-place output.** Accumulators (`grid`, `normalization`) and CLEAN buffers
    (residual/model cubes) are written through `mutable_data()` pointers; they
    are *not* returned. Repeated calls accumulate (e.g. summing over MSes).
@@ -572,8 +583,9 @@ match them in any new kernel:
    negative `n` (down to `-os.cpu_count()`) as `os.cpu_count() + 1 + n`, and
    `pyfftw.FFTW`, which `processing_functions/fft.py` uses for unaligned buffers under
    `"pyfftw"`, takes it as an unsigned int (a negative count raises `OverflowError`);
-   numpy.fft takes no count: under `"numpy"` the Python FFTs run one thread. Outside
-   the count are the
+   the direct `pyfftw.FFTW` plans of the restore and the automatic mask read it as
+   scipy.fft does; numpy.fft takes no count: under `"numpy"` the Python FFTs run one
+   thread. Outside the count are the
    BLAS and OpenMP threads of NumPy and SciPy, and the I/O threads of the chunk
    reads, which read up to the count of arrays at once, each with its own pool of up
    to `_READ_CONCURRENCY` threads (`utils/chunk_io/zarr_chunks.py`). Concurrent

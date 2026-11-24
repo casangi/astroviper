@@ -973,9 +973,10 @@ def test_an_overflowing_quotient_is_the_only_nonfinite_pixel(output):
     assert np.isfinite(corrected[~expected]).all()
 
 
+@pytest.mark.parametrize("fft_backend", ["numpy", "scipy", "pyfftw"])
 @pytest.mark.parametrize("output", ["primary_beam_corrected", "both"])
 def test_corrected_restore_to_a_target_keeps_one_spectrum_besides_the_beam(
-    output, monkeypatch
+    output, fft_backend, monkeypatch
 ):
     """Each term of the corrected plane, and of the apparent plane made with
     it, has its own inverse transform: as without a target, at most the clean
@@ -984,10 +985,10 @@ def test_corrected_restore_to_a_target_keeps_one_spectrum_besides_the_beam(
     memory than without a target on macOS."""
     import weakref
 
-    import scipy.fft
+    from astroviper.processing_functions import fft
 
     live, counts = [], []
-    rfft2 = scipy.fft.rfft2
+    rfft2 = fft.rfft2
 
     def counted(*args, **kwargs):
         spectrum = rfft2(*args, **kwargs)
@@ -995,11 +996,16 @@ def test_corrected_restore_to_a_target_keeps_one_spectrum_besides_the_beam(
         counts.append(sum(ref() is not None for ref in live))
         return spectrum
 
-    monkeypatch.setattr(scipy.fft, "rfft2", counted)
+    monkeypatch.setattr(fft, "rfft2", counted)
     for restoring_beam in (None, TARGET):
         live.clear()
         counts.clear()
-        _restored(_target_inputs(np.float32), output, False, restoring_beam)
+        restore_image(
+            _target_inputs(np.float32),
+            restoration_output=output,
+            restoring_beam=restoring_beam,
+            fft_backend=fft_backend,
+        )
         assert max(counts) == 2
 
 
@@ -1291,12 +1297,17 @@ def test_a_corrected_restore_to_a_target_refuses_a_cutoff_below_1e_3(output):
     )
 
 
+@pytest.mark.parametrize("fft_backend", ["numpy", "scipy", "pyfftw"])
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
 @pytest.mark.parametrize("n", [64, 182, 200, 256])
-def test_restore_transforms_with_three_workers_stay_within_rounding(n, dtype):
+def test_restore_transforms_with_three_workers_stay_within_rounding(
+    n, dtype, fft_backend
+):
     """The clean beam's transform, the convolution with it and the primary beam
-    corrected plane with 3 workers stay within 8 eps of the peak of one worker;
-    scipy's bits may depend on the workers at some of these sizes."""
+    corrected plane with 3 workers give the bits of one under "pyfftw" (measured
+    at these sizes) and "numpy" (one thread), and stay within 8 eps of the peak of
+    one worker under "scipy", whose bits may depend on the workers at some of
+    these sizes."""
     rng = np.random.default_rng(1)
     delta = 1e-6
     beam = np.array([4.0 * delta, 2.5 * delta, 0.4])
@@ -1304,8 +1315,12 @@ def test_restore_transforms_with_three_workers_stay_within_rounding(n, dtype):
     primary_beam = np.linspace(0.05, 1.0, n * n).reshape(n, n).astype(dtype)
 
     def run(workers):
-        kernel_ft = _clean_beam_kernel_ft(beam, n, n, delta, dtype, workers)
-        convolved = _convolve_with_clean_beam(plane.copy(), kernel_ft, workers)
+        kernel_ft = _clean_beam_kernel_ft(
+            beam, n, n, delta, dtype, workers, fft_backend
+        )
+        convolved = _convolve_with_clean_beam(
+            plane.copy(), kernel_ft, workers, fft_backend
+        )
         corrected = primary_beam_corrected_plane(
             primary_beam,
             0.2,
@@ -1313,11 +1328,89 @@ def test_restore_transforms_with_three_workers_stay_within_rounding(n, dtype):
             plane.copy(),
             kernel_ft=kernel_ft,
             workers=workers,
+            fft_backend=fft_backend,
         )
         return kernel_ft, convolved, corrected
 
     for one, three in zip(run(1), run(3), strict=True):
+        if fft_backend != "scipy":
+            np.testing.assert_array_equal(three, one)
+            continue
         finite = np.isfinite(one)
         np.testing.assert_array_equal(np.isfinite(three), finite)
         bound = 8 * np.finfo(one.dtype).eps * np.abs(one[finite]).max()
         assert np.abs(three[finite] - one[finite]).max() <= bound
+
+
+def _fft_backends_seen(monkeypatch):
+    """(function, fft_backend) of every call of the FFT module's restore and mask
+    forms, in call order."""
+    from astroviper.processing_functions import fft
+
+    seen = []
+    for name in ("rfft2", "irfft2", "ifft", "irfft", "set_workers"):
+        real = getattr(fft, name)
+
+        def spy(*args, _real=real, _name=name, **kwargs):
+            seen.append((_name, kwargs["fft_backend"]))
+            return _real(*args, **kwargs)
+
+        monkeypatch.setattr(fft, name, spy)
+    return seen
+
+
+@pytest.mark.parametrize("fft_backend", ["numpy", "pyfftw"])
+@pytest.mark.parametrize("restoring_beam", [None, TARGET])
+@pytest.mark.parametrize("output", OUTPUTS)
+def test_the_restore_runs_every_transform_in_its_fft_backend(
+    output, restoring_beam, fft_backend, monkeypatch
+):
+    """Every transform of restore_image, with and without a target beam and for
+    each output, runs in the library of its fft_backend."""
+    seen = _fft_backends_seen(monkeypatch)
+    restore_image(
+        _target_inputs(np.float32),
+        restoration_output=output,
+        restoring_beam=restoring_beam,
+        fft_backend=fft_backend,
+    )
+    assert seen and {value for _, value in seen} == {fft_backend}
+
+
+@pytest.mark.parametrize("fft_backend", ["numpy", "pyfftw"])
+def test_the_primary_beam_corrected_plane_runs_in_its_fft_backend(
+    fft_backend, monkeypatch
+):
+    n, delta = 64, 1e-3
+    rng = np.random.default_rng(3)
+    plane = rng.standard_normal((n, n)).astype(np.float32)
+    primary_beam = np.linspace(0.05, 1.0, n * n).reshape(n, n).astype(np.float32)
+    kernel_ft = _clean_beam_kernel_ft(
+        [4.0 * delta, 2.5 * delta, 0.4], n, n, delta, np.float32, 1, fft_backend
+    )
+    seen = _fft_backends_seen(monkeypatch)
+    primary_beam_corrected_plane(
+        primary_beam,
+        0.2,
+        plane.copy(),
+        plane.copy(),
+        kernel_ft=kernel_ft,
+        workers=1,
+        fft_backend=fft_backend,
+    )
+    assert seen and {value for _, value in seen} == {fft_backend}
+
+
+@pytest.mark.parametrize("fft_backend", ["SciPy", "pyFFTW"])
+def test_an_unknown_fft_backend_is_refused(fft_backend, monkeypatch):
+    """The check block refuses it before any transform; a checked call at the
+    module's first transform."""
+    seen = _fft_backends_seen(monkeypatch)
+    with pytest.raises(ValueError, match="fft_backend"):
+        restore_image(_target_inputs(np.float32), fft_backend=fft_backend)
+    assert seen == []
+    with pytest.raises(ValueError, match="fft_backend"):
+        restore_image(
+            _target_inputs(np.float32), fft_backend=fft_backend, input_checked=True
+        )
+    assert seen == [("rfft2", fft_backend)]

@@ -3071,6 +3071,7 @@ def make_auto_mask_continuum(
     processing_function_threads=1,
     image_data_group_in_name="residual",
     image_data_group_out_name="residual",
+    fft_backend="scipy",
     *,
     input_checked: bool = False,
 ):
@@ -3115,6 +3116,10 @@ def make_auto_mask_continuum(
         Data group of the residual. Default ``"residual"``.
     image_data_group_out_name : str, optional
         Data group that gets the mask. Default ``"residual"``.
+    fft_backend : {"numpy", "scipy", "pyfftw"}, default "scipy"
+        FFT library: ``"numpy"`` (``numpy.fft``), ``"scipy"`` (``scipy.fft``) or
+        ``"pyfftw"`` (FFTW through pyFFTW). The three round differently; the C++
+        kernels' FFTs do not use it.
     input_checked : bool, optional
         Skip configuration checks already performed by the calling layer.
         Runtime checks on newly created data always remain active. For graph nodes
@@ -3128,6 +3133,9 @@ def make_auto_mask_continuum(
         ``"planes_stopped"``, ``(time, 1, polarization)`` bool.
     """
     if not input_checked:
+        from astroviper.processing_functions.imaging.config_check._common import (
+            check_fft_backend,
+        )
         from astroviper.processing_functions.imaging.config_check._predicates import (
             check_auto_mask_params,
             check_primary_beam_limit,
@@ -3135,6 +3143,7 @@ def make_auto_mask_continuum(
 
         check_auto_mask_params(auto_mask_params)
         check_primary_beam_limit(primary_beam_limit)
+        check_fft_backend(fft_backend)
 
     import numpy as np
     import xarray as xr
@@ -3197,6 +3206,7 @@ def make_auto_mask_continuum(
         processing_function_threads=processing_function_threads,
         image_data_group_in_name=image_data_group_in_name,
         image_data_group_out_name=image_data_group_in_name,
+        fft_backend=fft_backend,
         input_checked=True,
     )
     mask = cube_xds["MASK"].values
@@ -4647,6 +4657,7 @@ def restore_continuum_image(
     restoring_beam=None,
     continuum_mode=None,
     input_checked=False,
+    fft_backend="scipy",
 ):
     """Restore the continuum image.
 
@@ -4753,6 +4764,10 @@ def restore_continuum_image(
         Runtime checks on newly created data always remain active. For graph nodes
         using an input_params dictionary, its input_checked entry also carries this
         flag. Set it only for an unchanged configuration in the same imaging mode.
+    fft_backend : {"numpy", "scipy", "pyfftw"}, default "scipy"
+        FFT library: ``"numpy"`` (``numpy.fft``), ``"scipy"`` (``scipy.fft``) or
+        ``"pyfftw"`` (FFTW through pyFFTW). The three round differently; the C++
+        kernels' FFTs do not use it.
 
     Returns
     -------
@@ -5011,6 +5026,7 @@ def restore_continuum_image(
                 processing_function_threads=processing_function_threads,
                 output="apparent",
                 restoring_beam=restoring_beam,
+                fft_backend=fft_backend,
             )
             products["apparent"] = _require_backend_product(
                 apparent_products,
@@ -5028,6 +5044,7 @@ def restore_continuum_image(
             processing_function_threads=processing_function_threads,
             output="apparent",
             restoring_beam=restoring_beam,
+            fft_backend=fft_backend,
         )
         products["primary_beam_corrected"] = _require_backend_product(
             corrected_products,
@@ -5049,6 +5066,7 @@ def restore_continuum_image(
             primary_beam_limit=primary_beam_limit,
             output=restoration_output,
             restoring_beam=restoring_beam,
+            fft_backend=fft_backend,
         )
         for required_product in (
             {"apparent"} if restoration_output in {"apparent", "both"} else set()

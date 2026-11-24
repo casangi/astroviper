@@ -3028,3 +3028,56 @@ def test_auto_mask_passes_on_threshold_reached(reached, stopped):
         threshold_reached=None if reached is None else np.full((1, 1, 2), reached),
     )
     assert updated["planes_stopped"][0, 0, 0] == stopped
+
+
+def _fft_backends_seen(monkeypatch):
+    """(function, fft_backend) of every call of the FFT module's restore and mask
+    forms, in call order."""
+    from astroviper.processing_functions import fft
+
+    seen = []
+    for name in ("rfft2", "irfft2", "ifft", "irfft", "set_workers"):
+        real = getattr(fft, name)
+
+        def spy(*args, _real=real, _name=name, **kwargs):
+            seen.append((_name, kwargs["fft_backend"]))
+            return _real(*args, **kwargs)
+
+        monkeypatch.setattr(fft, name, spy)
+    return seen
+
+
+@pytest.mark.parametrize("fft_backend", ["numpy", "pyfftw"])
+@pytest.mark.parametrize("output", ["apparent", "primary_beam_corrected", "both"])
+@pytest.mark.parametrize("mode", ["mfs", "mvc"])
+def test_the_continuum_restore_runs_every_transform_in_its_fft_backend(
+    mode, output, fft_backend, monkeypatch
+):
+    image = make_continuum_image(continuum_mode=mode)
+    image["PRIMARY_BEAM"].data[...] = np.linspace(0.25, 1.0, 64).reshape(
+        image["PRIMARY_BEAM"].shape
+    )
+    seen = _fft_backends_seen(monkeypatch)
+    restore_continuum_image(
+        image,
+        restoration_output=output,
+        primary_beam_limit=0.2,
+        continuum_mode=mode,
+        fft_backend=fft_backend,
+    )
+    assert seen and {value for _, value in seen} == {fft_backend}
+
+
+@pytest.mark.parametrize("fft_backend", ["numpy", "pyfftw"])
+def test_the_continuum_mask_runs_every_transform_in_its_fft_backend(
+    fft_backend, monkeypatch
+):
+    seen = _fft_backends_seen(monkeypatch)
+    make_auto_mask_continuum(
+        _continuum_image_with_two_sources(),
+        {},
+        primary_beam_limit=0.2,
+        fft_backend=fft_backend,
+    )
+    assert {name for name, _ in seen} == {"set_workers", "rfft2", "irfft2"}
+    assert {value for _, value in seen} == {fft_backend}

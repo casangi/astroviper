@@ -139,3 +139,29 @@ def test_requires_primary_beam_model_and_beam_fit():
     ]
     with pytest.raises(AssertionError, match="Beam-fit"):
         correct_sky_by_primary_beam(img_xds)
+
+
+def _fft_backends_seen(monkeypatch):
+    """(function, fft_backend) of every call of the FFT module's restore and mask
+    forms, in call order."""
+    from astroviper.processing_functions import fft
+
+    seen = []
+    for name in ("rfft2", "irfft2", "ifft", "irfft", "set_workers"):
+        real = getattr(fft, name)
+
+        def spy(*args, _real=real, _name=name, **kwargs):
+            seen.append((_name, kwargs["fft_backend"]))
+            return _real(*args, **kwargs)
+
+        monkeypatch.setattr(fft, name, spy)
+    return seen
+
+
+@pytest.mark.parametrize("fft_backend", ["numpy", "pyfftw"])
+def test_the_convolution_runs_in_its_fft_backend(fft_backend, monkeypatch):
+    seen = _fft_backends_seen(monkeypatch)
+    correct_sky_by_primary_beam(
+        _add_model_and_residual(_make_restored_image()), fft_backend=fft_backend
+    )
+    assert seen and {value for _, value in seen} == {fft_backend}

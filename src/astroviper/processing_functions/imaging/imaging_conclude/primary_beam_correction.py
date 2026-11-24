@@ -12,6 +12,7 @@ def correct_sky_by_primary_beam(
     beam_polarization_index=0,
     processing_function_threads=1,
     overwrite=True,
+    fft_backend="scipy",
 ):
     """Primary beam corrected restored sky from the model and the residual.
 
@@ -66,10 +67,12 @@ def correct_sky_by_primary_beam(
         Polarization index of the beam fit used for the clean beam.  Default
         ``0``.
     processing_function_threads : int, optional
-        Threads handed to ``scipy.fft`` for the convolution.  Default ``1``.
+        Threads of the convolution's transforms.  Default ``1``.
     overwrite : bool, optional
         If ``True`` an existing corrected variable / group entry is
         overwritten.  Default ``True``.
+    fft_backend : {"numpy", "scipy", "pyfftw"}, default "scipy"
+        FFT library of the convolution.
 
     Returns
     -------
@@ -151,6 +154,7 @@ def correct_sky_by_primary_beam(
                 delta,
                 residual.dtype,
                 workers,
+                fft_backend,
             )
             for pp in range(npol):
                 pb_pol = pp if primary_beam.shape[2] == npol else 0
@@ -161,6 +165,7 @@ def correct_sky_by_primary_beam(
                     residual[tt, ff, pp],
                     kernel_ft=kernel_ft,
                     workers=workers,
+                    fft_backend=fft_backend,
                 )
 
     img_xds["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"] = xr.DataArray(

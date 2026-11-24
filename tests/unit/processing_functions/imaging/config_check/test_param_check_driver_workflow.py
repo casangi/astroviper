@@ -196,6 +196,7 @@ def test_complete_workflow_requires_each_configuration_group(missing):
             },
             "conflicts",
         ),
+        ({"fft_backend": "SciPy"}, "fft_backend"),
     ],
 )
 def test_invalid_workflow_options_rejected_without_fallback(options, message):

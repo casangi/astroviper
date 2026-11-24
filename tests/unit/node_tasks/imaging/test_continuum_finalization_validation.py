@@ -27,6 +27,7 @@ processing = importlib.import_module(
         ({"primary_beam_limit": 1.1}, "primary_beam_limit"),
         ({"restoration_output": "bogus"}, "restoration_output"),
         ({"prepared_continuum_image": "False"}, "prepared_continuum_image"),
+        ({"fft_backend": "bogus"}, "fft_backend"),
     ],
 )
 def test_unchecked_finalization_rejects_configuration_before_runtime(
