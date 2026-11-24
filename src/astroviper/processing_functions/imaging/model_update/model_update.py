@@ -68,6 +68,8 @@ def model_update_cube_single_field(
         PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
         and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
         ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
+        numpy.fft takes no count: under ``"numpy"`` the Python FFTs run one
+        thread.
     image_data_group_in_name : str, optional
         Key in the image's ``data_groups`` whose ``"sky"`` (and, optionally,
         ``"mask"``) roles name the input data variables.  Datasets without

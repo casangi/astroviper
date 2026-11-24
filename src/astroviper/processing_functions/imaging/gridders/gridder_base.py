@@ -147,6 +147,8 @@ class Gridder(metaclass=Interface):
             PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
             and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
             ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
+            numpy.fft takes no count: under ``"numpy"`` the Python FFTs run one
+            thread.
 
         Returns
         -------
@@ -244,6 +246,8 @@ class Gridder(metaclass=Interface):
             PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
             and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
             ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
+            numpy.fft takes no count: under ``"numpy"`` the Python FFTs run one
+            thread.
         description : str
             Description of a newly registered output data group.
 
@@ -330,9 +334,12 @@ class Gridder(metaclass=Interface):
             PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
             and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
             ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
+            numpy.fft takes no count: under ``"numpy"`` the Python FFTs run one
+            thread.
         fft_backend : str
-            FFT backend used by the gridder normalization (``"pyfftw"`` or
-            ``"scipy"``).
+            FFT library: ``"numpy"`` (``numpy.fft``), ``"scipy"`` (``scipy.fft``) or
+            ``"pyfftw"`` (FFTW through pyFFTW). The three round differently; the C++
+            kernels' FFTs do not use it.
         complex_dtype : numpy.dtype
             Complex precision of the image (``numpy.complex64`` or
             ``numpy.complex128``).
@@ -424,9 +431,12 @@ class Gridder(metaclass=Interface):
             PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
             and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
             ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
+            numpy.fft takes no count: under ``"numpy"`` the Python FFTs run one
+            thread.
         fft_backend : str
-            FFT backend used by the gridder normalization (``"pyfftw"`` or
-            ``"scipy"``).
+            FFT library: ``"numpy"`` (``numpy.fft``), ``"scipy"`` (``scipy.fft``) or
+            ``"pyfftw"`` (FFTW through pyFFTW). The three round differently; the C++
+            kernels' FFTs do not use it.
         data_variables_to_process : list of str or None
             Roles of the images to transform; ``None`` is ``["sky"]``.
         complex_dtype : numpy.dtype

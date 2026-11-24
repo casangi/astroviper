@@ -132,7 +132,7 @@ def _forward(image, axis, dtype, **kwargs):
 
 
 @pytest.mark.parametrize("dtype", [np.complex64, np.complex128])
-@pytest.mark.parametrize("backend", ["scipy", "pyfftw"])
+@pytest.mark.parametrize("backend", ["numpy", "scipy", "pyfftw"])
 def test_forward_frequency_and_taylor_match_independent_fft(dtype, backend):
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
         create_prolate_spheroidal_correcting_image_1D,

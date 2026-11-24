@@ -51,38 +51,9 @@ def next_fft_friendly_size(target, even=False):
     if even:
         return 2 * next_fft_friendly_size(-(-target // 2), even=False)
 
-    if target <= 6:
-        return target
-    # Already a power of two (a 5-smooth number)?
-    if not (target & (target - 1)):
-        return target
+    from astroviper.processing_functions import fft
 
-    # Smallest 2**a * 3**b * 5**c >= target. For each (3**b * 5**c) factor take
-    # the smallest power of two that reaches target; keep the running minimum.
-    # (The classic "next regular number" search, as in scipy's _next_regular.)
-    match = None
-    p5 = 1
-    while p5 < target:
-        p35 = p5
-        while p35 < target:
-            quotient = -(-target // p35)  # ceil(target / p35)
-            p2 = 1 << (quotient - 1).bit_length()  # next power of two >= quotient
-            n = p2 * p35
-            if n == target:
-                return n
-            if match is None or n < match:
-                match = n
-            p35 *= 3
-            if p35 == target:
-                return p35
-        if match is None or p35 < match:  # p35 now >= target (a pure 3*5 number)
-            match = p35
-        p5 *= 5
-        if p5 == target:
-            return p5
-    if match is None or p5 < match:  # p5 now >= target (a pure power of 5)
-        match = p5
-    return match
+    return fft.next_fast_len(target, real=True)
 
 
 def padded_grid_size(image_lm, fft_padding):

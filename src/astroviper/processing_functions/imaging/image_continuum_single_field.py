@@ -190,10 +190,13 @@ def imaging_preparation_continuum_single_field(
         PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
         and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
         ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
+        numpy.fft takes no count: under ``"numpy"`` the Python FFTs run one
+        thread.
 
     fft_backend : str, optional
-        FFT backend used by the gridder normalization (``"pyfftw"`` or
-        ``"scipy"``).
+        FFT library: ``"numpy"`` (``numpy.fft``), ``"scipy"`` (``scipy.fft``) or
+        ``"pyfftw"`` (FFTW through pyFFTW). The three round differently; the C++
+        kernels' FFTs do not use it.
 
     image_data_variables_keep : list of str, optional
         Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
@@ -676,10 +679,13 @@ def prepare_model_uv_continuum_single_field(
         PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
         and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
         ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
+        numpy.fft takes no count: under ``"numpy"`` the Python FFTs run one
+        thread.
 
     fft_backend : str, optional
-        FFT backend used by the gridder normalization (``"pyfftw"`` or
-        ``"scipy"``).
+        FFT library: ``"numpy"`` (``numpy.fft``), ``"scipy"`` (``scipy.fft``) or
+        ``"pyfftw"`` (FFTW through pyFFTW). The three round differently; the C++
+        kernels' FFTs do not use it.
 
     image_data_group_in_name : str, optional
         Key in the image's ``data_groups`` whose ``"sky"`` (and, optionally,
@@ -1114,9 +1120,12 @@ def prepare_model_uv_mvc_single_field(
         PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
         and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
         ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
+        numpy.fft takes no count: under ``"numpy"`` the Python FFTs run one
+        thread.
     fft_backend : str, optional
-        FFT backend used by the gridder normalization (``"pyfftw"`` or
-        ``"scipy"``).
+        FFT library: ``"numpy"`` (``numpy.fft``), ``"scipy"`` (``scipy.fft``) or
+        ``"pyfftw"`` (FFTW through pyFFTW). The three round differently; the C++
+        kernels' FFTs do not use it.
     image_data_group_in_name : str, optional
         Key in the image's ``data_groups`` whose ``"sky"`` (and, optionally,
         ``"mask"``) roles name the input data variables.  Datasets without
@@ -2591,10 +2600,13 @@ def residual_update_continuum_single_field(
         PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
         and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
         ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
+        numpy.fft takes no count: under ``"numpy"`` the Python FFTs run one
+        thread.
 
     fft_backend : str, optional
-        FFT backend used by the gridder normalization (``"pyfftw"`` or
-        ``"scipy"``).
+        FFT library: ``"numpy"`` (``numpy.fft``), ``"scipy"`` (``scipy.fft``) or
+        ``"pyfftw"`` (FFTW through pyFFTW). The three round differently; the C++
+        kernels' FFTs do not use it.
 
     image_data_variables_keep : list of str, optional
         Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
@@ -3097,6 +3109,8 @@ def make_auto_mask_continuum(
         PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
         and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
         ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
+        numpy.fft takes no count: under ``"numpy"`` the Python FFTs run one
+        thread.
     image_data_group_in_name : str, optional
         Data group of the residual. Default ``"residual"``.
     image_data_group_out_name : str, optional
@@ -3867,6 +3881,8 @@ def model_update_mtmfs_single_field(
         PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
         and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
         ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
+        numpy.fft takes no count: under ``"numpy"`` the Python FFTs run one
+        thread.
 
     image_data_group_in_name : str, optional
         Key in the image's ``data_groups`` whose ``"sky"`` (and, optionally,
@@ -4677,6 +4693,8 @@ def restore_continuum_image(
         PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
         and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
         ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
+        numpy.fft takes no count: under ``"numpy"`` the Python FFTs run one
+        thread.
 
     primary_beam_limit : float, optional
         Primary-beam cutoff below which the corrected image is blanked.

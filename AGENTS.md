@@ -137,7 +137,9 @@ Each of layers 1–3 is further split by **subdomain**, mirrored across the
 layers where implemented (not every subdomain exists in every layer yet):
 `imaging`, `image_analysis`, `flagging`, `visibility_manipulation`,
 `calibration`, `model`, `simulation`. Additional **subdomains** can be added in
-the future.
+the future. `processing_functions/fft.py` sits beside the subdomains, as `include/`
+does: it holds Python FFTs in the library that `fft_backend` names (`"numpy"`,
+`"scipy"` or `"pyfftw"`).
 
 ### Layer responsibilities & boundaries
 1. **`distributed_applications/`** — Constructs `parallel_coords`, maps a `node_task`
@@ -521,7 +523,21 @@ match them in any new kernel:
    array copy. Imaging-weight kernels retain their separately dispatched aligned
    fast path. Concurrent gridding retains aligned atomics and uses striped locks
    for unaligned destinations. FFT inputs that require aligned storage use at
-   most one row of scratch, never an image-sized realignment buffer.
+   most one row of scratch, never an image-sized realignment buffer. The gridder
+   normalization's FFTs go through `processing_functions/fft.py`. On even axes it
+   transforms an aligned plane in place under `"numpy"` and `"scipy"`; under
+   `"pyfftw"` pyFFTW's interface copies the plane twice and allocates the result
+   when it plans (3 planes, then 1; a cached plan keeps its arrays 0.1-0.2 s). On
+   even axes an unaligned plane goes through one aligned row under `"numpy"` and
+   `"pyfftw"`; scipy copies it (1 plane). Under `"scipy"` the forward transform
+   of an aligned plane is stored back into the plane through a plane-sized
+   temporary, as scipy returns another array over the plane's memory. On an odd
+   axis the shifts are rolls, a copy of the plane each, and the transform writes
+   one new plane under `"numpy"` and `"scipy"` (2 planes with the roll) and takes
+   the interface's under `"pyfftw"` (4 planes with the roll when it plans, then
+   3). numpy computes single-precision forward transforms in double precision and
+   copies the lines of each call to double and back: 32 rows of a plane for a
+   block of 8 lines of an aligned plane, 4 per line of an unaligned one.
 3. **In-place output.** Accumulators (`grid`, `normalization`) and CLEAN buffers
    (residual/model cubes) are written through `mutable_data()` pointers; they
    are *not* returned. Repeated calls accumulate (e.g. summing over MSes).
@@ -554,8 +570,10 @@ match them in any new kernel:
    the restore, `primary_beam_correction`, feather, `make_auto_mask`) pass the count to
    scipy.fft and pyfftw as it is: their scipy interfaces refuse `0` and read a
    negative `n` (down to `-os.cpu_count()`) as `os.cpu_count() + 1 + n`, and
-   `pyfftw.FFTW`, which `normalize_image` uses for unaligned buffers, takes it as an
-   unsigned int (a negative count raises `OverflowError`). Outside the count are the
+   `pyfftw.FFTW`, which `processing_functions/fft.py` uses for unaligned buffers under
+   `"pyfftw"`, takes it as an unsigned int (a negative count raises `OverflowError`);
+   numpy.fft takes no count: under `"numpy"` the Python FFTs run one thread. Outside
+   the count are the
    BLAS and OpenMP threads of NumPy and SciPy, and the I/O threads of the chunk
    reads, which read up to the count of arrays at once, each with its own pool of up
    to `_READ_CONCURRENCY` threads (`utils/chunk_io/zarr_chunks.py`). Concurrent

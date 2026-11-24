@@ -454,9 +454,12 @@ def make_point_spread_function_single_field(
         PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
         and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
         ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
+        numpy.fft takes no count: under ``"numpy"`` the Python FFTs run one
+        thread.
     fft_backend : str, optional
-        FFT backend used by the gridder normalization (``"pyfftw"`` or
-        ``"scipy"``).
+        FFT library: ``"numpy"`` (``numpy.fft``), ``"scipy"`` (``scipy.fft``) or
+        ``"pyfftw"`` (FFTW through pyFFTW). The three round differently; the C++
+        kernels' FFTs do not use it.
     complex_dtype : numpy.dtype, optional
         Complex precision of the gridded data.  Defaults to
         ``numpy.complex128``.
@@ -710,9 +713,12 @@ def make_subtraction_point_spread_function_single_field(
         PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
         and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
         ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
+        numpy.fft takes no count: under ``"numpy"`` the Python FFTs run one
+        thread.
     fft_backend : str, optional
-        FFT backend used by the gridder normalization (``"pyfftw"`` or
-        ``"scipy"``).
+        FFT library: ``"numpy"`` (``numpy.fft``), ``"scipy"`` (``scipy.fft``) or
+        ``"pyfftw"`` (FFTW through pyFFTW). The three round differently; the C++
+        kernels' FFTs do not use it.
     complex_dtype : numpy.dtype, optional
         Complex precision of the gridded data: ``complex64`` gives a float32
         PSF, ``complex128`` (the default) a float64 one.

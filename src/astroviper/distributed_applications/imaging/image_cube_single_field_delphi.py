@@ -201,6 +201,8 @@ def image_cube_single_field_delphi(
         PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
         and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
         ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
+        numpy.fft takes no count: under ``"numpy"`` the Python FFTs run one
+        thread.
 
     input_checked : bool, optional
         Skip configuration checks already performed by the calling layer.

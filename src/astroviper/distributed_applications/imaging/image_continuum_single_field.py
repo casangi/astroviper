@@ -2808,6 +2808,8 @@ def image_continuum_single_field(
         PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
         and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
         ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
+        numpy.fft takes no count: under ``"numpy"`` the Python FFTs run one
+        thread.
     n_mapping_parallelism : dict, optional
         Mapping parallelism as ``{"frequency": count}``. ``count=None`` or a
         missing dictionary auto-determines the number of frequency chunks.
@@ -2818,8 +2820,9 @@ def image_continuum_single_field(
     disk_chunk_sizes : dict or str, optional
         Input chunk sizes; ``"Auto"`` infers native storage chunks.
     fft_backend : str
-        FFT backend used by the gridder normalization (``"pyfftw"`` or
-        ``"scipy"``).
+        FFT library: ``"numpy"`` (``numpy.fft``), ``"scipy"`` (``scipy.fft``) or
+        ``"pyfftw"`` (FFTW through pyFFTW). The three round differently; the C++
+        kernels' FFTs do not use it.
     io_engine : {"chunk", "xradio"}
         I/O engine of the node tasks. ``"chunk"`` reads and writes Zarr chunk
         blobs (and FITS data blocks) directly by byte offset

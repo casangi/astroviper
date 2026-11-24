@@ -4,6 +4,8 @@ import numpy as np
 import toolviper.utils.logger as logger
 import xarray as xr
 
+from astroviper.processing_functions import fft
+
 # from memory_profiler import profile
 from astroviper.utils.data_group_tools import (
     create_data_groups_in_and_out,
@@ -22,70 +24,6 @@ fft_pair = {
     "point_spread_function": "uv_sampling",
     "sky": "visibility",
 }
-
-
-def _fft_module(backend):
-    """Return the FFT module for the requested backend.
-
-    Parameters
-    ----------
-    backend : {"scipy", "pyfftw"}
-        ``"scipy"``  — use ``scipy.fft`` (default, always available).
-        ``"pyfftw"`` — use ``pyfftw.interfaces.scipy_fft``, which is a
-        drop-in replacement for ``scipy.fft`` backed by FFTW.  The plan
-        cache is enabled on first call so that repeated transforms of the
-        same shape reuse pre-computed plans.
-
-    Returns
-    -------
-    module
-        An object exposing ``fft2``, ``ifft2``, ``fftshift``, and
-        ``ifftshift`` with the same signatures as ``scipy.fft``.
-
-    Raises
-    ------
-    ImportError
-        If ``backend="pyfftw"`` and pyfftw is not installed.
-    ValueError
-        If ``backend`` is not a recognised string.
-    """
-    from astroviper.processing_functions.imaging.config_check._common import (
-        check_fft_backend,
-    )
-
-    fft = check_fft_backend(backend)
-    if backend == "pyfftw":
-        import pyfftw
-
-        pyfftw.interfaces.cache.enable()
-    return fft
-
-
-def _fftw_unaligned_inplace(work, axes, processing_function_threads, inverse):
-    """Transform external unaligned storage using only one aligned line of scratch.
-
-    FFTW requires natural alignment even with SIMD disabled. A separable FFT
-    lets spilled buffers stay in place while each row/column uses a reusable
-    aligned line; no plane-sized realignment copy is needed.
-    """
-    import pyfftw
-
-    for axis in axes:
-        lines = np.moveaxis(work, axis, -1)
-        scratch = pyfftw.empty_aligned(lines.shape[-1], dtype=work.dtype)
-        plan = pyfftw.FFTW(
-            scratch,
-            scratch,
-            direction="FFTW_BACKWARD" if inverse else "FFTW_FORWARD",
-            flags=("FFTW_ESTIMATE",),
-            threads=processing_function_threads,
-        )
-        for index in np.ndindex(lines.shape[:-1]):
-            np.copyto(scratch, lines[index])
-            plan()
-            np.copyto(lines[index], scratch)
-        del plan, scratch
-    return work
 
 
 def _require_gridding_kernel(gridding_kernel, function_name):
@@ -186,7 +124,7 @@ def ifft_norm_img_xds(
         Default is ``1``, which is appropriate for a single-threaded dask
         worker.  Set to a higher value only when calling outside of a dask
         context (e.g. in a notebook or test).
-    fft_backend : {"scipy", "pyfftw"}, optional
+    fft_backend : {"numpy", "scipy", "pyfftw"}, optional
         FFT library to use.  Default is ``"scipy"``.  Use ``"pyfftw"`` for
         potentially faster transforms when pyfftw is installed; plan caching
         is especially beneficial when the same grid shape is transformed
@@ -478,7 +416,7 @@ def fft_norm_img_xds(
         Logical input variables to retain after the FFT.
     processing_function_threads : int, optional
         Number of FFT threads.
-    fft_backend : {"scipy", "pyfftw"}, optional
+    fft_backend : {"numpy", "scipy", "pyfftw"}, optional
         FFT backend.
     data_variables_to_process : list of str, optional
         Logical variables to transform. Defaults to ``["sky"]``.
@@ -513,43 +451,6 @@ def fft_norm_img_xds(
         gcf_xds=gcf_xds,
         new_polarization_basis=new_polarization_basis,
     )
-
-
-def _fold_shift_checkerboard(arr, axes, centred=False):
-    """Multiply ``arr`` in place by a separable checkerboard of signs along ``axes``.
-
-    On an even axis of length ``n`` the roll by ``n/2`` of an ``fftshift`` /
-    ``ifftshift`` is a pointwise multiply by ``c[k] = (-1)**k`` in the other
-    domain, for the forward and the inverse transform ``F`` alike:
-    ``F(ifftshift(x)) == c * F(x)`` and ``fftshift(F(y)) == F(c * y)``. The
-    two shifts of a centred transform fold to::
-
-        fftshift(F(ifftshift(x))) == c_centred * F(c * x)
-
-    with ``c_centred[k] = (-1)**(k - n/2) = (-1)**(n/2) * c[k]``, the
-    checkerboard that is ``+1`` at the centre pixel ``k = n/2``, where
-    ``fftshift`` puts the origin. ``centred=False`` multiplies by ``c`` along
-    each axis (before the transform), ``centred=True`` by ``c_centred`` (after
-    it). ``c`` on both sides would be off by ``(-1)**(n0/2 + n1/2)``: the
-    negated transform when that sum is odd (e.g. a 90 x 120 plane).
-
-    Each checkerboard is a 1-D sign broadcast per axis (no full 2-D kernel),
-    which avoids the two full-array roll-copies the shifts would make; the
-    centring only flips that 1-D sign, so it costs no extra pass. ``arr``
-    keeps its dtype (the real sign array broadcasts without upcasting a
-    complex array).
-    """
-    sign_dtype = arr.real.dtype
-    for ax in axes:
-        n = arr.shape[ax]
-        sign = np.ones(n, dtype=sign_dtype)
-        sign[1::2] = -1.0
-        if centred and (n // 2) % 2:
-            sign = -sign
-        shape = [1] * arr.ndim
-        shape[ax] = n
-        arr *= sign.reshape(shape)
-    return arr
 
 
 def ifft_uv_to_lm(
@@ -587,7 +488,7 @@ def ifft_uv_to_lm(
         Axes over which to apply the 2-D FFT.  Default is ``(-2, -1)``.
     processing_function_threads : int, optional
         Number of threads passed to the FFT backend.  Default is ``1``.
-    fft_backend : {"scipy", "pyfftw"}, optional
+    fft_backend : {"numpy", "scipy", "pyfftw"}, optional
         FFT library to use.  Default is ``"pyfftw"``.
     overwrite_input : bool, optional
         If ``True`` the function may reuse ``grid_2d``'s buffer as scratch
@@ -610,7 +511,6 @@ def ifft_uv_to_lm(
     dask's own scheduler.  Set ``processing_function_threads > 1`` only when
     calling outside a dask context.
     """
-    fft = _fft_module(fft_backend)
     start = time.time()
     even = all(grid_2d.shape[ax] % 2 == 0 for ax in fft_plane_dims)
     if even:
@@ -618,30 +518,27 @@ def ifft_uv_to_lm(
         # memory, fewer passes): fftshift(ifft2(ifftshift(x))) ==
         # cb_centred * ifft2(cb * x), cb = (-1)**(i + j) and cb_centred =
         # (-1)**(i - n0/2 + j - n1/2), +1 at the centre pixel (see
-        # _fold_shift_checkerboard). The padded grid axes are even
+        # fft.fold_shift_checkerboard). The padded grid axes are even
         # (next_fft_friendly_size(even=True)).
         # Own the buffer unless the caller ceded it via overwrite_input.
         work = grid_2d if overwrite_input else grid_2d.copy()
-        _fold_shift_checkerboard(work, fft_plane_dims)
-        if fft_backend == "pyfftw" and not work.flags.aligned:
-            sky = _fftw_unaligned_inplace(
-                work, fft_plane_dims, processing_function_threads, inverse=True
-            )
-        else:
-            sky = fft.ifft2(
-                work,
-                axes=fft_plane_dims,
-                workers=processing_function_threads,
-                overwrite_x=True,
-            )
-        _fold_shift_checkerboard(sky, fft_plane_dims, centred=True)
+        fft.fold_shift_checkerboard(work, fft_plane_dims)
+        sky = fft.ifft2(
+            work,
+            axes=fft_plane_dims,
+            processing_function_threads=processing_function_threads,
+            overwrite_x=True,
+            fft_backend=fft_backend,
+        )
+        fft.fold_shift_checkerboard(sky, fft_plane_dims, centred=True)
     else:
         # Odd axis: the two shifts are not a simple checkerboard; use the rolls.
         sky = fft.fftshift(
             fft.ifft2(
                 fft.ifftshift(grid_2d, axes=fft_plane_dims),
                 axes=fft_plane_dims,
-                workers=processing_function_threads,
+                processing_function_threads=processing_function_threads,
+                fft_backend=fft_backend,
             ),
             axes=fft_plane_dims,
         )
@@ -681,7 +578,7 @@ def fft_lm_to_uv(
         Axes over which to apply the 2-D FFT.  Default is ``(-2, -1)``.
     processing_function_threads : int, optional
         Number of threads passed to the FFT backend.  Default is ``1``.
-    fft_backend : {"scipy", "pyfftw"}, optional
+    fft_backend : {"numpy", "scipy", "pyfftw"}, optional
         FFT library to use.  Default is ``"pyfftw"``.
     complex_dtype : numpy dtype, optional
         Complex dtype the image is cast to and the grid is returned in.
@@ -700,7 +597,6 @@ def fft_lm_to_uv(
         image with the DC component shifted to the array centre.  Same shape
         as ``image``.
     """
-    fft = _fft_module(fft_backend)
     work = np.asarray(image, dtype=complex_dtype)
     even = all(work.shape[ax] % 2 == 0 for ax in fft_plane_dims)
     if even:
@@ -710,25 +606,22 @@ def fft_lm_to_uv(
         # (asarray is a no-copy view when the dtype already matches).
         if work is image and not overwrite_input:
             work = work.copy()
-        _fold_shift_checkerboard(work, fft_plane_dims)
-        if fft_backend == "pyfftw" and not work.flags.aligned:
-            uv = _fftw_unaligned_inplace(
-                work, fft_plane_dims, processing_function_threads, inverse=False
-            )
-        else:
-            uv = fft.fft2(
-                work,
-                axes=fft_plane_dims,
-                workers=processing_function_threads,
-                overwrite_x=True,
-            )
-        _fold_shift_checkerboard(uv, fft_plane_dims, centred=True)
+        fft.fold_shift_checkerboard(work, fft_plane_dims)
+        uv = fft.fft2(
+            work,
+            axes=fft_plane_dims,
+            processing_function_threads=processing_function_threads,
+            overwrite_x=True,
+            fft_backend=fft_backend,
+        )
+        fft.fold_shift_checkerboard(uv, fft_plane_dims, centred=True)
         return uv
     return fft.fftshift(
         fft.fft2(
             fft.ifftshift(work, axes=fft_plane_dims),
             axes=fft_plane_dims,
-            workers=processing_function_threads,
+            processing_function_threads=processing_function_threads,
+            fft_backend=fft_backend,
         ),
         axes=fft_plane_dims,
     )
@@ -893,7 +786,7 @@ def fft_norm_continuum_img_xds(
         Logical input variables to retain after the FFT.
     processing_function_threads : int, optional
         Number of FFT threads.
-    fft_backend : {"scipy", "pyfftw"}, optional
+    fft_backend : {"numpy", "scipy", "pyfftw"}, optional
         FFT backend.
     data_variables_to_process : list of str, optional
         Logical variables to transform. Defaults to ``["sky"]``.

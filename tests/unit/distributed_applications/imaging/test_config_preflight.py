@@ -517,3 +517,42 @@ def test_missing_briggs_robust_fails_before_io(
         assert list(output.iterdir()) == [output / "sentinel"]
     else:
         assert not output.exists()
+
+
+@pytest.mark.parametrize("workflow", ["cube", "mfs"])
+@pytest.mark.parametrize("fft_backend", ["numpy", "SciPy", "fftw", "NumPy"])
+def test_the_imagers_take_numpy_and_refuse_misspelt_fft_backends(
+    monkeypatch, tmp_path, workflow, fft_backend
+):
+    """Both imagers' schemas allow "numpy": the run passes every check and reaches
+    the processing set. A misspelt library is refused before any I/O."""
+    from astroviper.distributed_applications.imaging import (
+        image_continuum_single_field,
+        image_cube_single_field,
+    )
+    from tests.unit.processing_functions.imaging.config_check.test_full_validation import (
+        configuration,
+    )
+
+    config = configuration()
+    config["fft_backend"] = fft_backend
+    if workflow == "cube":
+        config["image_params"]["n_taylor_terms"] = 1
+        config["deconvolver"] = "hogbom"
+        driver = image_cube_single_field
+    else:
+        config["continuum_mode"] = workflow
+        driver = image_continuum_single_field
+
+    def opened(*args, **kwargs):
+        raise RuntimeError("the processing set is opened")
+
+    monkeypatch.setattr("xradio.measurement_set.open_processing_set", opened)
+    output = tmp_path / "never-created.img.zarr"
+    if fft_backend == "numpy":
+        expected = pytest.raises(RuntimeError, match="the processing set is opened")
+    else:
+        expected = pytest.raises(AssertionError, match="fft_backend")  # the schema
+    with expected:
+        driver(str(tmp_path / "never-opened.ps.zarr"), str(output), **config)
+    assert not output.exists()

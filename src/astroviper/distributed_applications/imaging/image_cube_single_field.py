@@ -561,6 +561,8 @@ def image_cube_single_field(
         PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
         and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
         ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
+        numpy.fft takes no count: under ``"numpy"`` the Python FFTs run one
+        thread.
     overwrite : bool
         Whether to overwrite existing image. Default is False.
     memory_mode : str
@@ -581,8 +583,9 @@ def image_cube_single_field(
     vizualize_graph : bool
         Whether to vizualize the graph. Default is False.
     fft_backend : str
-        FFT backend used by the gridder normalization (``"pyfftw"`` or
-        ``"scipy"``).
+        FFT library: ``"numpy"`` (``numpy.fft``), ``"scipy"`` (``scipy.fft``) or
+        ``"pyfftw"`` (FFTW through pyFFTW). The three round differently; the C++
+        kernels' FFTs do not use it.
     restore : bool
         If ``True`` produce a restored image after deconvolution: the model
         convolved with the clean beam (the Gaussian fit to the PSF) plus the

@@ -243,13 +243,14 @@ def check_fft_backend(backend):
 
     Parameters
     ----------
-    backend : {'scipy', 'pyfftw'}
+    backend : {'numpy', 'scipy', 'pyfftw'}
         FFT implementation to validate and import.
 
     Returns
     -------
     module
-        Imported SciPy-compatible FFT implementation.
+        The FFT module of the library: ``numpy.fft``, ``scipy.fft`` or
+        ``pyfftw.interfaces.scipy_fft``.
 
     Raises
     ------
@@ -260,10 +261,15 @@ def check_fft_backend(backend):
     """
     from importlib import import_module
 
-    if backend not in ("scipy", "pyfftw"):
+    if backend not in ("numpy", "scipy", "pyfftw"):
         raise ValueError(
-            f"Unknown FFT backend {backend!r}; fft_backend must be 'scipy' or 'pyfftw'."
+            f"Unknown FFT backend {backend!r}; fft_backend must be 'numpy', 'scipy' "
+            "or 'pyfftw'."
         )
     return import_module(
-        "scipy.fft" if backend == "scipy" else "pyfftw.interfaces.scipy_fft"
+        {
+            "numpy": "numpy.fft",
+            "scipy": "scipy.fft",
+            "pyfftw": "pyfftw.interfaces.scipy_fft",
+        }[backend]
     )

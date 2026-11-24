@@ -81,6 +81,8 @@ def make_undeconvolved_image_single_field(
         PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
         and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
         ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
+        numpy.fft takes no count: under ``"numpy"`` the Python FFTs run one
+        thread.
     complex_dtype : numpy.dtype, optional
         Complex precision of the gridded visibility grid (``complex64`` for a
         single-precision image, ``complex128`` otherwise).  Defaults to

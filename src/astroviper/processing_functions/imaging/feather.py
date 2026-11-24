@@ -131,7 +131,7 @@ def feather_core(
         Single-dish scaling factor ``s`` applied in the feather combination.
     axes : tuple of str, default ("l", "m")
         Names of the two spatial axes the 2-D FFT is applied over.
-    fft_backend : {"scipy", "pyfftw"}, default "scipy"
+    fft_backend : {"numpy", "scipy", "pyfftw"}, default "scipy"
         FFT backend forwarded to :func:`fft_lm_to_uv` / :func:`ifft_uv_to_lm`.
         ``scipy`` is always available and faster on typical feather cube sizes;
         ``"pyfftw"`` selects the FFTW-backed backend.

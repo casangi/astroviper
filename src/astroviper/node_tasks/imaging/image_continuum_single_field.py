@@ -1292,10 +1292,13 @@ def residual_update_continuum_single_field(
         PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
         and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
         ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
+        numpy.fft takes no count: under ``"numpy"`` the Python FFTs run one
+        thread.
 
     fft_backend : str, optional
-        FFT backend used by the gridder normalization (``"pyfftw"`` or
-        ``"scipy"``).
+        FFT library: ``"numpy"`` (``numpy.fft``), ``"scipy"`` (``scipy.fft``) or
+        ``"pyfftw"`` (FFTW through pyFFTW). The three round differently; the C++
+        kernels' FFTs do not use it.
 
     image_data_variables_keep : list of str, optional
         Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
@@ -2018,6 +2021,8 @@ def grid_imaging_weight_density_continuum_node(
         PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
         and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
         ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
+        numpy.fft takes no count: under ``"numpy"`` the Python FFTs run one
+        thread.
     io_engine : {"chunk", "xradio"}, optional
         I/O engine of the node tasks. ``"chunk"`` reads and writes Zarr chunk
         blobs (and FITS data blocks) directly by byte offset
@@ -2348,6 +2353,8 @@ def degrid_imaging_weights_continuum_node(
         PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
         and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
         ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
+        numpy.fft takes no count: under ``"numpy"`` the Python FFTs run one
+        thread.
     weight_memory_mode : {"in_memory", "in_place"}, optional
         Storage policy for calculated continuum imaging weights.
         ``"in_memory"``

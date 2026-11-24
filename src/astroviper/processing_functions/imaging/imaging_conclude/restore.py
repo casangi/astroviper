@@ -1087,6 +1087,8 @@ def restore_image(
         PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
         and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
         ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
+        numpy.fft takes no count: under ``"numpy"`` the Python FFTs run one
+        thread.
     consume_model : bool, optional
         If ``True`` and apparent output is requested, that cube is written
         into the **model** variable's

@@ -116,8 +116,10 @@ def feather(
         PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
         and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
         ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
-    fft_backend : {"scipy", "pyfftw"}, default "scipy"
-        FFT backend used by the feather combination (``"scipy"`` or ``"pyfftw"``).
+        numpy.fft takes no count: under ``"numpy"`` the Python FFTs run one
+        thread.
+    fft_backend : {"numpy", "scipy", "pyfftw"}, default "scipy"
+        FFT backend used by the feather combination (``"numpy"``, ``"scipy"`` or ``"pyfftw"``).
     compressor : numcodecs compressor
         Compressor applied to each on-disk ``SKY`` chunk.
     io_engine : {"chunk", "xradio"}, optional

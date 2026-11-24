@@ -221,7 +221,7 @@ PLANE_SHAPES = [
 ]
 
 
-@pytest.mark.parametrize("backend", ["scipy", "pyfftw"])
+@pytest.mark.parametrize("backend", ["numpy", "scipy", "pyfftw"])
 @pytest.mark.parametrize("complex_dtype", [np.complex64, np.complex128])
 @pytest.mark.parametrize("shape", PLANE_SHAPES, ids=str)
 def test_transforms_are_the_shifted_transforms(shape, complex_dtype, backend):
@@ -259,7 +259,7 @@ def test_transforms_are_the_shifted_transforms(shape, complex_dtype, backend):
                     np.testing.assert_array_equal(given, x)
 
 
-@pytest.mark.parametrize("backend", ["scipy", "pyfftw"])
+@pytest.mark.parametrize("backend", ["numpy", "scipy", "pyfftw"])
 @pytest.mark.parametrize("shape", [(90, 120), (120, 90), (10, 14), (16, 16)], ids=str)
 def test_centre_point_transforms_to_plus_one(shape, backend):
     """A unit point at the centre pixel (n0/2, n1/2), the phase centre of an
@@ -305,7 +305,7 @@ def test_square_planes_fold_as_before(shape):
     )
 
 
-@pytest.mark.parametrize("backend", ["scipy", "pyfftw"])
+@pytest.mark.parametrize("backend", ["numpy", "scipy", "pyfftw"])
 def test_rectangular_point_spread_function_and_dirty_image_are_positive(backend):
     """ifft_norm_img_xds on the 90 x 120 padded grid of a 74 x 100 image
     (fft_padding 1.2, n0/2 + n1/2 = 105 odd): positive uv weights give a point
@@ -396,6 +396,56 @@ def test_fftw_unaligned_transform_uses_line_scratch(
         assert backing[:offset] == bytes([0xA5]) * offset
         assert backing[-1] == 0xA5
     assert allocations
+
+
+@pytest.mark.parametrize("dtype", [np.complex64, np.complex128])
+@pytest.mark.parametrize("inverse", [False, True])
+@pytest.mark.parametrize("shape,axes", [((18, 24), (-2, -1)), ((6, 3, 10), (0, 2))])
+def test_numpy_unaligned_transform_stays_in_place(dtype, inverse, shape, axes):
+    """Under "numpy" an unaligned array is transformed in its own memory, with the
+    bits of the aligned array's transform."""
+    rng = np.random.default_rng(42)
+    values = (rng.normal(size=shape) + 1j * rng.normal(size=shape)).astype(dtype)
+    transform = ifft_uv_to_lm if inverse else fft_lm_to_uv
+    kwargs = dict(fft_plane_dims=axes, fft_backend="numpy", overwrite_input=True)
+    if not inverse:
+        kwargs["complex_dtype"] = dtype
+    reference = transform(values.copy(), **kwargs)
+    for offset in range(1, np.dtype(dtype).alignment):
+        backing = bytearray([0xA5]) * (values.nbytes + offset + 1)
+        unaligned = np.ndarray(shape, dtype=dtype, buffer=backing, offset=offset)
+        unaligned[...] = values
+        result = transform(unaligned, **kwargs)
+        assert np.shares_memory(result, unaligned)
+        np.testing.assert_array_equal(result, reference)
+        assert backing[:offset] == bytes([0xA5]) * offset
+        assert backing[-1] == 0xA5
+
+
+def test_numpy_unaligned_plane_takes_one_row():
+    """Under "numpy" an unaligned 64 x 8192 complex64 plane is transformed through
+    one aligned row, without a plane-sized realignment copy: the peak stays within
+    that row, NumPy's three 8192-element buffers of the checkerboard multiplies and
+    4 KiB. A block of 8 of these rows (512 KiB) is about twice the bound, so blocks
+    of 8 lines would exceed it."""
+    import tracemalloc
+
+    rng = np.random.default_rng(64)
+    shape = (64, 8192)
+    values = rng.standard_normal(shape) + 1j * rng.standard_normal(shape)
+    work = _spilled(values.astype(np.complex64))
+    # Untraced: a process's first call of the FFT module imports config_check.
+    ifft_uv_to_lm(work, fft_backend="numpy", overwrite_input=True)
+    tracemalloc.start()
+    try:
+        before = tracemalloc.get_traced_memory()[0]
+        tracemalloc.reset_peak()
+        ifft_uv_to_lm(work, fft_backend="numpy", overwrite_input=True)
+        peak = tracemalloc.get_traced_memory()[1] - before
+    finally:
+        tracemalloc.stop()
+    row, buffers = 8192 * 8, 3 * 8192 * 8
+    assert peak <= row + buffers + 4096
 
 
 def _spilled(values):
@@ -494,3 +544,25 @@ def test_scipy_with_three_workers_stays_within_rounding(n, dtype):
     ):
         bound = 8 * np.finfo(dtype).eps * np.abs(one).max()
         assert np.abs(three - one).max() <= bound
+
+
+@pytest.mark.parametrize("shape", [(8, 12), (9, 12), (11, 13)], ids=str)
+@pytest.mark.parametrize("fft_backend", ["numpy", "scipy", "pyfftw"])
+def test_both_transforms_hand_on_their_fft_backend(fft_backend, shape, monkeypatch):
+    """On even and odd planes ifft_uv_to_lm and fft_lm_to_uv call the FFT module's
+    transform with their fft_backend."""
+    from astroviper.processing_functions import fft
+
+    seen = []
+    for name in ("fft2", "ifft2"):
+        real = getattr(fft, name)
+
+        def spy(*args, _real=real, **kwargs):
+            seen.append(kwargs["fft_backend"])
+            return _real(*args, **kwargs)
+
+        monkeypatch.setattr(fft, name, spy)
+    x = np.ones(shape, dtype=np.complex128)
+    ifft_uv_to_lm(x.copy(), fft_backend=fft_backend)
+    fft_lm_to_uv(x.copy(), fft_backend=fft_backend)
+    assert seen == [fft_backend, fft_backend]

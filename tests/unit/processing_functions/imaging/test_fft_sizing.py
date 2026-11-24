@@ -50,3 +50,14 @@ class TestNextFftFriendlySize:
     def test_already_friendly_is_unchanged(self):
         for n in (2, 3, 5, 6, 10, 16, 1000, 1024, 12000, 13500):
             assert next_fft_friendly_size(n) == n
+
+    def test_targets_below_one_and_floats(self):
+        """fft_sizing keeps its answers where scipy's next_fast_len differs: a
+        target below 1 gives 1 (next_fast_len gives 0 for 0 and refuses a negative
+        target), odd also with even=True, as before; a float target is truncated
+        (next_fast_len refuses floats)."""
+        for target in (0, -1, -7, 0.4):
+            assert next_fft_friendly_size(target) == 1
+            assert next_fft_friendly_size(target, even=True) == 1
+        assert next_fft_friendly_size(9830.9) == 10000
+        assert next_fft_friendly_size(1001.5, even=True) == 1024

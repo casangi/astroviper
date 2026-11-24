@@ -92,6 +92,27 @@ def test_feather_core_scipy_matches_pyfftw():
     np.testing.assert_allclose(a["SKY"].values, b["SKY"].values, atol=1e-9, rtol=1e-7)
 
 
+def test_feather_core_numpy_matches_scipy(monkeypatch):
+    """numpy.fft and scipy.fft agree to FFT precision; under "numpy" the three
+    transforms of the FFT module run in numpy."""
+    from astroviper.processing_functions import fft
+
+    seen = []
+    for name in ("fft2", "ifft2"):
+        real = getattr(fft, name)
+
+        def spy(*args, _real=real, **kwargs):
+            seen.append(kwargs["fft_backend"])
+            return _real(*args, **kwargs)
+
+        monkeypatch.setattr(fft, name, spy)
+    sd, intf = _make_pair(dtype=np.float64)
+    a = feather_core(sd, intf, fft_backend="numpy")
+    assert seen == ["numpy"] * 3
+    b = feather_core(sd, intf, fft_backend="scipy")
+    np.testing.assert_allclose(a["SKY"].values, b["SKY"].values, atol=1e-9, rtol=1e-7)
+
+
 def test_feather_core_missing_interferometer_beam_raises():
     sd, intf = _make_pair()
     intf = intf.drop_vars("BEAM_FIT_PARAMS_SKY")
