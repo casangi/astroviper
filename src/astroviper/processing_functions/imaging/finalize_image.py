@@ -83,6 +83,7 @@ def finalize_image_products(
     primary_beam_limit=0.2,
     image_data_group_in_residual_name="residual",
     image_data_group_in_model_name="model",
+    apparent_inputs=None,
 ):
     """Convert internal image solutions to the common public flat-sky basis.
 
@@ -99,6 +100,11 @@ def finalize_image_products(
         Positive finite primary-beam response required for valid sky pixels.
     image_data_group_in_residual_name, image_data_group_in_model_name : str, optional
         Input product groups. Their public sky roles are updated in the result.
+    apparent_inputs : dict or None, optional
+        Empty temporary mapping supplied only when flat-noise restoration is
+        requested. Receives apparent model and principal residual arrays before
+        cutoff masking; restore_finalized_image consumes and clears the mapping.
+        These arrays are never attached to the public dataset.
 
     Returns
     -------
@@ -152,6 +158,24 @@ def finalize_image_products(
         residual = _mtmfs_principal_residual_for_restoration(
             residual, out[_role(out, residual_group, "point_spread_function")]
         )
+    if apparent_inputs is not None:
+        if apparent_inputs:
+            raise ValueError("apparent_inputs must be empty before finalization")
+        if continuum_mode == "mvc":
+            common_beam = out[_role(out, residual_group, "primary_beam")]
+            if "frequency" in common_beam.dims:
+                common_beam = common_beam.squeeze("frequency", drop=True)
+            polynomial_beam = out["PRIMARY_BEAM_TAYLOR"]
+            apparent_inputs["model"] = multiply_taylor_polynomials(
+                _divide_by_beam(model, common_beam, 0.0, 0.0), polynomial_beam
+            )
+            apparent_inputs["residual"] = multiply_taylor_polynomials(
+                _divide_by_beam(residual, common_beam, 0.0, np.nan), polynomial_beam
+            )
+        else:
+            # Keep references to existing arrays; finalization replaces the
+            # public variables without modifying the solver's arrays in place.
+            apparent_inputs.update(model=model, residual=residual)
     if continuum_mode == "mfs":
         from astroviper.processing_functions.imaging.restore import (
             _divide_taylor_polynomials,
@@ -268,6 +292,7 @@ def restore_finalized_image(
     image_data_group_in_residual_name="residual",
     image_data_group_in_model_name="model",
     image_data_group_out_restore_name="restored",
+    apparent_inputs=None,
 ):
     """Restore requested public flat-sky and flat-noise products.
 
@@ -292,6 +317,10 @@ def restore_finalized_image(
     image_data_group_out_restore_name : str, optional
         Group for the requested restored image. With both, a separate
         primary_beam_corrected_restored group registers the flat-sky product.
+    apparent_inputs : dict or None, optional
+        Temporary apparent inputs from finalize_image_products. Entries are
+        consumed during restoration and are not retained in the result. When
+        absent, apparent inputs are reconstructed on the valid flat-sky domain.
 
     Returns
     -------
@@ -345,13 +374,17 @@ def restore_finalized_image(
     if restoration_output in ("primary_beam_corrected", "both"):
         requested.append(("SKY_PRIMARY_BEAM_CORRECTED_RESTORED", model, residual))
     if restoration_output in ("apparent", "both"):
-        primary_beam = out[_role(out, rg, "primary_beam")]
-        if axis == "frequency":
+        if apparent_inputs:
+            apparent_model = apparent_inputs.pop("model").transpose(*dims)
+            apparent_residual = apparent_inputs.pop("residual").transpose(*dims)
+        elif axis == "frequency":
+            primary_beam = out[_role(out, rg, "primary_beam")]
             apparent_model, apparent_residual = (
                 model * primary_beam,
                 residual * primary_beam,
             )
         else:
+            primary_beam = out[_role(out, rg, "primary_beam")]
             apparent_model = multiply_taylor_polynomials(model, primary_beam)
             apparent_residual = multiply_taylor_polynomials(residual, primary_beam)
         requested.append(("SKY_RESTORED", apparent_model, apparent_residual))
@@ -383,6 +416,13 @@ def restore_finalized_image(
             if name == "SKY_PRIMARY_BEAM_CORRECTED_RESTORED"
             else "Restored flat-noise apparent-sky image."
         )
+
+    restored_names = [name for name, _, _ in requested]
+    # Release the temporary apparent arrays before any target-beam residual
+    # allocation. Only the public products and flat-sky inputs remain live.
+    del requested, model_input, residual_input
+    if restoration_output in ("apparent", "both"):
+        del apparent_model, apparent_residual
 
     restored_beams = (
         restoring_beam
@@ -427,7 +467,7 @@ def restore_finalized_image(
         for k, v in out.attrs["data_groups"][rg].items()
         if k not in ("sky", "date", "description", "beam_fit_params_sky")
     }
-    for name, _, _ in requested:
+    for name in restored_names:
         is_corrected = name == "SKY_PRIMARY_BEAM_CORRECTED_RESTORED"
         group_name = (
             "primary_beam_corrected_restored"

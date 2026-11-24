@@ -1984,33 +1984,51 @@ def test_finalization_reuses_prepared_residual_without_another_transform(monkeyp
     assert result["residual_converged"]
 
 
-def test_finalization_passes_mtmfs_to_restoration(monkeypatch):
-    """The final append node enables MT-MFS principal-solution restoration."""
+@pytest.mark.parametrize("mode", ["mfs", "mvc"])
+@pytest.mark.parametrize(
+    "restore,output",
+    [
+        (False, "both"),
+        (True, "primary_beam_corrected"),
+        (True, "apparent"),
+        (True, "both"),
+    ],
+)
+def test_finalization_retains_inputs_only_for_requested_flat_noise(
+    monkeypatch, mode, restore, output
+):
+    """The final node converts principal residuals once and consumes temporary inputs."""
     from tests.unit.processing_functions.imaging.test_public_image_conventions import (
         image_case,
     )
 
-    image, _, _ = image_case("mfs")
-    received = {}
+    finalizer = importlib.import_module(
+        "astroviper.processing_functions.imaging.finalize_image"
+    )
+    image, _, rho = image_case(mode)
+    finalize = finalizer.finalize_image_products
+    captured = []
 
-    def fake_restore(image, **kwargs):
-        received.update(kwargs)
-        image["SKY_RESTORED"] = image["SKY_RESIDUAL"].copy()
-        return image, pd.DataFrame({"T_restore": [0.0]})
+    def record(*args, **kwargs):
+        captured.append(kwargs["apparent_inputs"])
+        return finalize(*args, **kwargs)
 
-    monkeypatch.setattr(continuum_processing, "restore_continuum_image", fake_restore)
-    continuum_node.continuum_finalize_node(
+    monkeypatch.setattr(finalizer, "finalize_image_products", record)
+    result = continuum_node.continuum_finalize_node(
         {"image": image, "residual_converged": True},
         {
             "prepared_continuum_image": True,
             "static_xds": xr.Dataset(),
             "model_xds": image[["SKY_MODEL"]].copy(deep=True),
-            "restore": True,
+            "restore": restore,
+            "restoration_output": output,
+            "continuum_mode": mode,
             "deconvolver": "mtmfs",
         },
-    )
-
-    assert received["deconvolver"] == "mtmfs"
+    )["image"]
+    np.testing.assert_allclose(result.SKY_RESIDUAL, rho)
+    assert captured == ([{}] if restore and output in ("apparent", "both") else [None])
+    assert ("SKY_RESTORED" in result) == (restore and output in ("apparent", "both"))
 
 
 def _acceleration_image(seed, scale=1.0):
@@ -2035,7 +2053,7 @@ def _stub_mvc_beam_diagnostic(monkeypatch):
     monkeypatch.setattr(
         continuum_processing,
         "fit_mvc_primary_beam_taylor",
-        lambda image: xr.DataArray(0.0, name="PRIMARY_BEAM_TAYLOR"),
+        lambda image, **kwargs: xr.DataArray(0.0, name="PRIMARY_BEAM_TAYLOR"),
     )
 
 

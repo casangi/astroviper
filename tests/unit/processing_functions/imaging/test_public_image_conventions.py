@@ -254,3 +254,113 @@ def test_public_cube_restoration_honors_beam_selection_and_overwrite():
     )
     with pytest.raises(FileExistsError, match="already exist"):
         restore_image(restored, overwrite=False)
+
+
+@pytest.mark.parametrize("mode", [None, "mfs", "mvc"])
+@pytest.mark.parametrize("output", ["apparent", "both"])
+@pytest.mark.parametrize("target", [None, [6e-5, 5e-5, 0.0]])
+def test_flat_noise_uses_unmasked_inputs_and_releases_them(mode, output, target):
+    """The PB cutoff must not discard finite apparent sky before convolution."""
+    import weakref
+
+    from astroviper.processing_functions.imaging.restore import _restore_image_arrays
+
+    image, intrinsic, rho = image_case(mode)
+    # Put a component below the cutoff, close enough to illuminate supported
+    # pixels through convolution. The beam varies across the cutoff boundary.
+    intrinsic.values[..., 8, 8] = 0
+    intrinsic.values[:, 0, :, 2, 8] = 2
+    if mode:
+        intrinsic.values[:, 1] = intrinsic.values[:, 0] * 0.5
+    beam = xr.ones_like(intrinsic)
+    beam.values[:, 0] = np.linspace(0.1, 0.7, 16)[:, None]
+    if mode:
+        beam.values[:, 1] = -0.2 * beam.values[:, 0]
+        expected_model = multiply_taylor_polynomials(intrinsic, beam)
+        expected_residual = multiply_taylor_polynomials(rho, beam)
+        image["PRIMARY_BEAM_TAYLOR"] = beam
+        primary = beam.isel(taylor_term=0, drop=True).expand_dims(
+            frequency=image.frequency, axis=1
+        )
+    else:
+        primary = beam
+        expected_model, expected_residual = intrinsic * beam, rho * beam
+    image["PRIMARY_BEAM"] = primary
+    if mode == "mvc":
+        common = primary.isel(frequency=0, drop=True)
+        image["SKY_MODEL"], image["SKY_RESIDUAL"] = intrinsic * common, rho * common
+    else:
+        image["SKY_MODEL"], image["SKY_RESIDUAL"] = expected_model, expected_residual
+    if mode:
+        image.SKY_RESIDUAL.values[:, 1] *= 0.25
+        # Assignment above may share storage with this expected array.
+        expected_residual = multiply_taylor_polynomials(rho, beam)
+    original = image.copy(deep=True)
+    apparent_inputs = {}
+    finalized = finalize_image_products(
+        image,
+        continuum_mode=mode,
+        deconvolver="mtmfs" if mode else "hogbom",
+        apparent_inputs=apparent_inputs,
+    )
+    np.testing.assert_allclose(apparent_inputs["model"], expected_model)
+    np.testing.assert_allclose(apparent_inputs["residual"], expected_residual)
+    references = [weakref.ref(value) for value in apparent_inputs.values()]
+    assert np.isnan(finalized.SKY_RESIDUAL.values[..., :3, :]).all()
+    assert not finalized.SKY_MODEL.values[..., :3, :].any()
+    restored, _ = restore_finalized_image(
+        finalized,
+        restoration_output=output,
+        restoring_beam=target,
+        apparent_inputs=apparent_inputs,
+    )
+    expected, _ = _restore_image_arrays(
+        expected_residual.values,
+        expected_model.values,
+        np.tile([3e-5, 2e-5, 0.0], (1, expected_model.shape[1], 2, 1)),
+        1e-5,
+        output="apparent",
+        restoring_beam=target,
+        processing_function_threads=1,
+    )
+    np.testing.assert_allclose(restored.SKY_RESTORED, expected["apparent"], atol=1e-14)
+    assert np.isfinite(restored.SKY_RESTORED).all()
+    assert not apparent_inputs
+    assert all(reference() is None for reference in references)
+    assert not any("APPARENT" in name for name in restored.data_vars)
+    xr.testing.assert_identical(image, original)
+
+
+@pytest.mark.parametrize("mode", ["mfs", "mvc"])
+@pytest.mark.parametrize("output", ["apparent", "both", "primary_beam_corrected"])
+def test_continuum_restoration_collects_inputs_only_for_flat_noise(
+    monkeypatch, mode, output
+):
+    import importlib
+
+    module = importlib.import_module(
+        "astroviper.processing_functions.imaging.image_continuum_single_field"
+    )
+    image, _, _ = image_case(mode)
+    finalizer = importlib.import_module(
+        "astroviper.processing_functions.imaging.finalize_image"
+    )
+    finalize = finalizer.finalize_image_products
+    captured = []
+
+    def record(*args, **kwargs):
+        captured.append(kwargs["apparent_inputs"])
+        return finalize(*args, **kwargs)
+
+    monkeypatch.setattr(finalizer, "finalize_image_products", record)
+    module.restore_continuum_image(
+        image,
+        continuum_mode=mode,
+        deconvolver="mtmfs",
+        restoration_output=output,
+        input_checked=True,
+    )
+    if output == "primary_beam_corrected":
+        assert captured == [None]
+    else:
+        assert captured == [{}]  # Restoration consumed every retained input.

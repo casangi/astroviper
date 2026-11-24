@@ -101,12 +101,34 @@ def workflow_arguments(tmp_path, observation, mode, restore):
 
 @pytest.mark.parametrize("mode", ["cube", "mfs", "mvc"])
 @pytest.mark.parametrize(
-    "restore,target",
-    [(False, None), (True, None), (True, [300 * ARCSEC, 300 * ARCSEC, 0.0])],
+    "restore,target,output",
+    [
+        (False, None, "both"),
+        (True, None, "apparent"),
+        (True, None, "primary_beam_corrected"),
+        (True, None, "both"),
+        (True, [300 * ARCSEC, 300 * ARCSEC, 0.0], "both"),
+    ],
 )
-def test_off_axis_workflow_public_outputs(tmp_path, observation, mode, restore, target):
+def test_off_axis_workflow_public_outputs(
+    tmp_path, observation, mode, restore, target, output, monkeypatch
+):
+    import importlib
+
+    finalizer = importlib.import_module(
+        "astroviper.processing_functions.imaging.finalize_image"
+    )
+    finalize = finalizer.finalize_image_products
+    captured = []
+
+    def record(*args, **kwargs):
+        captured.append(kwargs["apparent_inputs"])
+        return finalize(*args, **kwargs)
+
+    monkeypatch.setattr(finalizer, "finalize_image_products", record)
     arguments = workflow_arguments(tmp_path, observation, mode, restore)
     arguments["restoring_beam"] = target
+    arguments["restoration_output"] = output
     with dask.config.set(scheduler="synchronous"):
         if mode == "cube":
             applications.imaging.image_cube_single_field(
@@ -116,13 +138,21 @@ def test_off_axis_workflow_public_outputs(tmp_path, observation, mode, restore, 
             applications.imaging.image_continuum_single_field(
                 deconvolver="mtmfs", continuum_mode=mode, **arguments
             )
+    assert captured
+    assert all(
+        value == {} if restore and output in ("apparent", "both") else value is None
+        for value in captured
+    )
     image = load_image(arguments["image_store"])
     assert not check_image(image), str(check_image(image))
     assert image.SKY_MODEL.attrs["sky_convention"] == "flat_sky"
     assert image.SKY_RESIDUAL.attrs["residual_representation"] == "coefficient_space"
     assert all(name not in image for name in ("ALPHA", "ALPHA_ERROR", "BETA"))
     for name in ("SKY_RESTORED", "SKY_PRIMARY_BEAM_CORRECTED_RESTORED"):
-        assert (name in image) == restore
+        requested = output == "both" or output == (
+            "apparent" if name == "SKY_RESTORED" else "primary_beam_corrected"
+        )
+        assert (name in image) == (restore and requested)
     if mode == "cube":
         assert "frequency" in image.PRIMARY_BEAM.dims
     else:
@@ -139,7 +169,7 @@ def test_off_axis_workflow_public_outputs(tmp_path, observation, mode, restore, 
             image.attrs["data_groups"]["residual"]["beam_fit_params_sky"]
             == "BEAM_FIT_PARAMS_SKY_RESIDUAL"
         )
-    if restore:
+    if restore and output in ("primary_beam_corrected", "both"):
         from astroviper.processing_functions.imaging.restore import (
             _clean_beam_kernel_ft,
             _convolve_with_clean_beam,

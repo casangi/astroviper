@@ -1398,9 +1398,13 @@ def image_cube_single_field(
         finalize_image_products,
     )
 
+    apparent_inputs = (
+        {} if restore and restoration_output in ("apparent", "both") else None
+    )
     img_xds = finalize_image_products(
         img_xds,
         primary_beam_limit=(cycle_control_params.get("primary_beam_limit", 0.0) or 0.2),
+        apparent_inputs=apparent_inputs,
     )
 
     # Restore: convolve the model with the clean beam and add the residual
@@ -1415,22 +1419,20 @@ def image_cube_single_field(
     # blanking cutoff when set, else the CASA pblimit default of 0.2.
     timing["T_correct_sky_by_primary_beam"] = 0.0
     if restore:
-        from astroviper.processing_functions.imaging.restore import restore_image
+        from astroviper.processing_functions.imaging.finalize_image import (
+            restore_finalized_image,
+        )
 
-        img_xds, restore_return_df = restore_image(
+        img_xds, restore_return_df = restore_finalized_image(
             img_xds,
             image_data_group_in_residual_name="residual",
             image_data_group_in_model_name="model",
             image_data_group_out_restore_name="restored",
             processing_function_threads=processing_function_threads,
             # The public model remains available alongside the restored image.
-            consume_model=False,
+            apparent_inputs=apparent_inputs,
             restoration_output=restoration_output,
             restoring_beam=restoring_beam,
-            input_checked=True,
-            primary_beam_limit=(
-                cycle_control_params.get("primary_beam_limit", 0.0) or 0.2
-            ),
         )
         accumulate_timing(timing, restore_return_df)
 

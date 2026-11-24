@@ -2029,6 +2029,7 @@ def _fit_primary_beam_taylor(
     continuum_mode,
     primary_beam_limit,
     usage,
+    mask_below_limit=True,
 ):
     """Solve a globally reduced primary-beam polynomial fit.
 
@@ -2143,10 +2144,11 @@ def _fit_primary_beam_taylor(
                 fitted_coefficients.reshape((nterms, *rhs.shape[3:]))
             )
 
-    supported = np.isfinite(coefficients[:, 0]) & (
-        coefficients[:, 0] >= primary_beam_limit
-    )
-    coefficients = np.where(supported[:, None], coefficients, np.nan)
+    if mask_below_limit:
+        supported = np.isfinite(coefficients[:, 0]) & (
+            coefficients[:, 0] >= primary_beam_limit
+        )
+        coefficients = np.where(supported[:, None], coefficients, np.nan)
     coefficients = coefficients.astype(numerator.dtype, copy=False)
 
     result = numerator.copy(data=coefficients)
@@ -2191,7 +2193,7 @@ def fit_mfs_primary_beam_taylor(contributions, primary_beam_limit=0.2):
     )
 
 
-def fit_mvc_primary_beam_taylor(contributions):
+def fit_mvc_primary_beam_taylor(contributions, *, mask_below_limit=True):
     """Fit the frequency-dependent MVC primary beam in the Taylor basis.
 
     Map tasks supply additive weighted PB projections and spectral weight
@@ -2205,13 +2207,17 @@ def fit_mvc_primary_beam_taylor(contributions):
     ----------
     contributions : xarray.Dataset
         Globally reduced first-cycle MVC contributions.
+    mask_below_limit : bool, optional
+        Set False only when reconstructing apparent inputs for flat-noise
+        restoration, which requires beam coefficients below the sky cutoff.
 
     Returns
     -------
     xarray.DataArray
         ``PRIMARY_BEAM_TAYLOR`` with dimensions
         ``(time, taylor_term, polarization, l, m)``. Pixels whose fitted
-        zeroth-order PB is not above the configured PB limit are NaN.
+        zeroth-order PB is below the configured PB limit are NaN unless
+        mask_below_limit is False.
     """
     primary_beam_limit = float(contributions.attrs.get("primary_beam_limit", 0.2))
     result = _fit_primary_beam_taylor(
@@ -2221,6 +2227,7 @@ def fit_mvc_primary_beam_taylor(contributions):
         continuum_mode="mvc",
         primary_beam_limit=primary_beam_limit,
         usage="reconstruct_apparent_polynomial_after_common_beam_removal",
+        mask_below_limit=mask_below_limit,
     )
     output_dtype = contributions.attrs.get("mvc_output_dtype")
     if output_dtype is not None:
@@ -4691,9 +4698,11 @@ def restore_continuum_image(
     mode = _resolve_restoration_continuum_mode(
         img_xds, img_xds[residual_name], continuum_mode
     )
+    apparent_inputs = {} if restoration_output in ("apparent", "both") else None
     finalized = finalize_image_products(
         img_xds,
         continuum_mode=mode,
+        apparent_inputs=apparent_inputs,
         deconvolver=deconvolver,
         primary_beam_limit=primary_beam_limit,
         image_data_group_in_residual_name=image_data_group_in_residual_name,
@@ -4701,6 +4710,7 @@ def restore_continuum_image(
     )
     restored, timing = restore_finalized_image(
         finalized,
+        apparent_inputs=apparent_inputs,
         restoration_output=restoration_output,
         restoring_beam=restoring_beam,
         processing_function_threads=processing_function_threads,

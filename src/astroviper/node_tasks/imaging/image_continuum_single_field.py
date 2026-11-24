@@ -3664,7 +3664,12 @@ def continuum_cycle_append_node(
             )
 
             restoration_xds = fit_mvc_primary_beam_taylor(
-                input_data["image"]
+                input_data["image"],
+                mask_below_limit=not (
+                    input_params.get("restore", False)
+                    and input_params.get("restoration_output", "primary_beam_corrected")
+                    in ("apparent", "both")
+                ),
             ).to_dataset()
 
     (
@@ -3969,8 +3974,18 @@ def continuum_finalize_node(
         public_continuum_layout,
     )
 
+    restoration_output = input_params.get(
+        "restoration_output", "primary_beam_corrected"
+    )
+    apparent_inputs = (
+        {}
+        if input_params.get("restore", False)
+        and restoration_output in ("apparent", "both")
+        else None
+    )
     img_xds = finalize_image_products(
         img_xds,
+        apparent_inputs=apparent_inputs,
         continuum_mode=input_params.get("continuum_mode", "mfs"),
         deconvolver=input_params.get("deconvolver", "hogbom"),
         primary_beam_limit=input_params.get("primary_beam_limit", 0.2),
@@ -3980,16 +3995,13 @@ def continuum_finalize_node(
     )
     # Restoration remains optional; public model/residual finalization does not.
     if input_params.get("restore", False):
-        from astroviper.processing_functions.imaging.image_continuum_single_field import (
-            restore_continuum_image,
+        from astroviper.processing_functions.imaging.finalize_image import (
+            restore_finalized_image,
         )
 
-        continuum_mode = input_params.get("continuum_mode", "mfs")
-        restoration_output = input_params.get(
-            "restoration_output", "primary_beam_corrected"
-        )
-        img_xds, restore_timing_df = restore_continuum_image(
+        img_xds, restore_timing_df = restore_finalized_image(
             img_xds,
+            apparent_inputs=apparent_inputs,
             image_data_group_in_residual_name=(
                 input_params.get(
                     "image_data_group_in_name",
@@ -4002,12 +4014,8 @@ def continuum_finalize_node(
                 "processing_function_threads",
                 1,
             ),
-            primary_beam_limit=input_params.get("primary_beam_limit", 0.2),
-            deconvolver=input_params.get("deconvolver", "hogbom"),
             restoration_output=restoration_output,
             restoring_beam=input_params.get("restoring_beam"),
-            continuum_mode=continuum_mode,
-            input_checked=True,
         )
 
         input_data["timing_restore"] = restore_timing_df.reset_index(drop=True)

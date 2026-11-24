@@ -761,7 +761,11 @@ def test_mvc_restore_to_a_target_convolves_the_divided_residual(dtype):
 
     # MVC removes the common beam, then reconstructs the actual apparent polynomial.
     coefficients = image.PRIMARY_BEAM_TAYLOR.values.astype(np.float64)
-    sky_model, sky_residual = divided(model), divided(residual)
+    positive = np.broadcast_to(primary_beam > 0, model.shape)
+    sky_model, sky_residual = (
+        np.divide(planes, primary_beam, out=np.zeros(model.shape), where=positive)
+        for planes in (model, residual)
+    )
     apparent_model, apparent_residual = (
         np.zeros_like(sky_model),
         np.zeros_like(sky_residual),
@@ -777,7 +781,7 @@ def test_mvc_restore_to_a_target_convolves_the_divided_residual(dtype):
     _assert_close(
         result.SKY_RESTORED,
         np.where(
-            inside,
+            positive,
             _apply(apparent_model, kernel_ft) + _apply(apparent_residual, transform),
             np.nan,
         ),
@@ -1577,11 +1581,15 @@ def test_mvc_prediction_applies_channel_over_effective_primary_beam():
     np.testing.assert_allclose(actual.squeeze(), [5.0, 30.0])
 
 
-def test_mvc_primary_beam_taylor_fit_survives_chunk_reduction():
+@pytest.mark.parametrize("amplitude", [1.0, 0.1])
+@pytest.mark.parametrize("mask_below_limit", [True, False])
+def test_mvc_primary_beam_taylor_fit_survives_chunk_reduction(
+    amplitude, mask_below_limit
+):
     """Reduced PB moments recover the channel beam's Taylor polynomial."""
     frequency = np.array([0.8e9, 0.9e9, 1.1e9, 1.2e9])
     x = (frequency - 1.0e9) / 1.0e9
-    expected = np.array([0.8, -0.1, 0.05])
+    expected = np.array([0.8, -0.1, 0.05]) * amplitude
     primary_beam = expected[0] + expected[1] * x + expected[2] * x**2
     normalization = _frequency_normalization([1.0, 2.0, 3.0, 4.0], frequency)
     chunks = []
@@ -1603,13 +1611,16 @@ def test_mvc_primary_beam_taylor_fit_survives_chunk_reduction():
     for variable_name in reduced.data_vars:
         reduced[variable_name] = reduced[variable_name] + chunks[1][variable_name]
 
-    fitted = fit_mvc_primary_beam_taylor(reduced)
+    fitted = fit_mvc_primary_beam_taylor(reduced, mask_below_limit=mask_below_limit)
     assert fitted.dims == ("time", "taylor_term", "polarization", "l", "m")
     assert (
         fitted.attrs["usage"]
         == "reconstruct_apparent_polynomial_after_common_beam_removal"
     )
-    np.testing.assert_allclose(fitted.values.squeeze(), expected, rtol=1.0e-12)
+    if amplitude == 0.1 and mask_below_limit:
+        assert np.isnan(fitted).all()
+    else:
+        np.testing.assert_allclose(fitted.values.squeeze(), expected, rtol=1.0e-12)
 
 
 def test_mfs_primary_beam_taylor_fit_survives_chunk_reduction():
