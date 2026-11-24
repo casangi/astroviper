@@ -75,12 +75,12 @@ Cube and continuum restoration use the same `restoration_output` selector:
 
 | Selector | Cube product | Continuum product |
 | --- | --- | --- |
-| `apparent` | `SKY_RESTORED` | `SKY_RESTORED_FLAT_NOISE` |
-| `primary_beam_corrected` | `SKY_RESTORED_PRIMARY_BEAM_CORRECTED` | `SKY_RESTORED_FLAT_SKY` |
+| `apparent` | `SKY_RESTORED` | `SKY_RESTORED` |
+| `primary_beam_corrected` | `SKY_PRIMARY_BEAM_CORRECTED_RESTORED` | `SKY_PRIMARY_BEAM_CORRECTED_RESTORED` |
 | `both` | Both cube products | Both Taylor stacks |
 
-Cube workflows and direct restoration default to apparent output; the
-continuum distributed driver defaults to corrected output. Imaging workflows
+Cube and continuum imaging workflows default to corrected output. Standalone
+legacy cube restoration retains its apparent-output default. Imaging workflows
 compute restoration products only when `restore=True`; the selector is still
 validated when restoration is disabled. Neither workflow accepts the retired
 `primary_beam_correction` Boolean. Cube correction divides model and residual
@@ -561,3 +561,23 @@ preparation. A checked caller may supply the keyword or dictionary trust flag;
 finalization forwards it without changing the caller's mapping. Accumulated
 model/static-state checks and restoration's actual-product checks always run,
 including when the configuration was already validated.
+
+
+Every imager finalizes flat-sky `SKY_MODEL` and coefficient-space `SKY_RESIDUAL`,
+even with restoration disabled. With a target clean beam, the public residual
+is transformed to that beam, preserving `corrected_restored = clean_beam * model + residual`.
+Continuum coefficients, including `PRIMARY_BEAM`, use `frequency_polynomial`;
+PSFs and normal-equation moments use `frequency_polynomial_moment` (2N−1 planes).
+MVC retains `COMMON_PRIMARY_BEAM` and reconstructs optional apparent coefficients
+using the actual frequency-dependent beam polynomial. Channel-beam caches are
+disabled; `wideband_primary_beam_memory_mode` must be `recompute`.
+
+`ALPHA`, `ALPHA_ERROR`, and `BETA` are produced by the separate
+`processing_functions.image_analysis.spectral_products` tool, from flat-sky
+restored coefficients and the reported residual. Imaging keep lists reject
+these diagnostics. `ALPHA_ERROR` is a residual diagnostic, not a calibrated uncertainty.
+
+Persisted continuum weights use the assumed XRADIO #661 staged region-I/O API.
+Tasks write directly into preallocated Processing Set targets, and read only
+their selected regions. XRADIO owns registration, history, provenance, consolidation,
+and cleanup. Without persistence, the disposable output-store cache remains in use.

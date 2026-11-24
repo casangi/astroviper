@@ -32,7 +32,13 @@ class TestImageDataGroupsForKeptVariables:
                     "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"
                 ),
             },
-            "model": {"sky": "SKY_MODEL"},
+            "model": {
+                "sky": "SKY_MODEL",
+                "mask": "MASK",
+                "point_spread_function": "POINT_SPREAD_FUNCTION",
+                "primary_beam": "PRIMARY_BEAM",
+                "beam_fit_params_point_spread_function": "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
+            },
         }
 
     def test_restored_goes_to_its_own_group(self):
@@ -55,11 +61,9 @@ class TestImageDataGroupsForKeptVariables:
         """Alpha, its error, and beta have stable public registry roles."""
         groups = image_data_groups_for_kept_variables(["alpha", "alpha_error", "beta"])
         assert groups == {
-            "restored": {
-                "alpha": "ALPHA",
-                "alpha_error": "ALPHA_ERROR",
-                "beta": "BETA",
-            }
+            "alpha": {"sky": "ALPHA"},
+            "alpha_error": {"sky": "ALPHA_ERROR"},
+            "beta": {"sky": "BETA"},
         }
 
     def test_variables_without_membership_are_skipped(self):
@@ -505,3 +509,19 @@ class TestWriteResultChunk:
         engine = kwargs.pop("io_engine")
         with pytest.raises(ValueError, match=match):
             write_result_chunk(engine, "unused", [], {}, None, **kwargs)
+
+
+def test_continuum_bandwidth_uses_selected_observation_channel_edges():
+    import numpy as np
+    import xarray as xr
+
+    from astroviper.utils.io import continuum_frequency_span
+
+    ds = xr.Dataset(coords={"frequency": [1e9, 2e9, 3e9, 4e9]})
+    ds.frequency.attrs["channel_width"] = {"data": [1e8, 2e8, 4e8, 8e8]}
+    tree = xr.DataTree.from_dict({"ms": ds})
+    mapping = {
+        0: {"data_selection": {"ms": {"frequency": [1, 2]}}},
+        1: {"data_selection": {"ms": {"frequency": [2]}}},
+    }
+    np.testing.assert_allclose(continuum_frequency_span(tree, mapping), 1.3e9)

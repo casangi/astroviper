@@ -152,7 +152,7 @@ def image_cube_single_field(
     vizualize_graph: bool = False,
     fft_backend="pyfftw",
     restore: bool = False,
-    restoration_output: str = "apparent",
+    restoration_output: str = "primary_beam_corrected",
     restoring_beam: list[float] | None = None,
     psf_fitting_method: str = "astroviper",
     gridding_kernel_params: dict[str, Any] | None = None,
@@ -560,19 +560,21 @@ def image_cube_single_field(
         FFT backend used by the gridder normalization (``"pyfftw"`` or
         ``"scipy"``).
     restore : bool
-        If ``True`` produce a restored image after deconvolution: the model
-        convolved with the clean beam (the Gaussian fit to the PSF) plus the
-        residual, written to the ``sky_restored`` (``SKY_RESTORED``) variable.
+        Whether to compute the products selected by ``restoration_output`` in the
+        same imaging workflow. Flat-sky model and residual outputs are always
+        finalized. ``ALPHA``, ``ALPHA_ERROR`` and ``BETA`` are computed only by the
+        separate ``spectral_products`` analysis tool.
     restoration_output : {"apparent", "primary_beam_corrected", "both"}, optional
-        Restored products to compute: ``"apparent"``, ``"primary_beam_corrected"``,
-        or ``"both"``. Cube outputs are ``SKY_RESTORED`` and
-        ``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``; continuum outputs are
-        ``SKY_RESTORED_FLAT_NOISE`` and ``SKY_RESTORED_FLAT_SKY``.
-        Cube corrects the model and residual by the channel power primary beam
-        before convolution. MFS divides their Taylor polynomials; MVC divides
-        by its common power primary beam. Corrected pixels below
-        ``primary_beam_limit`` are blanked with NaN. Imaging workflows use this
-        selector only when ``restore=True``.
+        Restored products to compute: ``"apparent"`` gives ``SKY_RESTORED``
+        (flat noise), ``"primary_beam_corrected"`` gives
+        ``SKY_PRIMARY_BEAM_CORRECTED_RESTORED`` (flat sky), and ``"both"`` gives both.
+        Every imager returns flat-sky ``SKY_MODEL`` and coefficient-space
+        ``SKY_RESIDUAL`` even with ``restore=False``. Primary-beam correction happens
+        before convolution: channel-wise division for cubes, coupled triangular
+        polynomial division for MFS, and common-beam division for MVC. MVC reconstructs
+        apparent coefficients using the frequency-dependent beam polynomial.
+        Only requested restored products are allocated. Spectral diagnostics require
+        the separate ``spectral_products`` analysis tool.
     restoring_beam : list of float or None, optional
         ``None`` restores each plane with its own PSF fit [CASA ``tclean``
         ``restoringbeam=''``]. ``[major, minor, pa]`` (FWHM and position angle
@@ -581,7 +583,7 @@ def image_cube_single_field(
         since CASA 5.6 (CAS-12148): the model is convolved with the unit-peak
         target beam, and the residual with the Gaussian that takes the plane's
         PSF beam to the target, times the ratio of the beam areas, so it is in
-        Jy per target beam. ``SKY_RESIDUAL`` is unchanged. A plane whose PSF
+        Jy per target beam. ``SKY_RESIDUAL`` records the residual at the target beam, preserving the public restoration identity. A plane whose PSF
         beam the target does not contain, or that has no PSF fit, keeps its
         residual unconvolved and unscaled, as ``tclean`` does, and is named in a
         warning. The continuum imager refuses a target that does not contain its
@@ -1040,6 +1042,13 @@ def image_cube_single_field(
         require_msv2_engine()
 
     clean_mask_array = load_clean_mask(clean_mask, image_params["image_size"])
+    image_data_variables_keep = list(
+        dict.fromkeys(
+            [*image_data_variables_keep, "sky_model", "sky_residual", "primary_beam"]
+        )
+    )
+    if restore and restoring_beam is not None:
+        image_data_variables_keep.append("beam_fit_params_sky_residual")
 
     # When restoring, the restored sky must be created on disk and written, so
     # ensure it is in the keep list (without mutating the caller's list).
@@ -1050,9 +1059,9 @@ def image_cube_single_field(
     ):
         image_data_variables_keep = list(image_data_variables_keep) + ["sky_restored"]
     if restore and restoration_output in ("primary_beam_corrected", "both"):
-        if "sky_restored_primary_beam_corrected" not in image_data_variables_keep:
+        if "sky_primary_beam_corrected_restored" not in image_data_variables_keep:
             image_data_variables_keep = list(image_data_variables_keep) + [
-                "sky_restored_primary_beam_corrected"
+                "sky_primary_beam_corrected_restored"
             ]
     # A restore records the beams it applied.
     if restore and "beam_fit_params_sky_restored" not in image_data_variables_keep:
@@ -1128,6 +1137,8 @@ def image_cube_single_field(
         do_sky_coords=False,
     )
     timing_distributed_application["T_make_empty_image_xds"] = time.time() - start
+    img_xds.attrs["public_image_convention"] = "flat_sky"
+    img_xds.attrs["public_residual_representation"] = "coefficient_space"
 
     # Register the image data groups for the kept variables so the on-disk
     # store carries the same group layout the node tasks build in memory

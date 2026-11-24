@@ -6,7 +6,7 @@ With ``auto_mask_params={}`` the cube and the continuum applications must find
 both sources in Stokes I by themselves, and nothing in Stokes V, where the mask
 stays empty and the plane stops with a zero mask. The mask must hold the peak
 of each source and stay below 8 percent of the image (measured: at most 5.8),
-and the model of each source must hold its apparent flux within 5 percent
+and the public flat-sky model of each source must hold its intrinsic flux within 5 percent
 (measured: within 2.9 percent). Hogbom may not put a component outside the mask,
 and the mask holds no pixel outside ``primary_beam_limit``.
 The arguments that exclude each other are refused before anything is written.
@@ -157,7 +157,7 @@ def run_continuum(
             memory_mode="in_memory",
             weight_memory_mode="in_memory",
             visibility_memory_mode="recompute",
-            wideband_primary_beam_memory_mode="in_memory",
+            wideband_primary_beam_memory_mode="recompute",
             overwrite=True,
             compute_backend="dask",
         )
@@ -173,8 +173,9 @@ def assert_sources_masked_and_cleaned(mask, model, truth, primary_beam):
             np.argmax((truth * primary_beam)[box]), truth[box].shape
         )
         assert mask[box][peak]
-        apparent = float(np.sum(truth[box] * primary_beam[box]))
-        np.testing.assert_allclose(model[box].sum(), apparent, rtol=FLUX_TOLERANCE)
+        np.testing.assert_allclose(
+            model[box].sum(), float(truth[box].sum()), rtol=FLUX_TOLERANCE
+        )
 
 
 @pytest.mark.parametrize("deconvolver", ["hogbom", "asp"])
@@ -210,7 +211,7 @@ def test_continuum_masks_the_sources_by_itself(
     )
     _, truth = simulated
     mask = image.MASK.values[0, 0, 0].astype(bool)
-    primary_beam = image.PRIMARY_BEAM.isel(frequency=0).values[0, 0]
+    primary_beam = image.PRIMARY_BEAM.isel(frequency_polynomial=0).values[0, 0]
     assert_sources_masked_and_cleaned(
         mask, image.SKY_MODEL.values[0, 0, 0], truth, primary_beam
     )
@@ -228,7 +229,10 @@ def test_continuum_mask_stays_inside_primary_beam_limit(tmp_path, simulated):
     )
     mask = image.MASK.values[0, 0, 0].astype(bool)
     assert mask.any()
-    assert image.PRIMARY_BEAM.isel(frequency=0).values[0, 0][mask].min() >= limit
+    assert (
+        image.PRIMARY_BEAM.isel(frequency_polynomial=0).values[0, 0][mask].min()
+        >= limit
+    )
 
 
 def test_a_dirty_image_gets_its_mask(tmp_path, simulated):

@@ -51,25 +51,12 @@ def check_kept_variables(
     # Shared registry membership does not mean every imager produces the key.
     # Reject impossible requests before allocating stores or constructing graphs.
     if mode is not None:
-        continuum_products = {
-            "sky_restored_flat_noise",
-            "sky_restored_flat_sky",
-            "alpha",
-            "alpha_error",
-            "beta",
-        }
-        cube_restored = {"sky_restored", "sky_restored_primary_beam_corrected"}
         requested = set(kept)
-        if mode.imaging_kind == "cube":
-            unsupported = requested & continuum_products
-            if unsupported:
-                raise ValueError(
-                    f"Cube imaging cannot produce continuum-only variables {sorted(unsupported)}."
-                )
-        elif requested & cube_restored:
+        restored_products = {"sky_restored", "sky_primary_beam_corrected_restored"}
+        diagnostics = requested & {"alpha", "alpha_error", "beta"}
+        if diagnostics:
             raise ValueError(
-                "Legacy continuum output keys are not produced; use "
-                "'sky_restored_flat_noise' or 'sky_restored_flat_sky' instead."
+                "Spectral diagnostics require the separate spectral_products analysis tool."
             )
 
         # --- Published UV grids ---
@@ -90,7 +77,7 @@ def check_kept_variables(
 
         # --- Restoration-dependent products ---
         # The keep list must not promise images that the disabled step cannot make.
-        restored_products = requested & (continuum_products | cube_restored)
+        restored_products = requested & restored_products
         if "restore" in config and not config["restore"] and restored_products:
             raise ValueError(
                 f"Requested variables {sorted(restored_products)} require restore=True."
@@ -103,12 +90,17 @@ def check_kept_variables(
             and not config["restore"]
         ):
             raise ValueError("beam_fit_params_sky_restored requires restore=True.")
-        # --- Selected cube restoration products ---
-        if mode.imaging_kind == "cube" and "restoration_output" in config:
+        if (
+            "beam_fit_params_sky_residual" in requested
+            and config.get("restoring_beam") is None
+        ):
+            raise ValueError("beam_fit_params_sky_residual requires a restoring_beam.")
+        # --- Selected restoration products (same convention for every imager) ---
+        if "restoration_output" in config:
             for key, allowed in (
                 ("sky_restored", ("apparent", "both")),
                 (
-                    "sky_restored_primary_beam_corrected",
+                    "sky_primary_beam_corrected_restored",
                     ("primary_beam_corrected", "both"),
                 ),
             ):
@@ -117,30 +109,6 @@ def check_kept_variables(
                         f"{key} is unavailable with restoration_output={config['restoration_output']!r}."
                     )
 
-        # --- Selected continuum restoration products ---
-        # A keep request must agree with the single restoration selector; never
-        # change the requested computation merely to satisfy the output list.
-        if mode.imaging_kind == "continuum" and "restoration_output" in config:
-            output = config["restoration_output"]
-            for key, allowed in (
-                ("sky_restored_flat_noise", ("apparent", "both")),
-                ("sky_restored_flat_sky", ("primary_beam_corrected", "both")),
-            ):
-                if key in requested and output not in allowed:
-                    raise ValueError(
-                        f"{key} is unavailable with restoration_output={output!r}."
-                    )
-
-        # --- Spectral coefficient availability ---
-        # Alpha needs coefficients zero and one; beta also needs coefficient two.
-        nterms = config.get("image_params", {}).get(
-            "n_taylor_terms", config.get("n_taylor_terms")
-        )
-        if nterms is not None:
-            for key, minimum in (("alpha", 2), ("alpha_error", 2), ("beta", 3)):
-                if key in requested and nterms < minimum:
-                    raise ValueError(f"{key} requires n_taylor_terms >= {minimum}.")
-
     if not fits:
         return
 
@@ -148,11 +116,11 @@ def check_kept_variables(
     # Restoration adds mandatory outputs locally; never append to the caller list.
     effective = set(kept)
     if config.get("restore", False):
-        output = config.get("restoration_output", "apparent")
+        output = config.get("restoration_output", "primary_beam_corrected")
         if output in ("apparent", "both"):
             effective.add("sky_restored")
         if output in ("primary_beam_corrected", "both"):
-            effective.add("sky_restored_primary_beam_corrected")
+            effective.add("sky_primary_beam_corrected_restored")
     image_dims = ("time", "frequency", "polarization", "l", "m")
     beam_dims = ("time", "frequency", "polarization", "beam_params_label")
     unsupported = [

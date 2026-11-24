@@ -199,7 +199,7 @@ def test_double_precision(tmp_path):
 # --------------------------------------------------------------------------- #
 # The beam of each file
 # --------------------------------------------------------------------------- #
-RESTORED = ["sky_restored", "sky_restored_primary_beam_corrected"]
+RESTORED = ["sky_restored", "sky_primary_beam_corrected_restored"]
 TARGET = np.array([3.0e-5, 2.0e-5, 0.5])
 
 
@@ -219,7 +219,7 @@ def _beams_table(store, key):
 def _restored_arrays(keep):
     full = _full_arrays()
     full["SKY_RESTORED"] = full["SKY_RESIDUAL"] + 1
-    full["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"] = full["SKY_RESIDUAL"] + 2
+    full["SKY_PRIMARY_BEAM_CORRECTED_RESTORED"] = full["SKY_RESIDUAL"] + 2
     full["BEAM_FIT_PARAMS_SKY_RESTORED"] = np.broadcast_to(
         TARGET, full["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].shape
     ).copy()
@@ -236,7 +236,7 @@ def _header_beam(store, key):
     return np.array([header[keyword] for keyword in ("BMAJ", "BMIN", "BPA")])
 
 
-def test_without_a_restoring_beam_the_corrected_file_has_no_beams(tmp_path):
+def test_without_a_restoring_beam_the_corrected_file_carries_its_beam(tmp_path):
     """Without a restoring beam the restored file carries the PSF beams and
     the corrected file none, as before restoring_beam existed."""
     from astropy.io import fits
@@ -250,14 +250,14 @@ def test_without_a_restoring_beam_the_corrected_file_has_no_beams(tmp_path):
         _beams_table(store, "sky_restored"),
         _casa_rows(full["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"][0]),
     )
-    path = os.path.join(store, "SKY_RESTORED_PRIMARY_BEAM_CORRECTED.fits")
+    path = os.path.join(store, "SKY_PRIMARY_BEAM_CORRECTED_RESTORED.fits")
     with fits.open(path) as hdulist:
-        assert len(hdulist) == 1
-        assert "CASAMBM" not in hdulist[0].header
+        assert len(hdulist) == 2
+        assert "CASAMBM" in hdulist[0].header
         assert "BMAJ" not in hdulist[0].header
         np.testing.assert_array_equal(
             hdulist[0].data,
-            full["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"][0].transpose(0, 1, 3, 2),
+            full["SKY_PRIMARY_BEAM_CORRECTED_RESTORED"][0].transpose(0, 1, 3, 2),
         )
 
 
@@ -368,10 +368,10 @@ def test_without_a_restoring_beam_the_restored_file_carries_the_restored_beam(
             _beams_table(store, key),
             _casa_rows(full["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"][0]),
         )
-    path = os.path.join(store, "SKY_RESTORED_PRIMARY_BEAM_CORRECTED.fits")
+    path = os.path.join(store, "SKY_PRIMARY_BEAM_CORRECTED_RESTORED.fits")
     with fits.open(path) as hdulist:
-        assert len(hdulist) == 1
-        assert "CASAMBM" not in hdulist[0].header
+        assert len(hdulist) == 2
+        assert "CASAMBM" in hdulist[0].header
         assert "BMAJ" not in hdulist[0].header
 
     fill_fits_beams_without_fit(store, keep)
@@ -499,10 +499,18 @@ RESIDUAL_BEAM = "beam_fit_params_sky_residual"
     [
         ("sky_restored", [PSF_BEAM], PSF_BEAM),
         ("sky_restored", [RESTORED_BEAM, PSF_BEAM], RESTORED_BEAM),
-        ("sky_restored_primary_beam_corrected", [PSF_BEAM], None),
-        ("sky_restored_primary_beam_corrected", [RESTORED_BEAM, PSF_BEAM], None),
-        ("sky_restored_flat_noise", [RESTORED_BEAM, PSF_BEAM], RESTORED_BEAM),
-        ("sky_restored_flat_sky", [RESTORED_BEAM, PSF_BEAM], None),
+        ("sky_primary_beam_corrected_restored", [PSF_BEAM], PSF_BEAM),
+        (
+            "sky_primary_beam_corrected_restored",
+            [RESTORED_BEAM, PSF_BEAM],
+            RESTORED_BEAM,
+        ),
+        ("sky_restored", [RESTORED_BEAM, PSF_BEAM], RESTORED_BEAM),
+        (
+            "sky_primary_beam_corrected_restored",
+            [RESTORED_BEAM, PSF_BEAM],
+            RESTORED_BEAM,
+        ),
         ("sky_residual", [RESTORED_BEAM, PSF_BEAM], PSF_BEAM),
         ("sky_residual", [RESTORED_BEAM, RESIDUAL_BEAM], RESIDUAL_BEAM),
         ("sky_residual", [RESTORED_BEAM], None),

@@ -77,20 +77,10 @@ imaging_data_variables_and_dims_double_precision = {
     "sky_model": {"dims": full_dims_lm, "dtype": "<f8", "name": "SKY_MODEL"},
     "sky_residual": {"dims": full_dims_lm, "dtype": "<f8", "name": "SKY_RESIDUAL"},
     "sky_restored": {"dims": full_dims_lm, "dtype": "<f8", "name": "SKY_RESTORED"},
-    "sky_restored_primary_beam_corrected": {
+    "sky_primary_beam_corrected_restored": {
         "dims": full_dims_lm,
         "dtype": "<f8",
-        "name": "SKY_RESTORED_PRIMARY_BEAM_CORRECTED",
-    },
-    "sky_restored_flat_noise": {
-        "dims": full_dims_lm,
-        "dtype": "<f8",
-        "name": "SKY_RESTORED_FLAT_NOISE",
-    },
-    "sky_restored_flat_sky": {
-        "dims": full_dims_lm,
-        "dtype": "<f8",
-        "name": "SKY_RESTORED_FLAT_SKY",
+        "name": "SKY_PRIMARY_BEAM_CORRECTED_RESTORED",
     },
     "alpha": {
         "dims": continuum_spectral_product_dims,
@@ -119,11 +109,6 @@ imaging_data_variables_and_dims_double_precision = {
         "dtype": "<f8",
         "name": "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
     },
-    "beam_fit_params_sky_residual": {
-        "dims": beam_params_dims,
-        "dtype": "<f8",
-        "name": "BEAM_FIT_PARAMS_SKY_RESIDUAL",
-    },
     "beam_fit_params_sky_dirty": {
         "dims": beam_params_dims,
         "dtype": "<f8",
@@ -138,6 +123,12 @@ imaging_data_variables_and_dims_double_precision = {
         "dims": beam_params_dims,
         "dtype": "<f8",
         "name": "BEAM_FIT_PARAMS_SKY_RESTORED",
+        "attrs": {"type": "beam_fit_params_sky", "units": "rad"},
+    },
+    "beam_fit_params_sky_residual": {
+        "dims": beam_params_dims,
+        "dtype": "<f8",
+        "name": "BEAM_FIT_PARAMS_SKY_RESIDUAL",
         "attrs": {"type": "beam_fit_params_sky", "units": "rad"},
     },
 }
@@ -176,20 +167,10 @@ imaging_data_variables_and_dims_single_precision = {
     "sky_model": {"dims": full_dims_lm, "dtype": "<f4", "name": "SKY_MODEL"},
     "sky_residual": {"dims": full_dims_lm, "dtype": "<f4", "name": "SKY_RESIDUAL"},
     "sky_restored": {"dims": full_dims_lm, "dtype": "<f4", "name": "SKY_RESTORED"},
-    "sky_restored_primary_beam_corrected": {
+    "sky_primary_beam_corrected_restored": {
         "dims": full_dims_lm,
         "dtype": "<f4",
-        "name": "SKY_RESTORED_PRIMARY_BEAM_CORRECTED",
-    },
-    "sky_restored_flat_noise": {
-        "dims": full_dims_lm,
-        "dtype": "<f4",
-        "name": "SKY_RESTORED_FLAT_NOISE",
-    },
-    "sky_restored_flat_sky": {
-        "dims": full_dims_lm,
-        "dtype": "<f4",
-        "name": "SKY_RESTORED_FLAT_SKY",
+        "name": "SKY_PRIMARY_BEAM_CORRECTED_RESTORED",
     },
     "alpha": {
         "dims": continuum_spectral_product_dims,
@@ -219,11 +200,6 @@ imaging_data_variables_and_dims_single_precision = {
         "dtype": "<f8",
         "name": "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
     },
-    "beam_fit_params_sky_residual": {
-        "dims": beam_params_dims,
-        "dtype": "<f8",
-        "name": "BEAM_FIT_PARAMS_SKY_RESIDUAL",
-    },
     "beam_fit_params_sky_dirty": {
         "dims": beam_params_dims,
         "dtype": "<f8",
@@ -238,6 +214,12 @@ imaging_data_variables_and_dims_single_precision = {
         "dims": beam_params_dims,
         "dtype": "<f8",
         "name": "BEAM_FIT_PARAMS_SKY_RESTORED",
+        "attrs": {"type": "beam_fit_params_sky", "units": "rad"},
+    },
+    "beam_fit_params_sky_residual": {
+        "dims": beam_params_dims,
+        "dtype": "<f8",
+        "name": "BEAM_FIT_PARAMS_SKY_RESIDUAL",
         "attrs": {"type": "beam_fit_params_sky", "units": "rad"},
     },
 }
@@ -264,16 +246,15 @@ imaging_data_variable_data_group_roles = {
     ),
     "sky_model": ("model", "sky"),
     "sky_restored": ("restored", "sky"),
-    "sky_restored_primary_beam_corrected": (
-        "restored",
-        "sky_primary_beam_corrected",
+    "sky_primary_beam_corrected_restored": (
+        "primary_beam_corrected_restored",
+        "sky",
     ),
-    "sky_restored_flat_noise": ("restored", "sky_flat_noise"),
-    "sky_restored_flat_sky": ("restored", "sky_flat_sky"),
     "beam_fit_params_sky_restored": ("restored", "beam_fit_params_sky"),
-    "alpha": ("restored", "alpha"),
-    "alpha_error": ("restored", "alpha_error"),
-    "beta": ("restored", "beta"),
+    "beam_fit_params_sky_residual": ("residual", "beam_fit_params_sky"),
+    "alpha": ("alpha", "sky"),
+    "alpha_error": ("alpha_error", "sky"),
+    "beta": ("beta", "sky"),
 }
 
 
@@ -303,6 +284,21 @@ def image_data_groups_for_kept_variables(image_data_variables_keep):
             continue
         group_name, role = membership
         data_groups.setdefault(group_name, {})[role] = registry[key]["name"]
+    shared = {
+        role: value
+        for role, value in data_groups.get("residual", {}).items()
+        if role != "sky"
+    }
+    for name in ("model", "restored", "primary_beam_corrected_restored"):
+        if name in data_groups:
+            data_groups[name] = {**shared, **data_groups[name]}
+    if (
+        "primary_beam_corrected_restored" in data_groups
+        and "beam_fit_params_sky_restored" in image_data_variables_keep
+    ):
+        data_groups["primary_beam_corrected_restored"]["beam_fit_params_sky"] = (
+            "BEAM_FIT_PARAMS_SKY_RESTORED"
+        )
     return data_groups
 
 
@@ -866,6 +862,18 @@ def create_empty_data_variables_on_disk(
             )
             sky.attrs["_ARRAY_DIMENSIONS"] = dv_def["dims"]
 
+        if dv_name in (
+            "SKY_MODEL",
+            "SKY_RESIDUAL",
+            "SKY_PRIMARY_BEAM_CORRECTED_RESTORED",
+        ):
+            sky.attrs["sky_convention"] = "flat_sky"
+            sky.attrs["primary_beam_convention"] = "flat_sky"
+        if dv_name == "SKY_RESIDUAL":
+            sky.attrs["residual_representation"] = "coefficient_space"
+        if dv_name == "SKY_RESTORED":
+            sky.attrs["sky_convention"] = "flat_noise"
+            sky.attrs["primary_beam_convention"] = "flat_noise"
         for k, v in extra_attrs.items():
             sky.attrs[k] = v
 
@@ -896,3 +904,50 @@ def create_empty_data_variables_on_disk(
             import toolviper.utils.logger as logger
 
             logger.warning(f"record_shard_ost_map failed ({exc}); continuing.")
+
+
+def continuum_frequency_span(processing_set, task_mapping):
+    """Return the edge-to-edge span of the selected observation channels, in Hz.
+
+    Parameters
+    ----------
+    processing_set : xarray.DataTree
+        Observation metadata, including full frequency axes and channel widths.
+    task_mapping : dict
+        Task selections, using indices into those original observation axes.
+
+    Returns
+    -------
+    float
+        Highest selected upper channel edge minus the lowest selected lower edge.
+        Overlapping task selections are counted only once; bulk data are not read.
+    """
+    import numpy as np
+
+    edges = []
+    for name, child in processing_set.items():
+        frequency = child.ds.frequency
+        axis = np.asarray(frequency.values, dtype=float)
+        indices = []
+        for task in task_mapping.values():
+            selection = task.get("data_selection", {}).get(name)
+            if selection is not None:
+                indices.extend(
+                    np.atleast_1d(
+                        np.arange(axis.size)[selection.get("frequency", slice(None))]
+                    ).tolist()
+                )
+        if not indices:
+            continue
+        selected = np.unique(indices)
+        width = frequency.attrs.get("channel_width", {}).get("data")
+        if width is None:
+            width = np.median(np.diff(axis)) if axis.size > 1 else 0.0
+        widths = np.broadcast_to(np.asarray(width, dtype=float), axis.shape)
+        half_width = abs(widths[selected]) / 2
+        edges.append(
+            (np.min(axis[selected] - half_width), np.max(axis[selected] + half_width))
+        )
+    if not edges:
+        raise ValueError("Continuum bandwidth requires selected observation channels")
+    return float(max(upper for _, upper in edges) - min(lower for lower, _ in edges))

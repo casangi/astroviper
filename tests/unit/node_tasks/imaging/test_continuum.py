@@ -967,7 +967,10 @@ def test_weight_degrid_node_writes_in_place_and_returns_no_array_cache(monkeypat
     monkeypatch.setattr(
         continuum_node,
         "_write_continuum_weights_in_place",
-        lambda ps_xdt, ps_store, io_engine: written.update(
+        lambda ps_xdt,
+        ps_store,
+        io_engine,
+        persisted_imaging_weights=None: written.update(
             processing_set=ps_xdt, store=ps_store
         ),
     )
@@ -1946,9 +1949,12 @@ def test_model_update_constructs_controller_when_omitted():
 
 
 def test_finalization_reuses_prepared_residual_without_another_transform(monkeypatch):
-    image = _model_dataset(0.25).rename({"SKY_MODEL": "SKY_RESIDUAL"})
-    image.attrs["data_groups"] = {"residual": {"sky": "SKY_RESIDUAL"}}
-    model = _model_dataset(0.75)
+    from tests.unit.processing_functions.imaging.test_public_image_conventions import (
+        image_case,
+    )
+
+    image, _, _ = image_case("mfs")
+    model = image[["SKY_MODEL"]].copy(deep=True)
     original_residual = image.SKY_RESIDUAL.data
 
     def unexpected_prepare(*args, **kwargs):
@@ -1967,20 +1973,29 @@ def test_finalization_reuses_prepared_residual_without_another_transform(monkeyp
             "restore": False,
         },
     )
-    assert result["image"].SKY_RESIDUAL.data is original_residual
-    np.testing.assert_array_equal(result["image"].SKY_MODEL, model.SKY_MODEL)
+    assert result["image"].SKY_RESIDUAL.data is not original_residual
+    assert (
+        result["image"].SKY_RESIDUAL.attrs["residual_representation"]
+        == "coefficient_space"
+    )
+    np.testing.assert_allclose(
+        result["image"].SKY_MODEL.values[:, 0], model.SKY_MODEL.values[:, 0] / 0.7
+    )
     assert result["residual_converged"]
 
 
 def test_finalization_passes_mtmfs_to_restoration(monkeypatch):
     """The final append node enables MT-MFS principal-solution restoration."""
-    image = _model_dataset(0.25).rename({"SKY_MODEL": "SKY_RESIDUAL"})
-    image.attrs["data_groups"] = {"residual": {"sky": "SKY_RESIDUAL"}}
+    from tests.unit.processing_functions.imaging.test_public_image_conventions import (
+        image_case,
+    )
+
+    image, _, _ = image_case("mfs")
     received = {}
 
     def fake_restore(image, **kwargs):
         received.update(kwargs)
-        image["SKY_RESTORED_FLAT_NOISE"] = image["SKY_RESIDUAL"].copy()
+        image["SKY_RESTORED"] = image["SKY_RESIDUAL"].copy()
         return image, pd.DataFrame({"T_restore": [0.0]})
 
     monkeypatch.setattr(continuum_processing, "restore_continuum_image", fake_restore)
@@ -1989,7 +2004,7 @@ def test_finalization_passes_mtmfs_to_restoration(monkeypatch):
         {
             "prepared_continuum_image": True,
             "static_xds": xr.Dataset(),
-            "model_xds": _model_dataset(0.75),
+            "model_xds": image[["SKY_MODEL"]].copy(deep=True),
             "restore": True,
             "deconvolver": "mtmfs",
         },
@@ -2422,7 +2437,11 @@ def test_plain_step_planes_follow_the_residual_the_model_update_ends_with(
     monkeypatch.setattr(
         continuum_node,
         "_prepare_post_update_continuum_model_state",
-        lambda model_update_xds, input_params, previous_model_xds=None, *, input_checked: (
+        lambda model_update_xds,
+        input_params,
+        previous_model_xds=None,
+        *,
+        input_checked: (
             xr.Dataset(),
             None,
         ),

@@ -103,6 +103,9 @@ def _image_params(ps_store, polarization_coords, n_taylor_terms=1):
         "fft_padding": 1.2,
         "n_taylor_terms": n_taylor_terms,
         "reference_frequency": float(np.mean(frequency)),
+        "primary_beam_model": "airy",
+        "list_dish_diameters": [airy_disk_model("alma")["dish_diameter"]],
+        "list_blockage_diameters": [airy_disk_model("alma")["blockage_diameter"]],
     }
 
 
@@ -132,7 +135,10 @@ def _continuum(ps_store, image_store, image_params, **kwargs):
 
 def _planes(image_store, name):
     """``name`` as (polarization, l, m): the one channel or Taylor term zero."""
-    data = load_image(str(image_store))[name]
+    from tests.utils.continuum_images import apparent_model_and_residual_for_numerics
+
+    # Compare the DFT's apparent measurement equation independently of PB fitting.
+    data = apparent_model_and_residual_for_numerics(load_image(str(image_store)))[name]
     other = {dim: 0 for dim in data.dims if dim not in ("polarization", "l", "m")}
     return data.isel(other).transpose("polarization", "l", "m").values
 
@@ -174,6 +180,7 @@ def test_mfs_with_the_dft_equals_the_cube_on_one_channel(tmp_path, processing_se
             single_precision_image=False,
             n_mapping_parallelism={"frequency": 1},
             gridding_kernel_params=DFT,
+            primary_beam_params={"beam_model": airy_disk_model("alma")},
             processing_function_threads=2,
             overwrite=True,
         )
@@ -247,19 +254,55 @@ def test_the_reduce_adds_the_taylor_images_of_the_map_tasks(
     one, two = (load_image(str(stores[n])) for n in (1, 2))
     products = ["POINT_SPREAD_FUNCTION", "SKY_RESIDUAL", "SKY_MODEL"]
     if restore:
-        products.append("SKY_RESTORED_FLAT_SKY")
+        products.append("SKY_PRIMARY_BEAM_CORRECTED_RESTORED")
     for name in products:
         assert one[name].dims == two[name].dims, name
         assert one[name].shape == two[name].shape, name
         difference = _relative_difference(
             np.nan_to_num(two[name].values), np.nan_to_num(one[name].values)
         )
-        tolerance = 2e-10 if name == "SKY_RESTORED_FLAT_SKY" else 1e-12
+        tolerance = 2e-10 if name == "SKY_PRIMARY_BEAM_CORRECTED_RESTORED" else 1e-12
+        if name in ("SKY_MODEL", "SKY_RESIDUAL", "SKY_PRIMARY_BEAM_CORRECTED_RESTORED"):
+            # Public coefficients solve Taylor equations. Their narrow-band
+            # Hessian inverse amplifies partition sum roundoff.
+            nterms = one.sizes["frequency_polynomial"]
+            moments = one.POINT_SPREAD_FUNCTION.values[0, :, 0, 32, 32]
+            hessian = moments[np.add.outer(np.arange(nterms), np.arange(nterms))]
+            tolerance = max(tolerance, np.linalg.cond(hessian) * 1e-12)
+
         assert difference <= tolerance, (name, difference)
-    assert ("PRIMARY_BEAM_TAYLOR" in one) is restore
-    assert ("PRIMARY_BEAM_TAYLOR" in two) is restore
+
+    # Retain a tight check in the apparent measurement-equation basis.
+    def apparent_coefficients(image, name):
+        value = np.zeros_like(image[name].values)
+        for order in range(value.shape[1]):
+            for beam_order in range(order + 1):
+                value[:, order] += (
+                    image.PRIMARY_BEAM.values[:, beam_order]
+                    * image[name].values[:, order - beam_order]
+                )
+        return value
+
+    assert (
+        _relative_difference(
+            apparent_coefficients(one, "SKY_MODEL"),
+            apparent_coefficients(two, "SKY_MODEL"),
+        )
+        <= 1e-12
+    )
+    right_hand_sides = []
+    for image in (one, two):
+        principal = apparent_coefficients(image, "SKY_RESIDUAL")
+        moments = image.POINT_SPREAD_FUNCTION.values[0, :, 0, 32, 32]
+        hessian = moments[
+            np.add.outer(np.arange(principal.shape[1]), np.arange(principal.shape[1]))
+        ]
+        right_hand_sides.append(np.einsum("ij,tjplm->tiplm", hessian, principal))
+    assert _relative_difference(*right_hand_sides) <= 1e-12
+    assert "PRIMARY_BEAM" in one and "PRIMARY_BEAM_TAYLOR" not in one
+    assert "PRIMARY_BEAM" in two and "PRIMARY_BEAM_TAYLOR" not in two
     # the second Taylor term of the model is predicted, too
-    assert np.abs(one["SKY_MODEL"].isel(taylor_term=1).values).max() > 0
+    assert np.abs(one["SKY_MODEL"].isel(frequency_polynomial=1).values).max() > 0
 
 
 @pytest.mark.parametrize(

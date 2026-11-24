@@ -87,7 +87,7 @@ _BEAM_CARRYING_VARIABLES = frozenset(
         "sky_residual",
         "sky_model",
         "sky_restored",
-        "sky_restored_flat_noise",
+        "sky_primary_beam_corrected_restored",
         "sky_deconvolved",
         "point_spread_function",
     }
@@ -97,9 +97,7 @@ _BEAM_CARRYING_VARIABLES = frozenset(
 _RESTORED_VARIABLES = frozenset(
     {
         "sky_restored",
-        "sky_restored_primary_beam_corrected",
-        "sky_restored_flat_noise",
-        "sky_restored_flat_sky",
+        "sky_primary_beam_corrected_restored",
     }
 )
 
@@ -138,10 +136,15 @@ def _beams_table_variable(image_variable, beam_variables):
     if image_variable not in _BEAM_CARRYING_VARIABLES:
         return None
     if (
-        image_variable in ("sky_restored", "sky_restored_flat_noise")
+        image_variable in _RESTORED_VARIABLES
         and "beam_fit_params_sky_restored" in beam_variables
     ):
         return "beam_fit_params_sky_restored"
+    if (
+        image_variable == "sky_residual"
+        and "beam_fit_params_sky_residual" in beam_variables
+    ):
+        return "beam_fit_params_sky_residual"
     others = [dv for dv in beam_variables if dv != "beam_fit_params_sky_restored"]
     if "beam_fit_params_point_spread_function" in others:
         return "beam_fit_params_point_spread_function"

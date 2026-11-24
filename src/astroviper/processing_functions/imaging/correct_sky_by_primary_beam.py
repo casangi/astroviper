@@ -20,7 +20,7 @@ def correct_sky_by_primary_beam(
     definition). With ``M`` the model, ``R`` the residual and ``B`` the clean
     beam, the corrected restored image is::
 
-        SKY_RESTORED_PRIMARY_BEAM_CORRECTED = (M / P) * B + R / P
+        SKY_PRIMARY_BEAM_CORRECTED_RESTORED = (M / P) * B + R / P
 
     The model is divided by the primary beam where it is a pixel value and
     then convolved with the clean beam, so for a model that represents the
@@ -74,7 +74,7 @@ def correct_sky_by_primary_beam(
     Returns
     -------
     img_xds : xarray.Dataset
-        The input dataset with ``SKY_RESTORED_PRIMARY_BEAM_CORRECTED`` added.
+        The input dataset with ``SKY_PRIMARY_BEAM_CORRECTED_RESTORED`` added.
     return_df : pandas.DataFrame
         One-row timing frame with the ``T_correct_sky_by_primary_beam`` column.
 
@@ -85,6 +85,11 @@ def correct_sky_by_primary_beam(
     astroviper.processing_functions.imaging.restore.primary_beam_corrected_plane
     """
     import time
+
+    if img_xds.attrs.get("public_image_convention") == "flat_sky":
+        raise ValueError(
+            "Model and residual are already flat sky; use restore_image to restore finalized products."
+        )
 
     import numpy as np
     import pandas as pd
@@ -106,7 +111,7 @@ def correct_sky_by_primary_beam(
         data_group_in_name=image_data_group_in_name,
         data_group_out_name=image_data_group_out_name,
         data_group_out_modified={
-            "sky_primary_beam_corrected": "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
+            "sky_primary_beam_corrected": "SKY_PRIMARY_BEAM_CORRECTED_RESTORED"
         },
         overwrite=overwrite,
     )
@@ -167,10 +172,10 @@ def correct_sky_by_primary_beam(
                     workers=workers,
                 )
 
-    img_xds["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"] = xr.DataArray(
+    img_xds["SKY_PRIMARY_BEAM_CORRECTED_RESTORED"] = xr.DataArray(
         corrected, dims=residual_da.dims
     )
-    img_xds["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"].attrs["type"] = "sky"
+    img_xds["SKY_PRIMARY_BEAM_CORRECTED_RESTORED"].attrs["type"] = "sky"
 
     modify_data_groups_xds(
         img_xds,

@@ -147,7 +147,7 @@ def test_html_report_of_a_monitored_single_task_run(processing_set, tmp_path):
         key in result["image_statistics"] for key in ("sky_residual", "sky_restored")
     )
     files = tmp_path / "cube_report_files"
-    for key in ("sky_residual", "sky_model", "sky_restored_primary_beam_corrected"):
+    for key in ("sky_residual", "sky_model", "sky_primary_beam_corrected_restored"):
         assert (files / f"moment_maximum_{key}.img.zarr").exists(), key
 
     assert "cpu_percent" in result["timing_node_tasks"]
@@ -215,7 +215,7 @@ def test_pdf_report_of_fits_output(processing_set, tmp_path):
     with open(result["report"], "rb") as file:
         assert file.read(4) == b"%PDF"
     files = tmp_path / "cube_report_files"
-    for key in ("sky_residual", "sky_model", "sky_restored_primary_beam_corrected"):
+    for key in ("sky_residual", "sky_model", "sky_primary_beam_corrected_restored"):
         assert (files / f"moment_maximum_{key}.img.zarr").exists(), key
 
 

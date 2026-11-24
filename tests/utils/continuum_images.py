@@ -89,6 +89,7 @@ def make_continuum_image(
             point_spread_function="POINT_SPREAD_FUNCTION",
             beam_fit_params_point_spread_function="BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
         )
+    image = image.assign_coords(frequency=[100.0])
     image.attrs = {
         "reference_frequency": 100.0,
         "continuum_imaging": {"continuum_mode": continuum_mode},
@@ -351,3 +352,73 @@ def make_single_term_faint_source_image(white_noise_outside_mask=False):
         },
     )
     return image, sky, mask
+
+
+def restore_continuum_for_numerics(image, **kwargs):
+    """View public output on the fixture axes for numerical comparisons.
+
+    These algebra tests request both images explicitly. Public coordinate names,
+    defaults, metadata, and output selection are tested without this view in
+    test_public_image_conventions and config_check/test_continuum_restoration_output.
+    """
+    from astroviper.processing_functions.imaging.image_continuum_single_field import (
+        restore_continuum_image,
+    )
+
+    kwargs.setdefault("restoration_output", "both")
+    out, timing = restore_continuum_image(image, **kwargs)
+    return out.rename(
+        {
+            axis: private
+            for axis, private in (
+                ("frequency_polynomial", "taylor_term"),
+                ("frequency_polynomial_moment", "psf_taylor_order"),
+            )
+            if axis in out.dims
+        }
+    ), timing
+
+
+def analyze_restored_for_numerics(image):
+    """Explicitly request diagnostics, returning fixture-axis views for algebra."""
+    from astroviper.processing_functions.image_analysis import spectral_products
+    from astroviper.processing_functions.imaging.finalize_image import (
+        public_continuum_layout,
+    )
+
+    public = public_continuum_layout(image)
+    group = (
+        "primary_beam_corrected_restored"
+        if "primary_beam_corrected_restored" in public.attrs["data_groups"]
+        else "restored"
+    )
+    products = (
+        ("ALPHA", "ALPHA_ERROR", "BETA")
+        if public.sizes["frequency_polynomial"] >= 3
+        else ("ALPHA", "ALPHA_ERROR")
+    )
+    analyzed = spectral_products(
+        public, image_data_group_in_name=group, products=products
+    )
+    for name in products:
+        image[name] = analyzed[name].isel(frequency=0, drop=True)
+    return image
+
+
+def apparent_model_and_residual_for_numerics(image):
+    """View public solutions in the apparent basis used by visibility oracles.
+
+    Restored products remain in their declared conventions. The caller's image
+    is unchanged. This is for cube and single-term numerical-floor comparisons;
+    multi-term spectral checks use the public polynomial algebra directly.
+    """
+    if image.attrs.get("public_image_convention") != "flat_sky":
+        return image
+    out = image.copy(deep=False)
+    beam = image.PRIMARY_BEAM
+    if "frequency_polynomial" in beam.dims and beam.sizes["frequency_polynomial"] != 1:
+        raise ValueError("This numerical-oracle view requires one continuum term")
+    for name in ("SKY_MODEL", "SKY_RESIDUAL"):
+        if name in image:
+            out[name] = image[name] * beam
+    return out

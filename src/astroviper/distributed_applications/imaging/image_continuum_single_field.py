@@ -586,94 +586,6 @@ def _remove_continuum_weight_cache(
         del root[_CONTINUUM_WEIGHT_CACHE_GROUP]
 
 
-def _persist_continuum_weight_cache_to_processing_set(
-    ps_xdt,
-    ps_store,
-    image_store,
-    processing_set_data_group_name,
-):
-    """Copy a completed external weight cache into the input PS on request."""
-    import numpy as np
-
-    from astroviper.utils.data_group_tools import (
-        create_data_groups_in_and_out,
-        modify_data_groups_xds,
-    )
-
-    image_root = zarr.open_group(image_store, mode="r", use_consolidated=False)
-    if _CONTINUUM_WEIGHT_CACHE_GROUP not in image_root:
-        raise KeyError("The continuum imaging-weight cache is missing.")
-    cache_root = image_root[_CONTINUUM_WEIGHT_CACHE_GROUP]
-    ps_root = zarr.open_group(ps_store, mode="r+", use_consolidated=False)
-
-    # Validate all children before modifying the input Processing Set.
-    for ms_name in ps_xdt:
-        if ms_name not in cache_root:
-            raise KeyError(f"No cached imaging weights exist for {ms_name!r}.")
-
-    for ms_name, ms_xdt in ps_xdt.items():
-        cached = cache_root[ms_name][_CONTINUUM_WEIGHT_CACHE_VARIABLE]
-        ms_group = zarr.open_group(
-            ps_root.store, path=ms_name, mode="r+", use_consolidated=False
-        )
-        if _CONTINUUM_WEIGHT_CACHE_VARIABLE in ms_group:
-            del ms_group[_CONTINUUM_WEIGHT_CACHE_VARIABLE]
-
-        dimensions = (
-            tuple(cached.metadata.dimension_names)
-            if cached.metadata.zarr_format == 3
-            else tuple(cached.attrs["_ARRAY_DIMENSIONS"])
-        )
-        options = {
-            "shape": cached.shape,
-            "dtype": cached.dtype,
-            "chunks": cached.chunks,
-            "fill_value": np.nan,
-            "attributes": dict(cached.attrs),
-        }
-        if ms_group.metadata.zarr_format == 3:
-            options["dimension_names"] = dimensions
-        else:
-            # The temporary image-store cache can be Zarr v3 while Processing
-            # Sets are commonly Zarr v2. A v3 codec pipeline cannot be passed
-            # through the deprecated v2 ``compressor`` argument.
-            options["compressor"] = (
-                cached.compressor if cached.metadata.zarr_format == 2 else None
-            )
-        destination = ms_group.create_array(
-            _CONTINUUM_WEIGHT_CACHE_VARIABLE,
-            **options,
-        )
-        if ms_group.metadata.zarr_format == 2:
-            destination.attrs["_ARRAY_DIMENSIONS"] = list(dimensions)
-
-        frequency_axis = dimensions.index("frequency")
-        for channel in range(cached.shape[frequency_axis]):
-            selection = [slice(None)] * len(dimensions)
-            selection[frequency_axis] = slice(channel, channel + 1)
-            selection = tuple(selection)
-            destination[selection] = cached[selection]
-
-        _, data_group_out = create_data_groups_in_and_out(
-            ms_xdt.ds,
-            data_group_in_name=processing_set_data_group_name,
-            data_group_out_name=processing_set_data_group_name,
-            data_group_out_modified={
-                "weight_imaging": _CONTINUUM_WEIGHT_CACHE_VARIABLE,
-            },
-            overwrite=True,
-        )
-        modify_data_groups_xds(
-            ms_xdt.ds,
-            data_group_out_name=processing_set_data_group_name,
-            data_group_out=data_group_out,
-            description="AstroVIPER continuum imaging weights retained by request.",
-        )
-        ms_group.attrs["data_groups"] = copy.deepcopy(ms_xdt.ds.attrs["data_groups"])
-        zarr.consolidate_metadata(ps_store, path=ms_name)
-    zarr.consolidate_metadata(ps_store)
-
-
 def _write_continuum_fits(
     image_store,
     output_image,
@@ -724,7 +636,11 @@ def _write_continuum_fits(
         name = registry[key]["name"]
         variable = output_image[name]
         term_dim = next(
-            (d for d in ("taylor_term", "psf_taylor_order") if d in variable.dims),
+            (
+                d
+                for d in ("frequency_polynomial", "frequency_polynomial_moment")
+                if d in variable.dims
+            ),
             None,
         )
         terms = [None] if term_dim is None else range(variable.sizes[term_dim])
@@ -768,16 +684,16 @@ def _continuum_image_for_disk(img_xds, image_data_variables_keep):
     graph runs.  This helper therefore derives the disk schema from the final
     in-memory image itself and only removes products the caller did not request.
     """
-    import copy
 
     from astroviper.utils.io import imaging_data_variables_and_dims_double_precision
 
     registry = imaging_data_variables_and_dims_double_precision
     requested_names = {registry[key]["name"] for key in image_data_variables_keep}
-    # The MVC PB Taylor fit is a compact diagnostic product requested as part
-    # of the continuum result, not a configurable intermediate/cache variable.
-    if "PRIMARY_BEAM_TAYLOR" in img_xds:
-        requested_names.add("PRIMARY_BEAM_TAYLOR")
+    requested_names.update(
+        name
+        for name in ("PRIMARY_BEAM", "COMMON_PRIMARY_BEAM", "SKY_MODEL", "SKY_RESIDUAL")
+        if name in img_xds
+    )
     output = img_xds.copy(deep=False)
     # The XRADIO deletion accessor mutates its dataset in place; isolate the
     # attributes while retaining zero-copy views of the large arrays.
@@ -788,6 +704,18 @@ def _continuum_image_for_disk(img_xds, image_data_variables_keep):
     if variables_to_drop:
         output.xr_img.delete_data_variables(variables=variables_to_drop)
 
+    from astroviper.utils.data_group_tools import modify_data_groups_xds
+
+    for name, group in list(output.attrs.get("data_groups", {}).items()):
+        filtered = {
+            role: value
+            for role, value in group.items()
+            if role in ("date", "description") or value in output.data_vars
+        }
+        if filtered != group:
+            modify_data_groups_xds(
+                output, name, filtered, description="Retained public image products."
+            )
     return output
 
 
@@ -2644,11 +2572,10 @@ def image_continuum_single_field(
     image_store : str
         Path/URL of the on-disk Zarr image cube.
     restore : bool
-        If ``True`` restore every Taylor coefficient after deconvolution and
-        write the products selected by ``restoration_output``. With at least
-        two Taylor terms also write ``ALPHA`` and ``ALPHA_ERROR``; with at least
-        three also write ``BETA``. ``ALPHA_ERROR`` is a pixel-residual diagnostic,
-        not a statistically calibrated one-sigma uncertainty.
+        Whether to restore every finalized flat-sky coefficient in this imaging
+        workflow. Compute only products selected by ``restoration_output``.
+        Model and principal-residual finalization also runs with ``restore=False``.
+        Spectral diagnostics are requested separately through ``spectral_products``.
     scan_intents : list of str or str, optional
         Scan intent or intents passed to
         :func:`xradio.measurement_set.open_processing_set` when opening the
@@ -2789,18 +2716,13 @@ def image_continuum_single_field(
         ``I, V`` (circular), all four correlations give ``I, Q, U, V``. A sample
         is used only if none of its loaded correlations is flagged.
     image_data_variables_keep : list of str
-        Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
-        ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
-        Restoration automatically retains its selected restored Taylor
-        products, the derived ``"alpha"``, ``"alpha_error"``, and, when
-        available, ``"beta"``, and ``"beam_fit_params_sky_restored"``, the beam
-        the restore applied; with a ``restoring_beam`` also
-        ``"beam_fit_params_point_spread_function"``.
-        Restored and spectral products require ``restore=True``. Alpha products
-        require at least two Taylor terms; beta requires at least three.
-        MFS can retain the Taylor UV grids ``visibility`` and ``uv_sampling``;
-        MVC cannot publish channel UV grids. Unavailable products are rejected
-        before input reads or graph construction.
+        Logical image-variable keys to retain on disk. Flat-sky model, residual,
+        and the compact primary-beam polynomial are always retained. Restoration
+        retains only its selected restored images and their clean-beam metadata.
+        A target restoring beam also retains metadata for the transformed residual.
+        ALPHA, ALPHA_ERROR, and BETA are requested separately through spectral_products.
+        MFS can retain Taylor UV grids; MVC cannot publish channel UV grids.
+        Unavailable requests are rejected before reading input or building graphs.
     compressor : object, optional
         Output Zarr compressor.
     processing_set_data_group_name : str
@@ -3093,15 +3015,16 @@ def image_continuum_single_field(
         "dft"}`` MFS uses the exact direct Fourier transform with the w term
         instead.
     restoration_output : {"apparent", "primary_beam_corrected", "both"}, default "primary_beam_corrected"
-        Restored products to compute: ``"apparent"``, ``"primary_beam_corrected"``,
-        or ``"both"``. Cube outputs are ``SKY_RESTORED`` and
-        ``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``; continuum outputs are
-        ``SKY_RESTORED_FLAT_NOISE`` and ``SKY_RESTORED_FLAT_SKY``.
-        Cube corrects the model and residual by the channel power primary beam
-        before convolution. MFS divides their Taylor polynomials; MVC divides
-        by its common power primary beam. Corrected pixels below
-        ``primary_beam_limit`` are blanked with NaN. Imaging workflows use this
-        selector only when ``restore=True``.
+        Restored products to compute: ``"apparent"`` gives ``SKY_RESTORED``
+        (flat noise), ``"primary_beam_corrected"`` gives
+        ``SKY_PRIMARY_BEAM_CORRECTED_RESTORED`` (flat sky), and ``"both"`` gives both.
+        Every imager returns flat-sky ``SKY_MODEL`` and coefficient-space
+        ``SKY_RESIDUAL`` even with ``restore=False``. Primary-beam correction happens
+        before convolution: channel-wise division for cubes, coupled triangular
+        polynomial division for MFS, and common-beam division for MVC. MVC reconstructs
+        apparent coefficients using the frequency-dependent beam polynomial.
+        Only requested restored products are allocated. Spectral diagnostics require
+        the separate ``spectral_products`` analysis tool.
     restoring_beam : list of float or None, optional
         ``None`` restores each plane with its own PSF fit [CASA ``tclean``
         ``restoringbeam=''``]. ``[major, minor, pa]`` (FWHM and position angle
@@ -3110,7 +3033,7 @@ def image_continuum_single_field(
         since CASA 5.6 (CAS-12148): the model is convolved with the unit-peak
         target beam, and the residual with the Gaussian that takes the plane's
         PSF beam to the target, times the ratio of the beam areas, so it is in
-        Jy per target beam. ``SKY_RESIDUAL`` is unchanged. A plane whose PSF
+        Jy per target beam. ``SKY_RESIDUAL`` records the residual at the target beam, preserving the public restoration identity. A plane whose PSF
         beam the target does not contain, or that has no PSF fit, keeps its
         residual unconvolved and unscaled, as ``tclean`` does, and is named in a
         warning. The continuum imager refuses a target that does not contain its
@@ -3249,17 +3172,15 @@ def image_continuum_single_field(
         currently raises ``NotImplementedError`` when this is supplied rather
         than silently discarding the requested layout at finalization.
     weight_memory_mode : {"in_memory", "in_place"}, optional
-        Storage policy for calculated continuum imaging weights.
-        ``"in_memory"``
-        returns task-local weights to the driver and embeds them in subsequent
-        graphs. ``"in_place"`` writes each task's weights into a temporary group
-        in the output image store and reloads only the required partition during
-        each imaging cycle. It is the default because it bounds scheduler and
-        worker memory without modifying the input Processing Set. The temporary
-        group is removed when the run ends, also after an error. A completed cache
-        is copied into the input only when ``write_imaging_weights_to_ps=True``.
-        This option remains separate from ``memory_mode`` for now; the policies
-        may be unified later.
+        Storage policy for calculated continuum imaging weights. ``"in_memory"``
+        returns task-local weights for subsequent graphs. ``"in_place"`` writes
+        partitions into a disposable output-store cache by default. With
+        ``write_imaging_weights_to_ps=True``, XRADIO preallocates unregistered
+        Processing Set targets instead; tasks write and reload their own regions
+        there. Only after all tasks succeed does XRADIO register ``WEIGHT_IMAGING``
+        with provenance and consolidate metadata. Failed runs remove their staging
+        variables. Existing persisted weights are protected and require explicit
+        removal before replacement. No completed full-array cache is copied.
 
     visibility_memory_mode : {"in_memory", "in_place", "recompute"}, optional
         Continuum residual-update storage policy for observed visibility grids.
@@ -3271,13 +3192,12 @@ def image_continuum_single_field(
         cycle. MFS caches the globally reduced Taylor UV grid; MVC caches each
         map task's exclusively owned frequency-resolved UV planes.
 
-    wideband_primary_beam_memory_mode : {"in_memory", "in_place", "recompute"}, optional
-        MVC-only storage policy for the frequency-dependent primary beam.
-        ``"in_place"`` stores it temporarily in the image Zarr store and reads
-        only task-local channels. The default ``"recompute"`` regenerates the
-        analytic beam inside every later map, and ``"in_memory"`` retains it at
-        the driver but passes each map only its local beam. The setting is ignored
-        for MFS.
+    wideband_primary_beam_memory_mode : {"recompute"}, optional
+        Must be ``"recompute"``. Continuum imaging regenerates frequency-dependent
+        channel beams for each residual update and retains only the fitted
+        ``PRIMARY_BEAM`` polynomial in public outputs. MVC also retains its
+        frequency-independent ``COMMON_PRIMARY_BEAM``. Channel-beam cache policies
+        are disabled.
 
     cycle_acceleration : {"none", "conjugate_gradient", "nesterov_momentum"}, optional
         How each model update's increment ``z`` enters the model (Müller, Hsieh
@@ -3487,6 +3407,13 @@ def image_continuum_single_field(
     image_params = dict(image_params)
     direct_fourier_transform = is_direct_fourier_transform(gridding_kernel_params)
     clean_mask_array = load_clean_mask(clean_mask, image_params["image_size"])
+    image_data_variables_keep = list(
+        dict.fromkeys(
+            [*image_data_variables_keep, "sky_model", "sky_residual", "primary_beam"]
+        )
+    )
+    if restore and restoring_beam is not None:
+        image_data_variables_keep.append("beam_fit_params_sky_residual")
 
     from astroviper.processing_functions.imaging.config_check._common import (
         CONTINUUM_SINGLE_FIELD,
@@ -3500,23 +3427,11 @@ def image_continuum_single_field(
         imaging_weights_params, mode=CONTINUUM_SINGLE_FIELD
     )
 
-    # When restoring, ensure the derived spectral products are written without
-    # retaining the intermediate apparent restored Taylor image.
-    if restore:
-        n_taylor_terms = image_params["n_taylor_terms"]
-        spectral_products = ("alpha", "alpha_error") if n_taylor_terms >= 2 else ()
-        if n_taylor_terms >= 3:
-            spectral_products += ("beta",)
-        image_data_variables_keep = list(image_data_variables_keep) + [
-            product
-            for product in spectral_products
-            if product not in image_data_variables_keep
-        ]
     if restore:
         restored_products = {
-            "apparent": ("sky_restored_flat_noise",),
-            "primary_beam_corrected": ("sky_restored_flat_sky",),
-            "both": ("sky_restored_flat_noise", "sky_restored_flat_sky"),
+            "apparent": ("sky_restored",),
+            "primary_beam_corrected": ("sky_primary_beam_corrected_restored",),
+            "both": ("sky_restored", "sky_primary_beam_corrected_restored"),
         }[restoration_output]
         # A restore records the beam it applied, a restore to a target beside
         # the PSF beam.
@@ -3745,10 +3660,15 @@ def image_continuum_single_field(
     input_params["single_precision_image"] = single_precision_image
     input_params["fft_backend"] = fft_backend
     input_params["restore"] = restore
-    input_params["make_primary_beam_taylor"] = bool(restore)
+    input_params["make_primary_beam_taylor"] = True
     input_params["io_engine"] = io_engine
     input_params["task_time_kill_switch_seconds"] = task_time_kill_switch_seconds
     input_params["spectral_diagnostics"] = spectral_diagnostics
+    from astroviper.utils.io import continuum_frequency_span
+
+    input_params["continuum_bandwidth"] = continuum_frequency_span(
+        ps_xdt, node_task_data_mapping
+    )
 
     input_params["calculate_auto_sensitivity"] = cycle_control_params.get(
         "max_cycles"
@@ -3758,8 +3678,6 @@ def image_continuum_single_field(
 
     image_params = resolved_image_params
     input_params["image_params"] = image_params
-
-    import copy
 
     from astroviper.processing_functions.imaging.config_check.param_check_driver_workflow import (
         check_configuration_consistency,
@@ -3858,8 +3776,21 @@ def image_continuum_single_field(
             "run calculates its own imaging weights from imaging_weights_params."
         )
 
+    from astroviper.utils.imaging_weight_persistence import (
+        discard_imaging_weights,
+        imaging_weight_provenance,
+        prepare_imaging_weights,
+        publish_imaging_weights,
+    )
+
+    persisted_imaging_weights = {}
+    if write_imaging_weights_to_ps:
+        persisted_imaging_weights = prepare_imaging_weights(
+            ps_xdt, ps_store, processing_set_data_group_name, node_task_data_mapping
+        )
+    input_params["persisted_imaging_weights"] = persisted_imaging_weights
     weight_cache_is_active = False
-    if weight_memory_mode == "in_place":
+    if weight_memory_mode == "in_place" and not write_imaging_weights_to_ps:
         start = time.time()
         _create_continuum_weight_cache_store(
             ps_xdt,
@@ -3872,9 +3803,8 @@ def image_continuum_single_field(
             time.time() - start
         )
 
-    # The temporary disk-backed weights are removed however the run ends.
-    # The input Processing Set is touched only after a successful run and only
-    # when write_imaging_weights_to_ps=True.
+    # XRADIO keeps persisted targets unregistered until graph completion.
+    # The finally block removes this run's unpublished staging targets.
     try:
         # Auto-detect native on-disk chunk sizes if not supplied by the caller.
         if disk_chunk_sizes == "Auto":
@@ -4028,7 +3958,7 @@ def image_continuum_single_field(
                             "MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR",
                             "MFS_PRIMARY_BEAM_FIT_MOMENTS",
                         )
-                        if is_first_cycle and restore
+                        if is_first_cycle
                         else ()
                     ),
                 }
@@ -4043,12 +3973,8 @@ def image_continuum_single_field(
                             "UV_SAMPLING_NORMALIZATION",
                         )
                         + (
-                            (
-                                "MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR",
-                                "MFS_PRIMARY_BEAM_FIT_MOMENTS",
-                            )
-                            if restore
-                            else ()
+                            "MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR",
+                            "MFS_PRIMARY_BEAM_FIT_MOMENTS",
                         ),
                     }
                 else:
@@ -4110,7 +4036,7 @@ def image_continuum_single_field(
                 "visibility_memory_mode": visibility_memory_mode,
                 "image_store": image_store,
                 "primary_beam_limit": primary_beam_limit,
-                "make_primary_beam_taylor": bool(restore),
+                "make_primary_beam_taylor": True,
                 "clean_mask": clean_mask_array,
                 "auto_mask_params": auto_mask_params,
                 "spectral_diagnostics": spectral_diagnostics,
@@ -4373,59 +4299,43 @@ def image_continuum_single_field(
                 )
                 break
 
-        if not restore and restoration_xds is None:
-            # MFS without restoration has no remaining image-domain science.
-            # Install the accumulated model locally and avoid transferring the
-            # complete image and model through an otherwise one-node graph.
-            from astroviper.processing_functions.imaging.image_continuum_single_field import (
-                install_continuum_model,
-            )
-
-            start = time.time()
-            final_return_dict["image"] = install_continuum_model(
-                final_return_dict["image"], model_xds
-            )
-            final_return_dict["model_xds"] = model_xds
-            final_return_dict["timing_restore"] = None
-            timing_distributed_application["T_install_final_model"] = (
-                time.time() - start
-            )
-        else:
-            # Restoration and final-only PB products run in one distributed node.
-            # Send only the image/model/static state this node actually uses.
-            final_payload = {"image": final_return_dict["image"]}
-            final_params = {
-                "prepared_continuum_image": True,
-                # A prepared final image already contains PSF/beam-fit products.
-                # Only the correlation-basis common PB is needed to label the MVC
-                # diagnostic; do not send its large G/C preconditioner cache again.
-                "static_xds": static_xds[["PRIMARY_BEAM"]],
-                "restoration_xds": restoration_xds,
-                "model_xds": model_xds,
-                "image_params": image_params,
-                "continuum_mode": continuum_mode,
-                "deconvolver": deconvolver,
-                "restore": restore,
-                "restoration_output": restoration_output,
-                "restoring_beam": input_params["restoring_beam"],
-                "primary_beam_limit": primary_beam_limit,
-                "processing_function_threads": processing_function_threads,
-            }
-            finalized, final_timings = compute_continuum_finalization_graph(
-                final_payload, final_params
-            )
-            final_return_dict.update(finalized)
-            _accumulate_graph_timings(timing_distributed_application, final_timings)
-            record = _graph_timing_record(
-                "restoration" if restore else "finalization",
-                {"timing_finalization": finalized["timing_finalization"]},
-                final_timings,
-                stage_kind="final",
-                includes_restoration=restore,
-                timing_key="timing_finalization",
-            )
-            if record is not None:
-                timing_graphs.append(record)
+        # Restoration and final-only PB products run in one distributed node.
+        # Send only the image/model/static state this node actually uses.
+        final_payload = {"image": final_return_dict["image"]}
+        final_params = {
+            "prepared_continuum_image": True,
+            "continuum_bandwidth": input_params["continuum_bandwidth"],
+            "public_frequency_attrs": dict(img_xds.frequency.attrs),
+            # A prepared final image already contains PSF/beam-fit products.
+            # Only the correlation-basis common PB is needed to label the MVC
+            # diagnostic; do not send its large G/C preconditioner cache again.
+            "static_xds": static_xds[["PRIMARY_BEAM"]],
+            "restoration_xds": restoration_xds,
+            "model_xds": model_xds,
+            "image_params": image_params,
+            "continuum_mode": continuum_mode,
+            "deconvolver": deconvolver,
+            "restore": restore,
+            "restoration_output": restoration_output,
+            "restoring_beam": input_params["restoring_beam"],
+            "primary_beam_limit": primary_beam_limit,
+            "processing_function_threads": processing_function_threads,
+        }
+        finalized, final_timings = compute_continuum_finalization_graph(
+            final_payload, final_params
+        )
+        final_return_dict.update(finalized)
+        _accumulate_graph_timings(timing_distributed_application, final_timings)
+        record = _graph_timing_record(
+            "restoration" if restore else "finalization",
+            {"timing_finalization": finalized["timing_finalization"]},
+            final_timings,
+            stage_kind="final",
+            includes_restoration=restore,
+            timing_key="timing_finalization",
+        )
+        if record is not None:
+            timing_graphs.append(record)
 
         # =============================================================
         # Assemble the final application result
@@ -4458,17 +4368,6 @@ def image_continuum_single_field(
             "spectral_design"
         ] = spectral_diagnostics
         return_dict["input_validation"] = output_image.attrs["input_validation"]
-        if write_imaging_weights_to_ps:
-            persist_start = time.time()
-            _persist_continuum_weight_cache_to_processing_set(
-                ps_xdt,
-                ps_store,
-                image_store,
-                processing_set_data_group_name,
-            )
-            timing_distributed_application["T_persist_imaging_weights"] = (
-                time.time() - persist_start
-            )
         if continuum_mode == "mvc" and wideband_primary_beam_memory_mode == "in_place":
             _remove_wideband_primary_beam_cache(image_store)
         if continuum_mode == "mvc" and visibility_memory_mode == "in_place":
@@ -4513,7 +4412,20 @@ def image_continuum_single_field(
             timing_distributed_application["T_consolidate_metadata"] = (
                 time.time() - start
             )
+        if write_imaging_weights_to_ps:
+            persist_start = time.time()
+            publish_imaging_weights(
+                persisted_imaging_weights,
+                processing_set_data_group_name,
+                imaging_weight_provenance(
+                    imaging_weights_params, image_params, node_task_data_mapping, ps_xdt
+                ),
+            )
+            timing_distributed_application["T_persist_imaging_weights"] = (
+                time.time() - persist_start
+            )
     finally:
+        discard_imaging_weights(persisted_imaging_weights)
         if weight_memory_mode == "in_place" and os.path.isdir(
             os.path.join(image_store, _CONTINUUM_WEIGHT_CACHE_GROUP)
         ):

@@ -1010,7 +1010,7 @@ def restore_image(
     With ``restoration_output="primary_beam_corrected"`` only the corrected
     image is made; ``"both"`` also retains the apparent image. The corrected
     image is stored as
-    ``SKY_RESTORED_PRIMARY_BEAM_CORRECTED`` (role ``sky_primary_beam_corrected``
+    ``SKY_PRIMARY_BEAM_CORRECTED_RESTORED`` (role ``sky_primary_beam_corrected``
     of the restored group): the model and the residual are divided by the
     primary beam before the convolution, ``(SKY_MODEL / P) * B + SKY_RESIDUAL
     / P``, which is exact for the model part (see
@@ -1092,15 +1092,16 @@ def restore_image(
         match; otherwise a fresh cube is allocated as for ``False``.  Default
         ``False`` (model preserved).
     restoration_output : {"apparent", "primary_beam_corrected", "both"}, optional
-        Restored products to compute: ``"apparent"``, ``"primary_beam_corrected"``,
-        or ``"both"``. Cube outputs are ``SKY_RESTORED`` and
-        ``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``; continuum outputs are
-        ``SKY_RESTORED_FLAT_NOISE`` and ``SKY_RESTORED_FLAT_SKY``.
-        Cube corrects the model and residual by the channel power primary beam
-        before convolution. MFS divides their Taylor polynomials; MVC divides
-        by its common power primary beam. Corrected pixels below
-        ``primary_beam_limit`` are blanked with NaN. Imaging workflows use this
-        selector only when ``restore=True``.
+        Restored products to compute: ``"apparent"`` gives ``SKY_RESTORED``
+        (flat noise), ``"primary_beam_corrected"`` gives
+        ``SKY_PRIMARY_BEAM_CORRECTED_RESTORED`` (flat sky), and ``"both"`` gives both.
+        Every imager returns flat-sky ``SKY_MODEL`` and coefficient-space
+        ``SKY_RESIDUAL`` even with ``restore=False``. Primary-beam correction happens
+        before convolution: channel-wise division for cubes, coupled triangular
+        polynomial division for MFS, and common-beam division for MVC. MVC reconstructs
+        apparent coefficients using the frequency-dependent beam polynomial.
+        Only requested restored products are allocated. Spectral diagnostics require
+        the separate ``spectral_products`` analysis tool.
     restoring_beam : list of float, optional
         ``None`` restores each plane with its own PSF fit [CASA ``tclean``
         ``restoringbeam=''``]. ``[major, minor, pa]`` (FWHM and position angle
@@ -1109,7 +1110,7 @@ def restore_image(
         since CASA 5.6 (CAS-12148): the model is convolved with the unit-peak
         target beam, and the residual with the Gaussian that takes the plane's
         PSF beam to the target, times the ratio of the beam areas, so it is in
-        Jy per target beam. ``SKY_RESIDUAL`` is unchanged. A plane whose PSF
+        Jy per target beam. ``SKY_RESIDUAL`` records the residual at the target beam, preserving the public restoration identity. A plane whose PSF
         beam the target does not contain, or that has no PSF fit, keeps its
         residual unconvolved and unscaled, as ``tclean`` does, and is named in a
         warning. The continuum imager refuses a target that does not contain its
@@ -1181,6 +1182,42 @@ def restore_image(
     primary beam into the transform, and in single precision their rounding
     spreads over the corrected image.
     """
+
+    from astroviper.processing_functions.imaging.config_check._predicates import (
+        check_restoration_output,
+    )
+
+    check_restoration_output(restoration_output)
+    if img_xds.attrs.get("public_image_convention") == "flat_sky":
+        from astroviper.processing_functions.imaging.finalize_image import (
+            restore_finalized_image,
+        )
+
+        if image_data_group_out_modified is not None:
+            raise ValueError(
+                "Finalized image restoration uses canonical public product names"
+            )
+        if primary_beam_key != "primary_beam":
+            raise ValueError("Finalized images use their registered primary_beam role")
+        if not overwrite and (
+            image_data_group_out_restore_name in img_xds.attrs.get("data_groups", {})
+            or any(
+                name in img_xds
+                for name in ("SKY_RESTORED", "SKY_PRIMARY_BEAM_CORRECTED_RESTORED")
+            )
+        ):
+            raise FileExistsError("Restored public products already exist")
+        return restore_finalized_image(
+            img_xds,
+            restoration_output=restoration_output,
+            restoring_beam=restoring_beam,
+            processing_function_threads=processing_function_threads,
+            beam_fit_params_key=beam_fit_params_key,
+            beam_polarization_index=beam_polarization_index,
+            image_data_group_in_residual_name=image_data_group_in_residual_name,
+            image_data_group_in_model_name=image_data_group_in_model_name,
+            image_data_group_out_restore_name=image_data_group_out_restore_name,
+        )
     import pandas as pd
 
     if not input_checked:
@@ -1213,7 +1250,7 @@ def restore_image(
         image_data_group_out_modified = {
             "sky": "SKY_RESTORED"
             if make_apparent
-            else "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
+            else "SKY_PRIMARY_BEAM_CORRECTED_RESTORED"
         }
     # The output-variable check of overwrite=False then covers the beam.
     image_data_group_out_modified = {
@@ -1263,7 +1300,7 @@ def restore_image(
     if correct:
         primary_beam = img_xds[primary_beam_name].values
         corrected_sky_name = (
-            "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
+            "SKY_PRIMARY_BEAM_CORRECTED_RESTORED"
             if make_apparent
             else restored_sky_name
         )

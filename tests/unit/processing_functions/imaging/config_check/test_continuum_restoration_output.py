@@ -21,11 +21,12 @@ def test_selector_alone_controls_restored_products(mode, output):
     image = make_continuum_image(continuum_mode=mode)
     residual = image.SKY_RESIDUAL.copy(deep=True)
     restored, _ = restore_continuum_image(image, restoration_output=output)
-    assert ("SKY_RESTORED_FLAT_NOISE" in restored) is (output in {"apparent", "both"})
-    assert ("SKY_RESTORED_FLAT_SKY" in restored) is (
+    assert ("SKY_RESTORED" in restored) is (output in {"apparent", "both"})
+    assert ("SKY_PRIMARY_BEAM_CORRECTED_RESTORED" in restored) is (
         output in {"primary_beam_corrected", "both"}
     )
-    np.testing.assert_array_equal(restored.SKY_RESIDUAL, residual)
+    np.testing.assert_array_equal(restored.SKY_RESIDUAL, residual / 0.5)
+    np.testing.assert_array_equal(image.SKY_RESIDUAL, residual)
 
 
 def test_continuum_interfaces_expose_only_the_output_selector():
@@ -37,8 +38,8 @@ def test_continuum_interfaces_expose_only_the_output_selector():
 @pytest.mark.parametrize(
     "output,key",
     [
-        ("apparent", "sky_restored_flat_sky"),
-        ("primary_beam_corrected", "sky_restored_flat_noise"),
+        ("apparent", "sky_primary_beam_corrected_restored"),
+        ("primary_beam_corrected", "sky_restored"),
     ],
 )
 def test_conflicting_keep_requests_fail_before_opening_input(
@@ -85,7 +86,7 @@ def test_removed_processing_keyword_has_no_alias():
 @pytest.mark.parametrize(
     "output,key",
     [
-        ("apparent", "sky_restored_primary_beam_corrected"),
+        ("apparent", "sky_primary_beam_corrected_restored"),
         ("primary_beam_corrected", "sky_restored"),
     ],
 )

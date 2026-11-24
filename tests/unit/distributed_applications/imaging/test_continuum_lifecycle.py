@@ -61,7 +61,8 @@ def test_finalization_prepares_only_when_needed_and_restores_once(
     )
     assert calls == ([] if prepared else ["prepare"]) + (["restore"] if restore else [])
     xr.testing.assert_identical(model, model_snapshot)
-    xr.testing.assert_identical(result["image"].SKY_MODEL, model.SKY_MODEL)
+    np.testing.assert_allclose(result["image"].SKY_MODEL, model.SKY_MODEL / 0.5)
+    assert result["image"].SKY_MODEL.attrs["sky_convention"] == "flat_sky"
     assert not np.shares_memory(result["image"].SKY_MODEL, model.SKY_MODEL)
     if restore:
         expected, _ = original_restore(
@@ -69,27 +70,27 @@ def test_finalization_prepares_only_when_needed_and_restores_once(
             restoration_output=restoration_output,
         )
         expected_name = (
-            "SKY_RESTORED_FLAT_SKY"
+            "SKY_PRIMARY_BEAM_CORRECTED_RESTORED"
             if restoration_output == "primary_beam_corrected"
-            else "SKY_RESTORED_FLAT_NOISE"
+            else "SKY_RESTORED"
         )
         xr.testing.assert_allclose(
             result["image"][expected_name], expected[expected_name]
         )
     else:
-        assert "SKY_RESTORED_FLAT_NOISE" not in result["image"]
-        assert "SKY_RESTORED_FLAT_SKY" not in result["image"]
+        assert "SKY_RESTORED" not in result["image"]
+        assert "SKY_PRIMARY_BEAM_CORRECTED_RESTORED" not in result["image"]
         assert result["timing_restore"] is None
     if restoration_output == "primary_beam_corrected":
-        assert "SKY_RESTORED_FLAT_NOISE" not in result["image"]
+        assert "SKY_RESTORED" not in result["image"]
         assert (
             result["image"].attrs["data_groups"]["restored"]["sky"]
-            == "SKY_RESTORED_FLAT_SKY"
+            == "SKY_PRIMARY_BEAM_CORRECTED_RESTORED"
         )
         assert "sky_flat_sky" not in result["image"].attrs["data_groups"]["restored"]
-        assert "T_correct_sky_by_primary_beam" in result["timing_restore"]
+        assert "T_restore" in result["timing_restore"]
     else:
-        assert "SKY_RESTORED_FLAT_SKY" not in result["image"]
+        assert "SKY_PRIMARY_BEAM_CORRECTED_RESTORED" not in result["image"]
         if restore:
             assert "T_correct_sky_by_primary_beam" not in result["timing_restore"]
 
@@ -113,9 +114,12 @@ def test_continuum_finalization_exposes_only_the_flat_sky(continuum_mode):
     )
 
     restored = result["image"]
-    assert "SKY_RESTORED_FLAT_NOISE" not in restored
-    assert "SKY_RESTORED_FLAT_SKY" in restored
-    assert restored.attrs["data_groups"]["restored"]["sky"] == "SKY_RESTORED_FLAT_SKY"
+    assert "SKY_RESTORED" not in restored
+    assert "SKY_PRIMARY_BEAM_CORRECTED_RESTORED" in restored
+    assert (
+        restored.attrs["data_groups"]["restored"]["sky"]
+        == "SKY_PRIMARY_BEAM_CORRECTED_RESTORED"
+    )
     assert "sky_flat_sky" not in restored.attrs["data_groups"]["restored"]
 
 

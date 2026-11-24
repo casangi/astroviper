@@ -167,12 +167,12 @@ def _model_updates(result):
     "single_precision_image", [True, False], ids=["single", "double"]
 )
 @pytest.mark.parametrize("deconvolver", ["hogbom", "asp"])
-def test_one_taylor_term_continuum_is_the_cube_bit_for_bit(
+def test_one_taylor_term_continuum_matches_cube_cycles_and_flat_sky(
     tmp_path, processing_set, deconvolver, single_precision_image
 ):
     """Every plane makes the same iterations in every model update in both
     imagers, Stokes I in all four, and books the same model fluxes; the models
-    and residuals written are the same bit for bit."""
+    and residuals agree after the separate primary-beam fits."""
     records = {}
     for imager in ("cube", "continuum"):
         result = _image(
@@ -192,4 +192,11 @@ def test_one_taylor_term_continuum_is_the_cube_bit_for_bit(
         cube = _planes(tmp_path / "cube.img.zarr", name)
         continuum = _planes(tmp_path / "continuum.img.zarr", name)
         assert cube.dtype == (np.float32 if single_precision_image else np.float64)
-        np.testing.assert_array_equal(continuum, cube, err_msg=name)
+        np.testing.assert_allclose(
+            continuum,
+            cube,
+            rtol=max(2 * np.finfo(continuum.dtype).eps, 1e-9),
+            atol=1e-10,
+            equal_nan=True,
+            err_msg=name,
+        )

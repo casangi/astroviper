@@ -171,7 +171,7 @@ def _final_continuum_image():
             "POINT_SPREAD_FUNCTION": (psf_dims, np.ones((1, 3, 1, 2, 3))),
             "PRIMARY_BEAM": (pb_dims, np.full((1, 1, 1, 2, 3), 0.8)),
             "MASK": (sky_dims, np.ones((1, 2, 1, 2, 3), dtype=bool)),
-            "SKY_RESTORED_FLAT_SKY": (
+            "SKY_PRIMARY_BEAM_CORRECTED_RESTORED": (
                 sky_dims,
                 np.full((1, 2, 1, 2, 3), 2.5),
             ),
@@ -187,7 +187,7 @@ def _final_continuum_image():
                     "mask": "MASK",
                 },
                 "model": {"sky": "SKY_MODEL"},
-                "restored": {"sky_flat_sky": ("SKY_RESTORED_FLAT_SKY")},
+                "restored": {"sky_flat_sky": ("SKY_PRIMARY_BEAM_CORRECTED_RESTORED")},
             },
         },
     )
@@ -218,7 +218,12 @@ def test_continuum_image_for_disk_keeps_requested_products_without_copying_data(
         ["sky_residual", "point_spread_function"],
     )
 
-    assert set(output.data_vars) == {"SKY_RESIDUAL", "POINT_SPREAD_FUNCTION"}
+    assert set(output.data_vars) == {
+        "SKY_RESIDUAL",
+        "SKY_MODEL",
+        "PRIMARY_BEAM",
+        "POINT_SPREAD_FUNCTION",
+    }
     assert output["SKY_RESIDUAL"].dims == (
         "time",
         "taylor_term",
@@ -243,7 +248,7 @@ def test_final_continuum_image_round_trips_finite_taylor_data(tmp_path):
             "sky_residual",
             "point_spread_function",
             "primary_beam",
-            "sky_restored_flat_sky",
+            "sky_primary_beam_corrected_restored",
         ],
     )
     store = tmp_path / "continuum.img.zarr"
@@ -264,14 +269,19 @@ def test_final_continuum_image_round_trips_finite_taylor_data(tmp_path):
     )
     assert np.isfinite(persisted["SKY_RESIDUAL"].values).all()
     assert np.isfinite(persisted["POINT_SPREAD_FUNCTION"].values).all()
-    assert "SKY_RESTORED_FLAT_SKY" in persisted
+    assert "SKY_PRIMARY_BEAM_CORRECTED_RESTORED" in persisted
 
 
 def test_continuum_image_for_disk_keeps_registry_mask_and_role():
     """The canonical mask registry key retains MASK and its residual role."""
     output = _continuum_image_for_disk(_final_continuum_image(), ["mask"])
 
-    assert set(output.data_vars) == {"MASK"}
+    assert set(output.data_vars) == {
+        "MASK",
+        "SKY_MODEL",
+        "SKY_RESIDUAL",
+        "PRIMARY_BEAM",
+    }
     assert output.attrs["data_groups"]["residual"]["mask"] == "MASK"
 
 
@@ -289,7 +299,14 @@ def test_continuum_image_for_disk_keeps_restored_spectral_products():
 
     output = _continuum_image_for_disk(image, ["alpha", "alpha_error", "beta"])
 
-    assert set(output.data_vars) == {"ALPHA", "ALPHA_ERROR", "BETA"}
+    assert set(output.data_vars) == {
+        "ALPHA",
+        "ALPHA_ERROR",
+        "BETA",
+        "SKY_MODEL",
+        "SKY_RESIDUAL",
+        "PRIMARY_BEAM",
+    }
     assert output.attrs["data_groups"]["restored"] == {
         "alpha": "ALPHA",
         "alpha_error": "ALPHA_ERROR",
@@ -961,10 +978,10 @@ def test_tw_hydra_primary_beam_keeps_reference_frequency_through_cycles(
         },
     )
 
-    assert "frequency" in image.PRIMARY_BEAM.coords
-    np.testing.assert_array_equal(
-        image.PRIMARY_BEAM.frequency,
-        [image_params["reference_frequency"]],
+    assert "frequency_polynomial" in image.PRIMARY_BEAM.coords
+    assert (
+        image.frequency_polynomial.attrs["reference_frequency"]["data"]
+        == image_params["reference_frequency"]
     )
 
 
@@ -994,68 +1011,32 @@ def test_task_primary_beam_mapping_rejects_incomplete_cache():
 
 
 @pytest.mark.parametrize("wideband_primary_beam_memory_mode", ["in_place", "in_memory"])
-def test_tw_hydra_wideband_primary_beam_memory_modes_match_recompute(
-    tmp_path, tw_hydra_store, wideband_primary_beam_memory_mode
+def test_removed_primary_beam_cache_policies_are_rejected(
+    wideband_primary_beam_memory_mode,
 ):
-    """MVC disk-backed and task-local memory PBs reproduce recomputation."""
-    processing_set = open_processing_set(str(tw_hydra_store))
-    _, reference = _run_tw_hydra_continuum(
-        tw_hydra_store,
-        tmp_path / "widebandpb_reference.img.zarr",
-        processing_set,
-        2,
-        "mvc",
-        {"weighting": "natural", "weighting_scope": "local"},
-    )
-    output_store = tmp_path / f"widebandpb_{wideband_primary_beam_memory_mode}.img.zarr"
-    _, actual = _run_tw_hydra_continuum(
-        tw_hydra_store,
-        output_store,
-        processing_set,
-        2,
-        "mvc",
-        {"weighting": "natural", "weighting_scope": "local"},
-        wideband_primary_beam_memory_mode=wideband_primary_beam_memory_mode,
+    from astroviper.processing_functions.imaging.config_check import (
+        CONTINUUM_SINGLE_FIELD,
+        check_driver_workflow,
     )
 
-    for variable in ("SKY_RESIDUAL", "POINT_SPREAD_FUNCTION", "PRIMARY_BEAM"):
-        np.testing.assert_allclose(
-            actual[variable],
-            reference[variable],
-            rtol=TW_HYDRA_RELATIVE_TOLERANCE,
-            atol=0.0,
-            equal_nan=True,
+    with pytest.raises(ValueError, match="wideband_primary_beam_memory_mode"):
+        check_driver_workflow(
+            {"wideband_primary_beam_memory_mode": wideband_primary_beam_memory_mode},
+            mode=CONTINUUM_SINGLE_FIELD,
         )
-    assert "_WIDEBAND_PRIMARY_BEAM_CACHE" not in zarr.open_group(output_store)
 
 
-def test_tw_hydra_mfs_ignores_wideband_primary_beam_memory_mode(
-    tmp_path, tw_hydra_store
-):
-    """The MVC-specific PB storage keyword leaves MFS products unchanged."""
-    processing_set = open_processing_set(str(tw_hydra_store))
-    _, reference = _run_tw_hydra_continuum(
-        tw_hydra_store,
-        tmp_path / "mfs_pb_reference.img.zarr",
-        processing_set,
-        2,
-        "mfs",
-        {"weighting": "natural", "weighting_scope": "local"},
-    )
-    output_store = tmp_path / "mfs_pb_in_place.img.zarr"
-    _, actual = _run_tw_hydra_continuum(
-        tw_hydra_store,
-        output_store,
-        processing_set,
-        2,
-        "mfs",
-        {"weighting": "natural", "weighting_scope": "local"},
-        wideband_primary_beam_memory_mode="in_place",
+def test_mfs_also_rejects_removed_primary_beam_cache_policy():
+    from astroviper.processing_functions.imaging.config_check import (
+        CONTINUUM_SINGLE_FIELD,
+        check_driver_workflow,
     )
 
-    for variable in ("SKY_RESIDUAL", "POINT_SPREAD_FUNCTION", "PRIMARY_BEAM"):
-        np.testing.assert_array_equal(actual[variable], reference[variable])
-    assert "_WIDEBAND_PRIMARY_BEAM_CACHE" not in zarr.open_group(output_store)
+    with pytest.raises(ValueError, match="wideband_primary_beam_memory_mode"):
+        check_driver_workflow(
+            {"continuum_mode": "mfs", "wideband_primary_beam_memory_mode": "in_place"},
+            mode=CONTINUUM_SINGLE_FIELD,
+        )
 
 
 def _store_snapshot(store, parse_metadata=False):
@@ -1195,7 +1176,7 @@ def test_tw_hydra_in_place_weights_can_be_retained(tmp_path, tw_hydra_store):
     reopened = open_processing_set(str(in_place_store))
     for _, ms_xdt in reopened.items():
         cache_name = ms_xdt.ds.attrs["data_groups"]["base"]["weight_imaging"]
-        assert cache_name == "WEIGHT_IMAGING_CONTINUUM_CACHE"
+        assert cache_name == "WEIGHT_IMAGING"
         cached_weights = ms_xdt.ds[cache_name].values
         # Flagged or absent samples may remain NaN, as they do in memory.  The
         # cache is valid when it contains finite, positive imaging weights.
@@ -1214,10 +1195,9 @@ def test_tw_hydra_in_place_weights_can_be_retained(tmp_path, tw_hydra_store):
     )
     cleaned = open_processing_set(str(in_place_store))
     for _, ms_xdt in cleaned.items():
-        assert "WEIGHT_IMAGING_CONTINUUM_CACHE" in ms_xdt.ds
+        assert "WEIGHT_IMAGING" in ms_xdt.ds
         assert (
-            ms_xdt.ds.attrs["data_groups"]["base"]["weight_imaging"]
-            == "WEIGHT_IMAGING_CONTINUUM_CACHE"
+            ms_xdt.ds.attrs["data_groups"]["base"]["weight_imaging"] == "WEIGHT_IMAGING"
         )
 
 
@@ -1378,7 +1358,7 @@ def test_tw_hydra_frequency_subset_uses_shared_cube_selection(tmp_path, tw_hydra
         weight_memory_mode="in_place",
     )
 
-    assert image.SKY_RESIDUAL.sizes["taylor_term"] == 2
+    assert image.SKY_RESIDUAL.sizes["frequency_polynomial"] == 2
     assert np.isfinite(image.SKY_RESIDUAL.values).all()
     assert np.isfinite(image.POINT_SPREAD_FUNCTION.values).all()
 
@@ -1462,7 +1442,7 @@ def test_tw_hydra_failed_in_place_run_removes_its_weights(
     contents = _store_snapshot(store, parse_metadata=True)
     write_weights = node_module._write_continuum_weights_in_place
 
-    def write_then_fail(ps_xdt, image_store, io_engine):
+    def write_then_fail(ps_xdt, image_store, io_engine, persisted_imaging_weights=None):
         write_weights(ps_xdt, image_store, io_engine)
         raise RuntimeError("injected failure")
 
@@ -1566,9 +1546,7 @@ def test_tw_hydra_rerun_calculates_its_own_weights(
     natural = {"weighting": "natural", "weighting_scope": "local"}
     briggs = {"weighting": "briggs", "robust": -2.0, "weighting_scope": "local"}
     registered_name = (
-        "WEIGHT_IMAGING_FOREIGN"
-        if earlier_run == "foreign"
-        else "WEIGHT_IMAGING_CONTINUUM_CACHE"
+        "WEIGHT_IMAGING_FOREIGN" if earlier_run == "foreign" else "WEIGHT_IMAGING"
     )
 
     reference_store = tmp_path / "reference.ps.zarr"
@@ -1720,20 +1698,20 @@ def test_tw_hydra_distributed_continuum_is_partition_invariant(
         weighting,
     )
 
-    assert five_chunks.SKY_RESIDUAL.sizes["taylor_term"] == 2
-    assert five_chunks.POINT_SPREAD_FUNCTION.sizes["psf_taylor_order"] == 3
-    assert five_chunks.PRIMARY_BEAM.sizes["frequency"] == 1
+    assert five_chunks.SKY_RESIDUAL.sizes["frequency_polynomial"] == 2
+    assert five_chunks.POINT_SPREAD_FUNCTION.sizes["frequency_polynomial_moment"] == 3
+    assert five_chunks.PRIMARY_BEAM.sizes["frequency_polynomial"] == 2
     variables = ["SKY_RESIDUAL", "POINT_SPREAD_FUNCTION", "PRIMARY_BEAM"]
     if continuum_mode == "mvc":
-        assert five_chunks.PRIMARY_BEAM_TAYLOR.dims == (
+        assert five_chunks.PRIMARY_BEAM.dims == (
             "time",
-            "taylor_term",
+            "frequency_polynomial",
             "polarization",
             "l",
             "m",
         )
-        assert five_chunks.PRIMARY_BEAM_TAYLOR.sizes["taylor_term"] == 2
-        variables.append("PRIMARY_BEAM_TAYLOR")
+        assert five_chunks.PRIMARY_BEAM.sizes["frequency_polynomial"] == 2
+        variables.append("PRIMARY_BEAM")
     for variable in variables:
         actual = np.asarray(five_chunks[variable].values)
         reference = np.asarray(one_chunk[variable].values)
@@ -1771,7 +1749,7 @@ def test_tw_hydra_cleaning_runs_later_imaging_cycles_and_builds_a_model(
     )
 
     assert result["n_cycles"] == 2
-    expected_final_graphs = 1 if continuum_mode == "mvc" else 0
+    expected_final_graphs = 1
     assert (
         len(result["timing_graphs"]) == result["n_cycles"] + 1 + expected_final_graphs
     )
@@ -1779,7 +1757,7 @@ def test_tw_hydra_cleaning_runs_later_imaging_cycles_and_builds_a_model(
     assert result["timing_graphs"][-1 - expected_final_graphs]["stage"] == (
         "final residual"
     )
-    if continuum_mode == "mvc":
+    if continuum_mode in ("mfs", "mvc"):
         assert result["timing_graphs"][-1]["stage"] == "finalization"
         assert result["timing_graphs"][-1]["stage_kind"] == "final"
         assert result["timing_graphs"][-1]["includes_restoration"] is False
@@ -1850,9 +1828,9 @@ def test_tw_hydra_native_mtmfs_matches_reduction_and_visibility_cache_modes(
         assert result["controller"].cycles_done == 2
         assert result["controller"].total_iter_done > 0
         assert result["deconvolution"].data
-        assert image.SKY_MODEL.sizes["taylor_term"] == 2
-        assert np.nanmax(np.abs(image.SKY_MODEL.isel(taylor_term=0))) > 0.0
-        assert np.nanmax(np.abs(image.SKY_MODEL.isel(taylor_term=1))) > 0.0
+        assert image.SKY_MODEL.sizes["frequency_polynomial"] == 2
+        assert np.nanmax(np.abs(image.SKY_MODEL.isel(frequency_polynomial=0))) > 0.0
+        assert np.nanmax(np.abs(image.SKY_MODEL.isel(frequency_polynomial=1))) > 0.0
         for fields in result["deconvolution"].data.values():
             assert np.isfinite(fields["hessian_condition_number"]).all()
             np.testing.assert_array_equal(fields["scales"], [0.0])
@@ -2068,7 +2046,7 @@ def test_tw_hydra_corrected_data_group_matches_base(
         assert actual.tobytes() == expected.tobytes()
 
 
-@pytest.mark.parametrize("wideband_primary_beam_memory_mode", ["in_place", "recompute"])
+@pytest.mark.parametrize("wideband_primary_beam_memory_mode", ["recompute"])
 def test_tw_hydra_widebandpb_modes_preserve_later_mvc_imaging_cycles(
     tmp_path, tw_hydra_store, wideband_primary_beam_memory_mode
 ):
@@ -2134,14 +2112,16 @@ def test_tw_hydra_restoration_and_pbcor_apply_the_primary_beam_limit(
         primary_beam_limit=0.2,
     )
 
-    assert "SKY_RESTORED_FLAT_NOISE" not in image
-    assert "SKY_RESTORED_FLAT_SKY" in image
-    assert image.attrs["data_groups"]["restored"]["sky"] == ("SKY_RESTORED_FLAT_SKY")
+    assert "SKY_RESTORED" not in image
+    assert "SKY_PRIMARY_BEAM_CORRECTED_RESTORED" in image
+    assert image.attrs["data_groups"]["restored"]["sky"] == (
+        "SKY_PRIMARY_BEAM_CORRECTED_RESTORED"
+    )
     assert "sky_flat_sky" not in image.attrs["data_groups"]["restored"]
-    pbcor_finite = np.isfinite(image.SKY_RESTORED_FLAT_SKY.values)
+    pbcor_finite = np.isfinite(image.SKY_PRIMARY_BEAM_CORRECTED_RESTORED.values)
     assert np.any(pbcor_finite)
     assert np.any(~pbcor_finite)
-    primary_beam = np.squeeze(np.asarray(image.PRIMARY_BEAM.values), axis=1)
+    primary_beam = np.asarray(image.PRIMARY_BEAM.isel(frequency_polynomial=0).values)
     primary_beam = np.broadcast_to(
         primary_beam[:, None, ...],
         pbcor_finite.shape,
@@ -2262,29 +2242,29 @@ def test_tw_hydra_mvc_global_cleaning_restoration_and_pbcor(tmp_path, tw_hydra_s
     assert result["timing_graphs"][-1]["includes_restoration"] is True
     assert np.nanmax(np.abs(image.SKY_MODEL.values)) > 0.0
     assert image.SKY_RESIDUAL.dtype == np.dtype(np.float32)
-    assert image.PRIMARY_BEAM_TAYLOR.dims == (
+    assert image.PRIMARY_BEAM.dims == (
         "time",
-        "taylor_term",
+        "frequency_polynomial",
         "polarization",
         "l",
         "m",
     )
-    assert image.PRIMARY_BEAM_TAYLOR.dtype == np.dtype(np.float32)
-    assert image.attrs["data_groups"]["restored"]["primary_beam_taylor"] == (
-        "PRIMARY_BEAM_TAYLOR"
-    )
-    assert "SKY_RESTORED_FLAT_NOISE" not in image
-    assert image.SKY_RESTORED_FLAT_SKY.dims == (
+    assert image.PRIMARY_BEAM.dtype == np.dtype(np.float32)
+    assert image.attrs["data_groups"]["restored"]["primary_beam"] == ("PRIMARY_BEAM")
+    assert "SKY_RESTORED" not in image
+    assert image.SKY_PRIMARY_BEAM_CORRECTED_RESTORED.dims == (
         "time",
-        "taylor_term",
+        "frequency_polynomial",
         "polarization",
         "l",
         "m",
     )
-    assert image.attrs["data_groups"]["restored"]["sky"] == ("SKY_RESTORED_FLAT_SKY")
+    assert image.attrs["data_groups"]["restored"]["sky"] == (
+        "SKY_PRIMARY_BEAM_CORRECTED_RESTORED"
+    )
     assert "sky_flat_sky" not in image.attrs["data_groups"]["restored"]
-    assert np.isfinite(image.SKY_RESTORED_FLAT_SKY.values).any()
-    assert not np.isfinite(image.SKY_RESTORED_FLAT_SKY.values).all()
+    assert np.isfinite(image.SKY_PRIMARY_BEAM_CORRECTED_RESTORED.values).any()
+    assert not np.isfinite(image.SKY_PRIMARY_BEAM_CORRECTED_RESTORED.values).all()
 
 
 @pytest.mark.parametrize(
@@ -2432,7 +2412,7 @@ def test_wideband_uniform_and_briggs_weights_default_to_the_global_density(
     major = {
         scope: float(
             images[scope].BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.isel(
-                time=0, polarization=0, beam_params=0
+                time=0, frequency=0, polarization=0, beam_params_label=0
             )
         )
         for scope in ("global", "local")
@@ -2548,9 +2528,10 @@ def test_tw_hydra_supports_alternate_taylor_orders(
         deconvolver="hogbom" if n_taylor_terms == 1 else "mtmfs",
     )
 
-    assert image.SKY_RESIDUAL.sizes["taylor_term"] == n_taylor_terms
+    assert image.SKY_RESIDUAL.sizes["frequency_polynomial"] == n_taylor_terms
     assert (
-        image.POINT_SPREAD_FUNCTION.sizes["psf_taylor_order"] == 2 * n_taylor_terms - 1
+        image.POINT_SPREAD_FUNCTION.sizes["frequency_polynomial_moment"]
+        == 2 * n_taylor_terms - 1
     )
 
 
@@ -2699,7 +2680,7 @@ def test_tw_hydra_continuum_transfers_results_between_processes(
     kwargs = dict(
         cycle_control_params=params,
         visibility_memory_mode="in_memory",
-        wideband_primary_beam_memory_mode="in_memory",
+        wideband_primary_beam_memory_mode="recompute",
     )
     _, reference = _run_tw_hydra_continuum(
         tw_hydra_store,
@@ -2877,7 +2858,7 @@ def test_tw_hydra_in_place_caches_equal_with_both_io_engines(
             io_engine=io_engine,
             weight_memory_mode="in_place",
             visibility_memory_mode="in_place",
-            wideband_primary_beam_memory_mode="in_place",
+            wideband_primary_beam_memory_mode="recompute",
         )
     for name in ("SKY_RESIDUAL", "POINT_SPREAD_FUNCTION"):
         np.testing.assert_allclose(
@@ -2933,10 +2914,11 @@ def test_tw_hydra_fits_output_of_a_restore(tmp_path, tw_hydra_store, restoring_b
 
     _, psf_rows = beams("SKY_RESIDUAL.tt0.fits")
     assert psf_rows is not None and np.all(psf_rows[:, :2] > 0)
-    noise_beam, noise_rows = beams("SKY_RESTORED_FLAT_NOISE.tt0.fits")
-    sky_beam, sky_rows = beams("SKY_RESTORED_FLAT_SKY.tt0.fits")
+    noise_beam, noise_rows = beams("SKY_RESTORED.tt0.fits")
+    sky_beam, sky_rows = beams("SKY_PRIMARY_BEAM_CORRECTED_RESTORED.tt0.fits")
     if restoring_beam is None:
-        assert noise_beam is None and sky_beam is None and sky_rows is None
+        assert noise_beam is None and sky_beam is None and sky_rows is not None
+        np.testing.assert_array_equal(sky_rows, noise_rows)
         # The restore applies the PSF beam of Stokes I to Stokes Q too.
         np.testing.assert_array_equal(noise_rows, psf_rows[[0, 0]])
     else:
@@ -2975,12 +2957,12 @@ def test_tw_hydra_fits_output_per_taylor_term(tmp_path, tw_hydra_store, continuu
     )
     names = sorted(os.listdir(fits_store))
     assert "SKY_RESIDUAL.tt0.fits" in names and "SKY_RESIDUAL.tt1.fits" in names
-    assert "PRIMARY_BEAM.fits" in names
-    for term in range(zarr_image.sizes["taylor_term"]):
+    assert "PRIMARY_BEAM.tt0.fits" in names and "PRIMARY_BEAM.tt1.fits" in names
+    for term in range(zarr_image.sizes["frequency_polynomial"]):
         fits = open_image({"sky": str(fits_store / f"SKY_RESIDUAL.tt{term}.fits")})
         np.testing.assert_allclose(
             fits.SKY.values[:, 0],
-            zarr_image.SKY_RESIDUAL.isel(taylor_term=term).values,
+            zarr_image.SKY_RESIDUAL.isel(frequency_polynomial=term).values,
             rtol=1e-6,
             atol=1e-9,
         )
@@ -3208,9 +3190,7 @@ def test_single_image_channel_retains_each_observations_full_axis_tolerance(
                 deconvolver="hogbom",
                 restore=False,
                 visibility_memory_mode=cache_mode,
-                wideband_primary_beam_memory_mode=(
-                    cache_mode if mode == "mvc" else "recompute"
-                ),
+                wideband_primary_beam_memory_mode="recompute",
             )
     assert recorded
     image = load_image(path)

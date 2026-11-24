@@ -523,7 +523,7 @@ def image_cube_single_field(
     fft_backend="pyfftw",
     image_data_variables_keep=None,
     restore=False,
-    restoration_output="apparent",
+    restoration_output="primary_beam_corrected",
     restoring_beam=None,
     psf_fitting_method="astroviper",
     gridding_kernel_params=None,
@@ -891,19 +891,21 @@ def image_cube_single_field(
         The distributed cube writer does not publish UV grids; standalone
         processing functions may retain their working grids in memory.
     restore : bool, optional
-        If ``True`` produce a restored image after deconvolution: the model
-        convolved with the clean beam (the Gaussian fit to the PSF) plus the
-        residual, written to the ``sky_restored`` (``SKY_RESTORED``) variable.
+        Whether to compute the products selected by ``restoration_output`` in the
+        same imaging workflow. Flat-sky model and residual outputs are always
+        finalized. ``ALPHA``, ``ALPHA_ERROR`` and ``BETA`` are computed only by the
+        separate ``spectral_products`` analysis tool.
     restoration_output : {"apparent", "primary_beam_corrected", "both"}, optional
-        Restored products to compute: ``"apparent"``, ``"primary_beam_corrected"``,
-        or ``"both"``. Cube outputs are ``SKY_RESTORED`` and
-        ``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``; continuum outputs are
-        ``SKY_RESTORED_FLAT_NOISE`` and ``SKY_RESTORED_FLAT_SKY``.
-        Cube corrects the model and residual by the channel power primary beam
-        before convolution. MFS divides their Taylor polynomials; MVC divides
-        by its common power primary beam. Corrected pixels below
-        ``primary_beam_limit`` are blanked with NaN. Imaging workflows use this
-        selector only when ``restore=True``.
+        Restored products to compute: ``"apparent"`` gives ``SKY_RESTORED``
+        (flat noise), ``"primary_beam_corrected"`` gives
+        ``SKY_PRIMARY_BEAM_CORRECTED_RESTORED`` (flat sky), and ``"both"`` gives both.
+        Every imager returns flat-sky ``SKY_MODEL`` and coefficient-space
+        ``SKY_RESIDUAL`` even with ``restore=False``. Primary-beam correction happens
+        before convolution: channel-wise division for cubes, coupled triangular
+        polynomial division for MFS, and common-beam division for MVC. MVC reconstructs
+        apparent coefficients using the frequency-dependent beam polynomial.
+        Only requested restored products are allocated. Spectral diagnostics require
+        the separate ``spectral_products`` analysis tool.
     restoring_beam : list of float or None, optional
         ``None`` restores each plane with its own PSF fit [CASA ``tclean``
         ``restoringbeam=''``]. ``[major, minor, pa]`` (FWHM and position angle
@@ -912,7 +914,7 @@ def image_cube_single_field(
         since CASA 5.6 (CAS-12148): the model is convolved with the unit-peak
         target beam, and the residual with the Gaussian that takes the plane's
         PSF beam to the target, times the ratio of the beam areas, so it is in
-        Jy per target beam. ``SKY_RESIDUAL`` is unchanged. A plane whose PSF
+        Jy per target beam. ``SKY_RESIDUAL`` records the residual at the target beam, preserving the public restoration identity. A plane whose PSF
         beam the target does not contain, or that has no PSF fit, keeps its
         residual unconvolved and unscaled, as ``tclean`` does, and is named in a
         warning. The continuum imager refuses a target that does not contain its

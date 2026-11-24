@@ -588,7 +588,7 @@ def image(
             continuum_mode="mfs",
             primary_beam_limit=PRIMARY_BEAM_LIMIT,
             image_data_variables_keep=(
-                KEEP + ["sky_restored_flat_sky"] if deconvolve else KEEP
+                KEEP + ["sky_primary_beam_corrected_restored"] if deconvolve else KEEP
             ),
             visibility_memory_mode="recompute",
         )
@@ -640,9 +640,9 @@ def image(
     captured.update(
         record=result["deconvolution"],
         restored=planes(
-            "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
+            "SKY_PRIMARY_BEAM_CORRECTED_RESTORED"
             if imager == "cube"
-            else "SKY_RESTORED_FLAT_SKY"
+            else "SKY_PRIMARY_BEAM_CORRECTED_RESTORED"
         ),
         stop_code={
             STOKES[key.pol]: int(fields["stop_code"].imaging)

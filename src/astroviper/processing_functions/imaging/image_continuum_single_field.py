@@ -2197,9 +2197,9 @@ def fit_mvc_primary_beam_taylor(contributions):
     Map tasks supply additive weighted PB projections and spectral weight
     moments.  Solving their globally reduced normal equations produces the PB
     polynomial without carrying a channel-sized image cube through reduce.
-    This product is diagnostic only: MVC has already incorporated the channel
-    PB in its common-beam normal equations, so it must not be applied again to
-    the restored Taylor coefficients.
+    MVC finalization removes the common beam from its model and principal
+    residual. This actual frequency-dependent beam polynomial reconstructs
+    their apparent coefficients for optional flat-noise restoration.
 
     Parameters
     ----------
@@ -2220,7 +2220,7 @@ def fit_mvc_primary_beam_taylor(contributions):
         moments_name="MVC_PRIMARY_BEAM_FIT_WEIGHT_MOMENTS",
         continuum_mode="mvc",
         primary_beam_limit=primary_beam_limit,
-        usage="diagnostic_only_already_incorporated_by_mvc",
+        usage="reconstruct_apparent_polynomial_after_common_beam_removal",
     )
     output_dtype = contributions.attrs.get("mvc_output_dtype")
     if output_dtype is not None:
@@ -4557,70 +4557,45 @@ def restore_continuum_image(
     primary_beam_limit=0.2,
     primary_beam_key="primary_beam",
     deconvolver="hogbom",
-    restoration_output="apparent",
+    restoration_output="primary_beam_corrected",
     restoring_beam=None,
     continuum_mode=None,
     input_checked=False,
 ):
-    """Restore the continuum image.
-
-    Taylor planes are passed directly to the same array-level restoration core
-    used by cube imaging. No temporary frequency cube is constructed. The
-    caller may request the apparent restored stack, the intrinsic
-    primary-beam-corrected stack, or both. These are stored as
-    ``SKY_RESTORED_FLAT_NOISE`` and ``SKY_RESTORED_FLAT_SKY``, respectively.
-
-    Every Taylor coefficient is restored independently with the same fitted
-    clean beam. MFS first divides the apparent model and residual Taylor
-    polynomials by ``PRIMARY_BEAM_TAYLOR``; MVC retains its common-primary-beam
-    correction. Spectral-product values use the primary-beam-corrected Taylor
-    stack whenever it is calculated, because that stack represents the
-    inferred on-sky emission; their validity mask remains in the flat-noise
-    convention so primary-beam-amplified edge noise cannot set its threshold.
-    Invalid pixels are represented by NaN rather than a CASA lattice mask.
+    """Finalize and restore continuum coefficients using the public flat-sky contract.
 
     Parameters
     ----------
     img_xds : xarray.Dataset
-        Continuum image dataset containing the residual image, sky model,
-        point-spread function, and fitted restoring-beam parameters.
-
-    image_data_group_in_residual_name : str, optional
-        Name of the residual image data group.
-
-    image_data_group_in_model_name : str, optional
-        Name of the sky-model data group.
-
+        Internal or finalized continuum model, residual, PSF and primary beam.
+    image_data_group_in_residual_name, image_data_group_in_model_name : str, optional
+        Groups identifying the input model and residual.
     image_data_group_out_restore_name : str, optional
-        Name under which the restored image is registered.
-
+        Group for the requested restored product.
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
         kernels.
-
     primary_beam_limit : float, optional
-        Primary-beam cutoff below which the corrected image is blanked.
-
+        Valid-sky primary-beam cutoff.
     primary_beam_key : str, optional
-        Role key of the primary beam in the residual data group.
-
-    deconvolver : {"hogbom", "asp", "mtmfs"}, optional
-        Deconvolver that produced the model. MT-MFS restoration applies the
-        Taylor Hessian's principal solution to a private copy of every residual
-        Taylor term before restoration. The stored residual remains unchanged.
-
-    restoration_output : {"apparent", "primary_beam_corrected", "both"}, default "apparent"
-        Restored products to compute: ``"apparent"``, ``"primary_beam_corrected"``,
-        or ``"both"``. Cube outputs are ``SKY_RESTORED`` and
-        ``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``; continuum outputs are
-        ``SKY_RESTORED_FLAT_NOISE`` and ``SKY_RESTORED_FLAT_SKY``.
-        Cube corrects the model and residual by the channel power primary beam
-        before convolution. MFS divides their Taylor polynomials; MVC divides
-        by its common power primary beam. Corrected pixels below
-        ``primary_beam_limit`` are blanked with NaN. Imaging workflows use this
-        selector only when ``restore=True``.
-
-    restoring_beam : list of float, optional
+        Primary-beam role. The public contract uses primary_beam.
+    deconvolver : str, optional
+        Deconvolver that produced the internal model. MT-MFS finalization applies
+        the Taylor Hessian inverse to the normal-equation residual before primary-
+        beam correction. The public residual is this flat-sky principal residual;
+        the input cycle-control residual is unchanged.
+    restoration_output : {"apparent", "primary_beam_corrected", "both"}, optional
+        Restored products to compute: ``"apparent"`` gives ``SKY_RESTORED``
+        (flat noise), ``"primary_beam_corrected"`` gives
+        ``SKY_PRIMARY_BEAM_CORRECTED_RESTORED`` (flat sky), and ``"both"`` gives both.
+        Every imager returns flat-sky ``SKY_MODEL`` and coefficient-space
+        ``SKY_RESIDUAL`` even with ``restore=False``. Primary-beam correction happens
+        before convolution: channel-wise division for cubes, coupled triangular
+        polynomial division for MFS, and common-beam division for MVC. MVC reconstructs
+        apparent coefficients using the frequency-dependent beam polynomial.
+        Only requested restored products are allocated. Spectral diagnostics require
+        the separate ``spectral_products`` analysis tool.
+    restoring_beam : array_like or None, optional
         ``None`` restores each plane with its own PSF fit [CASA ``tclean``
         ``restoringbeam=''``]. ``[major, minor, pa]`` (FWHM and position angle
         in radians, as ``BEAM_FIT_PARAMS``; ``major >= minor > 0``,
@@ -4628,7 +4603,7 @@ def restore_continuum_image(
         since CASA 5.6 (CAS-12148): the model is convolved with the unit-peak
         target beam, and the residual with the Gaussian that takes the plane's
         PSF beam to the target, times the ratio of the beam areas, so it is in
-        Jy per target beam. ``SKY_RESIDUAL`` is unchanged. A plane whose PSF
+        Jy per target beam. ``SKY_RESIDUAL`` records the residual at the target beam, preserving the public restoration identity. A plane whose PSF
         beam the target does not contain, or that has no PSF fit, keeps its
         residual unconvolved and unscaled, as ``tclean`` does, and is named in a
         warning. The continuum imager refuses a target that does not contain its
@@ -4642,14 +4617,12 @@ def restore_continuum_image(
         beam is recorded as ``BEAM_FIT_PARAMS_SKY_RESTORED``. For
         ``tclean``'s ``restoringbeam='common'``, see
         :func:`~astroviper.processing_functions.image_analysis.common_beam.common_beam`.
-
     continuum_mode : {"mfs", "mvc"} or None, optional
         Continuum construction convention. When omitted, infer it from the
         residual or image metadata. An explicit value must agree with any
         stored metadata. MFS corrects the Taylor polynomial as a whole; MVC
         divides each coefficient by its already-constructed common primary
         beam.
-
     input_checked : bool, optional
         Skip configuration checks already performed by the calling layer.
         Runtime checks on newly created data always remain active. For graph nodes
@@ -4658,41 +4631,15 @@ def restore_continuum_image(
 
     Returns
     -------
-    img_xds : xarray.Dataset
-        Continuum dataset with the requested restored Taylor product or
-        products. For at least two Taylor terms it also contains ``ALPHA`` and
-        ``ALPHA_ERROR``; for at least three terms it additionally contains
-        ``BETA``. It also holds ``BEAM_FIT_PARAMS_SKY_RESTORED`` (role
-        ``beam_fit_params_sky``), the beam the restore applied: the target, or
-        without one the Taylor-zero PSF beam of the first polarization
-        (Stokes I), in every polarization. Without a target a plane without a
-        fit holds the beam ``tclean`` gives it, the first beam of largest area
-        of the planes with a fit, or a circle of 1e-6 arcsec when no plane has
-        one.
-
-    timing_df : pandas.DataFrame
-        Timing information returned by the shared restoration core.
-
-    Notes
-    -----
-    Primary-beam correction is not a post-restoration division: the apparent
-    model and residual coefficients are corrected before clean-beam
-    convolution. When corrected Taylor images are available, ``ALPHA`` and
-    ``BETA`` are therefore formed from those images, and ``ALPHA_ERROR`` uses
-    the corresponding corrected residual coefficients. ``ALPHA_ERROR`` is a
-    CASA-style pixel-residual diagnostic, not a statistically calibrated
-    one-sigma uncertainty. Validity is determined per time/polarization plane
-    from the absolute flat-noise Taylor-zero image and one tenth of the peak
-    absolute flat-noise principal Taylor-zero residual.
-
-    With ``restoring_beam`` every Taylor term takes the Taylor-zero correction
-    of its residual, as CASA restores every term with the Taylor-zero beam. For
-    MFS with primary-beam correction it acts on the Taylor-divided residual
-    terms, zero outside the cutoff, after the division,
-    ``TaylorDivide(M) * B_T + TaylorDivide(R) * K``: the residual is divided
-    before it is convolved, as the model is. ``ALPHA_ERROR`` and the validity
-    threshold keep the unconvolved residuals, as CASA's ``calculateAlphaBeta``
-    does."""
+    tuple
+        Finalized polynomial image dataset and restoration timing dataframe.
+        Spectral diagnostics are calculated only by the separate analysis tool.
+    """
+    from astroviper.processing_functions.imaging.finalize_image import (
+        finalize_image_products,
+        public_continuum_layout,
+        restore_finalized_image,
+    )
 
     if not input_checked:
         from astroviper.processing_functions.imaging.config_check import (
@@ -4721,371 +4668,44 @@ def restore_continuum_image(
                 ],
             )
 
-    import numpy as np
-    import pandas as pd
-
     from astroviper.processing_functions.imaging.restore import (
-        NO_FIT_BEAM,
-        _divide_taylor_polynomials,
-        _restore_image_arrays,
-        _restored_beam_variable,
-        fill_planes_without_fit,
         resolve_restoration_product,
     )
-    from astroviper.utils.data_group_tools import (
-        create_data_groups_in_and_out,
-        modify_data_groups_xds,
-    )
 
-    # ------------------------------------------------------------------
-    # Resolve the residual and model variables using the shared role contract.
-    # Taylor-axis checks and cube-view construction remain local to continuum.
-    # ------------------------------------------------------------------
     residual_name = resolve_restoration_product(
         img_xds, image_data_group_in_residual_name, "sky"
     )
-    model_name = resolve_restoration_product(
-        img_xds, image_data_group_in_model_name, "sky"
-    )
-
-    residual_da = img_xds[residual_name]
-    model_da = img_xds[model_name]
-
-    for variable_name, data_array in (
-        (residual_name, residual_da),
-        (model_name, model_da),
-    ):
-        if "taylor_term" not in data_array.dims:
-            raise ValueError(
-                f"{variable_name!r} must contain a 'taylor_term' "
-                f"dimension. Found {data_array.dims}."
-            )
-
-        if data_array.sizes["taylor_term"] < 1:
-            raise ValueError(f"{variable_name!r} contains no Taylor terms.")
-
-    continuum_mode = _resolve_restoration_continuum_mode(
-        img_xds,
-        residual_da,
-        continuum_mode,
-    )
-
-    # ------------------------------------------------------------------
-    # Resolve the PSF.
-    # ------------------------------------------------------------------
-    psf_name = resolve_restoration_product(
+    resolve_restoration_product(img_xds, image_data_group_in_model_name, "sky")
+    resolve_restoration_product(
         img_xds,
         image_data_group_in_residual_name,
         "point_spread_function",
         fallback="POINT_SPREAD_FUNCTION",
     )
-
-    psf_da = img_xds[psf_name]
-    for plane_dimension in ("psf_taylor_order", "taylor_term", "frequency"):
-        if plane_dimension in psf_da.dims and psf_da.sizes[plane_dimension] < 1:
-            raise ValueError(
-                f"PSF variable {psf_name!r} contains no Taylor-order planes."
-            )
-
-    restoration_residual_da = residual_da
-    if deconvolver == "mtmfs":
-        restoration_residual_da = _mtmfs_principal_residual_for_restoration(
-            residual_da, psf_da
-        )
-
-    # ------------------------------------------------------------------
-    # Resolve the fitted restoring beam.
-    # ------------------------------------------------------------------
-    beam_fit_key = "beam_fit_params_point_spread_function"
-    beam_name = resolve_restoration_product(
+    resolve_restoration_product(
         img_xds,
         image_data_group_in_residual_name,
-        beam_fit_key,
+        "beam_fit_params_point_spread_function",
         fallback="BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
     )
-
-    beam_da = img_xds[beam_name]
-
-    needs_primary_beam = restoration_output in {"primary_beam_corrected", "both"}
-
-    image_dims = ("time", "taylor_term", "polarization", "l", "m")
-    for variable_name, data_array in (
-        (residual_name, restoration_residual_da),
-        (model_name, model_da),
-    ):
-        missing_dims = [dim for dim in image_dims if dim not in data_array.dims]
-        if missing_dims:
-            raise ValueError(
-                f"{variable_name!r} is missing restoration dimensions {missing_dims}."
-            )
-    residual_ordered = restoration_residual_da.transpose(*image_dims)
-    model_ordered = model_da.transpose(*image_dims)
-    taylor_coord = residual_ordered.taylor_term
-
-    def _repeat_for_taylor(data_array):
-        """Repeat one continuum plane across the Taylor coordinate."""
-        axis = data_array.dims.index("time") + 1 if "time" in data_array.dims else 0
-        return data_array.expand_dims(
-            taylor_term=taylor_coord.values,
-            axis=axis,
-        )
-
-    beam_plane = beam_da
-    for plane_dimension in ("frequency", "taylor_term", "psf_taylor_order"):
-        if plane_dimension in beam_plane.dims:
-            beam_plane = beam_plane.isel({plane_dimension: 0}, drop=True)
-    beam_taylor = _repeat_for_taylor(beam_plane)
-    expected_beam_dims = ("time", "taylor_term", "polarization", "beam_params")
-    missing_beam_dims = [
-        dim for dim in expected_beam_dims if dim not in beam_taylor.dims
-    ]
-    if missing_beam_dims:
-        raise ValueError(
-            f"Beam variable {beam_name!r} cannot be converted to dimensions "
-            f"{expected_beam_dims}. Missing dimensions: {missing_beam_dims}."
-        )
-    beam_taylor = beam_taylor.transpose(*expected_beam_dims)
-
-    common_primary_beam_taylor = None
-    mfs_primary_beam_taylor = None
-    intrinsic_model_da = None
-    intrinsic_residual_da = None
-    if needs_primary_beam:
-        if continuum_mode == "mfs":
-            primary_beam_taylor_name = resolve_restoration_product(
-                img_xds,
-                image_data_group_in_residual_name,
-                "primary_beam_taylor",
-                fallback="PRIMARY_BEAM_TAYLOR",
-            )
-            mfs_primary_beam_taylor = img_xds[primary_beam_taylor_name].transpose(
-                *image_dims
-            )
-            intrinsic_model_da = _divide_taylor_polynomials(
-                model_ordered,
-                mfs_primary_beam_taylor,
-                primary_beam_limit,
-                outside_value=0.0,
-            )
-            intrinsic_residual_da = _divide_taylor_polynomials(
-                residual_ordered,
-                mfs_primary_beam_taylor,
-                primary_beam_limit,
-            )
-        else:
-            primary_beam_name = resolve_restoration_product(
-                img_xds, image_data_group_in_residual_name, primary_beam_key
-            )
-            primary_beam_plane = img_xds[primary_beam_name]
-            for plane_dimension in ("frequency", "taylor_term"):
-                if plane_dimension in primary_beam_plane.dims:
-                    if primary_beam_plane.sizes[plane_dimension] != 1:
-                        raise ValueError(
-                            "MVC restoration requires one common primary-beam "
-                            f"plane along {plane_dimension!r}."
-                        )
-                    primary_beam_plane = primary_beam_plane.isel(
-                        {plane_dimension: 0}, drop=True
-                    )
-            common_primary_beam_taylor = _repeat_for_taylor(
-                primary_beam_plane
-            ).transpose(*image_dims)
-
-    pixel_size = abs(float(img_xds.l.values[1] - img_xds.l.values[0]))
-
-    def _require_backend_product(backend_products, product_name):
-        if product_name not in backend_products:
-            raise RuntimeError(
-                f"The shared restoration backend did not create {product_name!r}."
-            )
-        return backend_products[product_name]
-
-    if continuum_mode == "mfs" and needs_primary_beam:
-        products = {}
-        array_timing = {"apparent": 0.0, "primary_beam_corrected": 0.0}
-        if restoration_output in {"apparent", "both"}:
-            apparent_products, apparent_timing = _restore_image_arrays(
-                residual_ordered.values,
-                model_ordered.values,
-                beam_taylor.values,
-                pixel_size,
-                processing_function_threads=processing_function_threads,
-                output="apparent",
-                restoring_beam=restoring_beam,
-            )
-            products["apparent"] = _require_backend_product(
-                apparent_products,
-                "apparent",
-            )
-            array_timing["apparent"] = apparent_timing["apparent"]
-
-        # With a target the divided residual terms, NaN outside the cutoff, are
-        # convolved after the division, as the divided model terms are.
-        corrected_products, corrected_timing = _restore_image_arrays(
-            intrinsic_residual_da.values,
-            intrinsic_model_da.values,
-            beam_taylor.values,
-            pixel_size,
-            processing_function_threads=processing_function_threads,
-            output="apparent",
-            restoring_beam=restoring_beam,
-        )
-        products["primary_beam_corrected"] = _require_backend_product(
-            corrected_products,
-            "apparent",
-        )
-        array_timing["primary_beam_corrected"] = corrected_timing["apparent"]
-    else:
-        products, array_timing = _restore_image_arrays(
-            residual_ordered.values,
-            model_ordered.values,
-            beam_taylor.values,
-            pixel_size,
-            processing_function_threads=processing_function_threads,
-            primary_beam=(
-                common_primary_beam_taylor.values
-                if common_primary_beam_taylor is not None
-                else None
-            ),
-            primary_beam_limit=primary_beam_limit,
-            output=restoration_output,
-            restoring_beam=restoring_beam,
-        )
-        for required_product in (
-            {"apparent"} if restoration_output in {"apparent", "both"} else set()
-        ) | (
-            {"primary_beam_corrected"}
-            if restoration_output in {"primary_beam_corrected", "both"}
-            else set()
-        ):
-            _require_backend_product(products, required_product)
-
-    apparent_name = "SKY_RESTORED_FLAT_NOISE"
-    corrected_name = "SKY_RESTORED_FLAT_SKY"
-    sky_name = (
-        corrected_name
-        if restoration_output == "primary_beam_corrected"
-        else apparent_name
+    mode = _resolve_restoration_continuum_mode(
+        img_xds, img_xds[residual_name], continuum_mode
     )
-    _, continuum_restored_group = create_data_groups_in_and_out(
+    finalized = finalize_image_products(
         img_xds,
-        data_group_in_name=image_data_group_in_residual_name,
-        data_group_out_name=image_data_group_out_restore_name,
-        data_group_out_modified={"sky": sky_name},
-        overwrite=True,
+        continuum_mode=mode,
+        deconvolver=deconvolver,
+        primary_beam_limit=primary_beam_limit,
+        image_data_group_in_residual_name=image_data_group_in_residual_name,
+        image_data_group_in_model_name=image_data_group_in_model_name,
     )
-    if restoring_beam is None:
-        # The restore applies the plane zero beam of the first polarization to
-        # every Taylor term and polarization.
-        restored_beams = fill_planes_without_fit(
-            beam_da.isel(
-                {
-                    dim: [0]
-                    for dim in (
-                        "frequency",
-                        "taylor_term",
-                        "psf_taylor_order",
-                        "polarization",
-                    )
-                    if dim in beam_da.dims
-                }
-            ).values,
-            NO_FIT_BEAM,
-        )
-    else:
-        restored_beams = restoring_beam
-    img_xds["BEAM_FIT_PARAMS_SKY_RESTORED"] = _restored_beam_variable(
-        beam_da, restored_beams
+    restored, timing = restore_finalized_image(
+        finalized,
+        restoration_output=restoration_output,
+        restoring_beam=restoring_beam,
+        processing_function_threads=processing_function_threads,
+        image_data_group_in_residual_name=image_data_group_in_residual_name,
+        image_data_group_in_model_name=image_data_group_in_model_name,
+        image_data_group_out_restore_name=image_data_group_out_restore_name,
     )
-    continuum_restored_group["beam_fit_params_sky"] = "BEAM_FIT_PARAMS_SKY_RESTORED"
-
-    apparent_da = None
-    if "apparent" in products:
-        apparent_da = residual_ordered.copy(data=products["apparent"]).transpose(
-            *residual_da.dims
-        )
-        img_xds[apparent_name] = apparent_da
-
-    corrected_da = None
-    if "primary_beam_corrected" in products:
-        corrected_da = residual_ordered.copy(
-            data=products["primary_beam_corrected"]
-        ).transpose(*residual_da.dims)
-        img_xds[corrected_name] = corrected_da
-        if restoration_output == "both":
-            continuum_restored_group["sky_flat_sky"] = corrected_name
-
-    spectral_restored_da = apparent_da
-    spectral_residual_da = restoration_residual_da
-    if corrected_da is not None:
-        # The corrected Taylor stack is the best estimate of the intrinsic sky.
-        spectral_restored_da = corrected_da
-        if continuum_mode == "mfs":
-            spectral_residual_da = intrinsic_residual_da.transpose(
-                *restoration_residual_da.dims
-            )
-        else:
-            primary_beam_inside = (
-                np.isfinite(common_primary_beam_taylor)
-                & (common_primary_beam_taylor > 0.0)
-                & (common_primary_beam_taylor >= primary_beam_limit)
-            )
-            spectral_residual_da = (
-                (residual_ordered / common_primary_beam_taylor)
-                .where(primary_beam_inside)
-                .transpose(*restoration_residual_da.dims)
-            )
-
-    flat_noise_residual_zero_da = restoration_residual_da.isel(taylor_term=0, drop=True)
-    flat_noise_restored_zero_da = None
-    if spectral_restored_da is not None:
-        if apparent_da is not None:
-            flat_noise_restored_zero_da = apparent_da.isel(taylor_term=0, drop=True)
-        elif corrected_da is not None:
-            correction_beam_zero = (
-                mfs_primary_beam_taylor
-                if continuum_mode == "mfs"
-                else common_primary_beam_taylor
-            ).isel(taylor_term=0, drop=True)
-            # Corrected-only output deliberately avoids constructing another
-            # full restored Taylor stack; only its tt0 flat-noise proxy is
-            # needed for the spectral-product validity mask.
-            flat_noise_restored_zero_da = (
-                corrected_da.isel(taylor_term=0, drop=True) * correction_beam_zero
-            )
-    spectral_products = (
-        _restored_spectral_products(
-            spectral_restored_da,
-            spectral_residual_da,
-            flat_noise_restored_zero_da=flat_noise_restored_zero_da,
-            flat_noise_residual_zero_da=flat_noise_residual_zero_da,
-        )
-        if spectral_restored_da is not None
-        else {}
-    )
-    for product_name, product in spectral_products.items():
-        img_xds[product_name] = product
-    if "ALPHA" in spectral_products:
-        continuum_restored_group["alpha"] = "ALPHA"
-        continuum_restored_group["alpha_error"] = "ALPHA_ERROR"
-    if "BETA" in spectral_products:
-        continuum_restored_group["beta"] = "BETA"
-
-    description = (
-        "Continuum Taylor images restored with the shared clean-beam and "
-        "primary-beam implementation."
-    )
-    if restoring_beam is not None:
-        description += f" Restored to the beam {list(map(float, restoring_beam))} rad."
-    modify_data_groups_xds(
-        img_xds,
-        data_group_out_name=image_data_group_out_restore_name,
-        data_group_out=continuum_restored_group,
-        description=description,
-    )
-    timing = {"T_restore": [float(array_timing["apparent"])]}
-    if needs_primary_beam:
-        timing["T_correct_sky_by_primary_beam"] = [
-            float(array_timing["primary_beam_corrected"])
-        ]
-    return img_xds, pd.DataFrame(timing)
+    return public_continuum_layout(restored), timing

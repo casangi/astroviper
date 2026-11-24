@@ -270,13 +270,13 @@ def _assert_restored_without_model_update(img, chan):
     one (NaN below the cutoff)."""
     residual = img.SKY_RESIDUAL.values[:, chan]
     primary_beam = img.PRIMARY_BEAM.values[:, chan]
-    corrected = img.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.values[:, chan]
+    corrected = img.SKY_PRIMARY_BEAM_CORRECTED_RESTORED.values[:, chan]
     inside = primary_beam >= 0.2
     assert (img.SKY_MODEL.values[:, chan] == 0).all()
-    np.testing.assert_array_equal(img.SKY_RESTORED.values[:, chan], residual)
-    np.testing.assert_array_equal(
-        corrected[inside], residual[inside] / primary_beam[inside]
+    np.testing.assert_allclose(
+        img.SKY_RESTORED.values[:, chan], residual * primary_beam, equal_nan=True
     )
+    np.testing.assert_array_equal(corrected[inside], residual[inside])
     assert np.isnan(corrected[~inside]).all()
 
 
@@ -844,13 +844,13 @@ def test_cube_publishes_only_selected_restoration_products(
     _image_restored(ps_store, store, 1, restoration_output=output, max_iter=0)
     image = load_image(store)
     assert ("SKY_RESTORED" in image) == (output in ("apparent", "both"))
-    assert ("SKY_RESTORED_PRIMARY_BEAM_CORRECTED" in image) == (
+    assert ("SKY_PRIMARY_BEAM_CORRECTED_RESTORED" in image) == (
         output in ("primary_beam_corrected", "both")
     )
     selected = (
         "SKY_RESTORED"
         if output == "apparent"
-        else "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
+        else "SKY_PRIMARY_BEAM_CORRECTED_RESTORED"
     )
     assert np.isfinite(image[selected]).any()
 

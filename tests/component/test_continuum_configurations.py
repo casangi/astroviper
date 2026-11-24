@@ -17,7 +17,6 @@ from xradio.measurement_set import open_processing_set
 
 from astroviper.distributed_applications.imaging import image_continuum_single_field
 from astroviper.processing_functions.imaging.restore import (
-    _divide_taylor_polynomials,
     _elliptical_gaussian_kernel,
 )
 
@@ -115,7 +114,7 @@ def _run(
             memory_mode="in_memory",
             weight_memory_mode="in_memory" if cache_mode == "recompute" else cache_mode,
             visibility_memory_mode=cache_mode,
-            wideband_primary_beam_memory_mode=cache_mode,
+            wideband_primary_beam_memory_mode="recompute",
             overwrite=True,
             vizualize_graph=False,
             compute_backend="dask",
@@ -189,124 +188,45 @@ def _circular_clean_beam_convolution(plane, beam_parameters, cell_size):
 
 
 def _assert_restoration_values(image, primary_beam_limit=0.2):
-    """Check restoration, PB correction, and restored spectral products."""
-    model = image.SKY_MODEL
-    residual = image.SKY_RESIDUAL.copy(deep=True)
-    # MT-MFS stores normal-equation residuals. Independently solve the small
-    # PSF-centre Hankel system for every Taylor coefficient before applying PB
-    # correction; do not reuse the production principal-residual helper.
-    for time in range(image.sizes["time"]):
-        for polarization in range(image.sizes["polarization"]):
-            index = {"time": time, "polarization": polarization}
-            terms = (
-                image.SKY_RESIDUAL.isel(index).transpose("taylor_term", "l", "m").values
-            )
-            psf = (
-                image.POINT_SPREAD_FUNCTION.isel(index)
-                .transpose("psf_taylor_order", "l", "m")
-                .values
-            )
-            peak = np.unravel_index(np.argmax(np.abs(psf[0])), psf[0].shape)
-            orders = np.add.outer(np.arange(terms.shape[0]), np.arange(terms.shape[0]))
-            hessian = psf[:, peak[0], peak[1]][orders]
-            residual.data[time, :, polarization] = np.linalg.solve(
-                hessian, terms.reshape(terms.shape[0], -1)
-            ).reshape(terms.shape)
-    primary_beam = image.PRIMARY_BEAM.isel(frequency=0, drop=True)
-    primary_beam_taylor = image.PRIMARY_BEAM_TAYLOR
-    continuum_mode = primary_beam_taylor.attrs["continuum_mode"]
-    if continuum_mode == "mfs":
-        corrected_model_stack = _divide_taylor_polynomials(
-            model,
-            primary_beam_taylor,
-            primary_beam_limit,
-            outside_value=0.0,
-        )
-        corrected_residual_stack = _divide_taylor_polynomials(
-            residual,
-            primary_beam_taylor,
-            primary_beam_limit,
-        )
-        correction_beam = primary_beam_taylor.isel(taylor_term=0, drop=True)
-    else:
-        inside = (
-            np.isfinite(primary_beam)
-            & (primary_beam > 0.0)
-            & (primary_beam >= primary_beam_limit)
-        )
-        corrected_model_stack = xr.where(inside, model / primary_beam, 0.0)
-        corrected_residual_stack = (residual / primary_beam).where(inside)
-        correction_beam = primary_beam
-    fitted_beam = image.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION
-    for dimension in ("frequency", "taylor_term", "psf_taylor_order"):
-        if dimension in fitted_beam.dims:
-            fitted_beam = fitted_beam.isel({dimension: 0}, drop=True)
-    cell_size = abs(float(image.l.values[1] - image.l.values[0]))
-    corrected_reference = xr.full_like(residual, np.nan)
-    corrected_residual = xr.full_like(residual, np.nan)
+    """Check the PDF identity using an independent clean-beam convolution."""
+    from astroviper.processing_functions.image_analysis import spectral_products
 
-    for time in range(image.sizes["time"]):
-        for term in range(image.sizes["taylor_term"]):
-            for polarization in range(image.sizes["polarization"]):
-                index = {
-                    "time": time,
-                    "taylor_term": term,
-                    "polarization": polarization,
-                }
-                beam_index = {"time": time, "polarization": polarization}
-                beam_plane = correction_beam.isel(beam_index).values
-                beam_parameters = fitted_beam.isel(beam_index).values
-
-                inside = (
-                    np.isfinite(beam_plane)
-                    & (beam_plane > 0.0)
-                    & (beam_plane >= primary_beam_limit)
-                )
-                divided_model = corrected_model_stack.isel(index).values
-                corrected_residual_plane = corrected_residual_stack.isel(index).values
-                expected_corrected = np.full_like(corrected_residual_plane, np.nan)
-                expected_corrected[inside] = corrected_residual_plane[inside]
-                expected_corrected[inside] += _circular_clean_beam_convolution(
-                    divided_model, beam_parameters, cell_size
-                )[inside]
-                corrected_reference.data[time, term, polarization] = expected_corrected
-                corrected_residual.data[time, term, polarization, inside] = (
-                    corrected_residual_plane[inside]
-                )
-                np.testing.assert_allclose(
-                    image.SKY_RESTORED_FLAT_SKY.isel(index),
-                    expected_corrected,
-                    rtol=1e-6,
-                    atol=max(
-                        float(np.nanmax(np.abs(expected_corrected))) * 1e-8,
-                        1e-14,
-                    ),
-                    equal_nan=True,
-                )
-
-    residual_zero = corrected_residual.isel(taylor_term=0, drop=True)
-    residual_one = corrected_residual.isel(taylor_term=1, drop=True)
-    flat_noise_residual_zero = residual.isel(taylor_term=0, drop=True)
-    threshold = abs(flat_noise_residual_zero).max(dim=("l", "m")) / 10.0
-    restored_zero = corrected_reference.isel(taylor_term=0, drop=True)
-    restored_one = corrected_reference.isel(taylor_term=1, drop=True)
-    flat_noise_restored_zero = restored_zero * correction_beam
+    assert image.SKY_MODEL.attrs["sky_convention"] == "flat_sky"
+    assert image.SKY_RESIDUAL.attrs["residual_representation"] == "coefficient_space"
+    fitted = image.BEAM_FIT_PARAMS_SKY_RESTORED
+    cell = abs(float(image.l.values[1] - image.l.values[0]))
+    for time, term, pol in np.ndindex(image.SKY_MODEL.shape[:3]):
+        model = image.SKY_MODEL.values[time, term, pol]
+        residual = image.SKY_RESIDUAL.values[time, term, pol]
+        beam = fitted.isel(time=time, frequency=0, polarization=pol).values
+        expected = _circular_clean_beam_convolution(model, beam, cell) + residual
+        np.testing.assert_allclose(
+            image.SKY_PRIMARY_BEAM_CORRECTED_RESTORED.values[time, term, pol],
+            expected,
+            rtol=1e-6,
+            atol=1e-12,
+            equal_nan=True,
+        )
+    assert all(name not in image for name in ("ALPHA", "ALPHA_ERROR", "BETA"))
+    analyzed = spectral_products(image)
+    zero = image.SKY_PRIMARY_BEAM_CORRECTED_RESTORED.isel(
+        frequency_polynomial=0, drop=True
+    )
+    one = image.SKY_PRIMARY_BEAM_CORRECTED_RESTORED.isel(
+        frequency_polynomial=1, drop=True
+    )
+    rzero = image.SKY_RESIDUAL.isel(frequency_polynomial=0, drop=True)
+    rone = image.SKY_RESIDUAL.isel(frequency_polynomial=1, drop=True)
     valid = (
-        np.isfinite(restored_zero)
-        & np.isfinite(restored_one)
-        & np.isfinite(flat_noise_restored_zero)
-        & (abs(flat_noise_restored_zero) > threshold)
-        & (restored_zero != 0.0)
+        np.isfinite(zero)
+        & np.isfinite(one)
+        & (zero != 0)
+        & (abs(zero) > abs(rzero).max(dim=("l", "m")) / 10)
     )
-    expected_alpha = xr.where(valid, restored_one / restored_zero, np.nan)
-    expected_alpha_error = xr.where(
-        valid,
-        np.sqrt(residual_one**2 + (expected_alpha * residual_zero) ** 2)
-        / abs(restored_zero),
-        np.nan,
-    )
-    xr.testing.assert_allclose(image.ALPHA, expected_alpha)
-    xr.testing.assert_allclose(image.ALPHA_ERROR, expected_alpha_error)
+    alpha = xr.where(valid, one / zero, np.nan)
+    error = xr.where(valid, np.sqrt(rone**2 + (alpha * rzero) ** 2) / abs(zero), np.nan)
+    xr.testing.assert_allclose(analyzed.ALPHA.isel(frequency=0, drop=True), alpha)
+    xr.testing.assert_allclose(analyzed.ALPHA_ERROR.isel(frequency=0, drop=True), error)
 
 
 @pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
@@ -345,14 +265,11 @@ def test_continuum_configuration_cache_and_reduction_regression(
         "SKY_RESIDUAL",
         "POINT_SPREAD_FUNCTION",
         "PRIMARY_BEAM",
-        "PRIMARY_BEAM_TAYLOR",
         "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
-        "SKY_RESTORED_FLAT_SKY",
-        "ALPHA",
-        "ALPHA_ERROR",
+        "SKY_PRIMARY_BEAM_CORRECTED_RESTORED",
     ]
-    assert "SKY_RESTORED_FLAT_NOISE" not in actual
-    assert "SKY_RESTORED_FLAT_NOISE" not in reference
+    assert "SKY_RESTORED" not in actual
+    assert "SKY_RESTORED" not in reference
     assert result["n_cycles"] == reference_result["n_cycles"] == 2
     # max_iter is per image plane; the reported total sums polarizations.
     assert 0 < result["controller"].total_iter_done <= 8 * actual.sizes["polarization"]
@@ -360,8 +277,8 @@ def test_continuum_configuration_cache_and_reduction_regression(
         result["controller"].total_iter_done
         == reference_result["controller"].total_iter_done
     )
-    assert actual.sizes["taylor_term"] == 2
-    assert actual.sizes["psf_taylor_order"] == 3
+    assert actual.sizes["frequency_polynomial"] == 2
+    assert actual.sizes["frequency_polynomial_moment"] == 3
     assert actual.sizes["frequency"] == 1
     for name in products:
         assert name in actual and name in reference
@@ -386,16 +303,11 @@ def test_continuum_configuration_cache_and_reduction_regression(
     assert not any(
         "CACHE" in name or "MVC_" in name or "MFS_" in name for name in actual.data_vars
     )
-    beam = actual.PRIMARY_BEAM.isel(frequency=0, drop=True)
-    correction_beam = (
-        actual.PRIMARY_BEAM_TAYLOR.isel(taylor_term=0, drop=True)
-        if continuum_mode == "mfs"
-        else beam
-    )
-    corrected = actual.SKY_RESTORED_FLAT_SKY
+    correction_beam = actual.PRIMARY_BEAM.isel(frequency_polynomial=0, drop=True)
+    corrected = actual.SKY_PRIMARY_BEAM_CORRECTED_RESTORED
     assert corrected.dims == (
         "time",
-        "taylor_term",
+        "frequency_polynomial",
         "polarization",
         "l",
         "m",
@@ -403,7 +315,7 @@ def test_continuum_configuration_cache_and_reduction_regression(
     np.testing.assert_array_equal(
         np.isfinite(corrected),
         (np.isfinite(correction_beam) & (correction_beam >= 0.2)).expand_dims(
-            taylor_term=actual.taylor_term, axis=1
+            frequency_polynomial=actual.frequency_polynomial, axis=1
         ),
     )
     _assert_restoration_values(actual)
@@ -447,7 +359,7 @@ def test_continuum_uses_writer_resolved_path(
     assert resolved.is_dir()
     assert result["n_cycles"] == 2
     assert np.isfinite(image.SKY_RESIDUAL).all()
-    assert "SKY_RESTORED_FLAT_SKY" in image
+    assert "SKY_PRIMARY_BEAM_CORRECTED_RESTORED" in image
     assert not any("CACHE" in name or "MVC_" in name for name in image.data_vars)
 
 
@@ -476,14 +388,12 @@ def test_restoration_state_enters_only_the_final_graph(
         assert "PRIMARY_BEAM_TAYLOR" not in result["image"]
         first = append_params["is_first_cycle"]
         assert ("static_xds" in result) is first
-        assert ("restoration_xds" in result) is (
-            first and (restore or continuum_mode == "mvc")
-        )
+        assert ("restoration_xds" in result) is (first)
         if first and continuum_mode == "mvc":
             cache = result["static_xds"]
             assert cache.MVC_RESIDUAL_BEAM_SUPPORTED.dtype == np.bool_
             assert "MVC_RESIDUAL_BEAM_CHANNEL_COUNT" not in cache
-        if first and continuum_mode == "mfs" and restore:
+        if first and continuum_mode == "mfs":
             assert set(result["restoration_xds"].sizes) == {
                 "time",
                 "taylor_term",
@@ -529,10 +439,9 @@ def test_restoration_state_enters_only_the_final_graph(
             processing_function_threads=1,
         )
     assert len(cycles) == result["n_cycles"] + 1
-    assert finals == ([True] if restore or continuum_mode == "mvc" else [])
-    assert ("PRIMARY_BEAM_TAYLOR" in result["image"]) is (
-        restore or continuum_mode == "mvc"
-    )
+    assert finals == [True]
+    assert "PRIMARY_BEAM" in result["image"]
+    assert "PRIMARY_BEAM_TAYLOR" not in result["image"]
     assert result["image"].attrs["data_groups"]["model"]["sky"] == "SKY_MODEL"
     assert "PRIMARY_BEAM_TAYLOR" not in result["static_xds"]
 
@@ -576,15 +485,15 @@ def test_restoration_retains_only_available_spectral_products(
             single_precision_image=False,
         )
     with xr.open_zarr(output) as stored:
-        assert ("SKY_RESTORED_FLAT_SKY" in stored) is (
+        assert ("SKY_PRIMARY_BEAM_CORRECTED_RESTORED" in stored) is (
             restoration_output in {"primary_beam_corrected", "both"}
         )
-        assert ("SKY_RESTORED_FLAT_NOISE" in stored) is (
+        assert ("SKY_RESTORED" in stored) is (
             restoration_output in {"apparent", "both"}
         )
-        assert ("ALPHA" in stored) is (n_taylor_terms >= 2)
-        assert ("ALPHA_ERROR" in stored) is (n_taylor_terms >= 2)
-        assert ("BETA" in stored) is (n_taylor_terms >= 3)
+        assert "ALPHA" not in stored
+        assert "ALPHA_ERROR" not in stored
+        assert "BETA" not in stored
 
 
 @pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
@@ -823,6 +732,6 @@ def test_mfs_retains_requested_uv_products_after_cleaning(
         "SKY_RESIDUAL",
         "SKY_MODEL",
         "POINT_SPREAD_FUNCTION",
-        "SKY_RESTORED_FLAT_SKY",
+        "SKY_PRIMARY_BEAM_CORRECTED_RESTORED",
     ):
         xr.testing.assert_equal(image[name], reference[name])

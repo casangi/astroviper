@@ -524,7 +524,7 @@ def test_delphi_end_to_end_with_stand_in_psf_pass(ps_store, tmp_path, psf_calls)
     assert img.sizes["l"] == size[0] and img.sizes["m"] == size[1]
     model = img.SKY_MODEL.values[0, :, 0]  # [frequency, l, m]
     np.testing.assert_allclose(np.nansum(model, axis=(1, 2)), [1.0, 1.0], rtol=0.05)
-    for name in ("SKY_RESTORED", "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"):
+    for name in ("SKY_RESTORED", "SKY_PRIMARY_BEAM_CORRECTED_RESTORED"):
         assert name in img.data_vars
     controls = result["parameters"]["image_cube_single_field"]["cycle_control_params"]
     record = result["deconvolution"]

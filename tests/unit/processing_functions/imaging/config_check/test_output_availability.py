@@ -17,15 +17,13 @@ from tests.unit.processing_functions.imaging.config_check.test_full_validation i
 @pytest.mark.parametrize(
     "key",
     [
-        "sky_restored_flat_noise",
-        "sky_restored_flat_sky",
         "alpha",
         "alpha_error",
         "beta",
     ],
 )
-def test_cube_rejects_continuum_only_products(key):
-    with pytest.raises(ValueError, match="continuum-only"):
+def test_cube_rejects_automatic_spectral_products(key):
+    with pytest.raises(ValueError, match="separate spectral_products"):
         check_driver_workflow(
             {"image_data_variables_keep": [key], "restore": True},
             mode=CUBE_SINGLE_FIELD,
@@ -35,15 +33,12 @@ def test_cube_rejects_continuum_only_products(key):
 @pytest.mark.parametrize(
     "mode,keys",
     [
-        (CUBE_SINGLE_FIELD, ["sky_restored", "sky_restored_primary_beam_corrected"]),
+        (CUBE_SINGLE_FIELD, ["sky_restored", "sky_primary_beam_corrected_restored"]),
         (
             CONTINUUM_SINGLE_FIELD,
             [
-                "sky_restored_flat_noise",
-                "sky_restored_flat_sky",
-                "alpha",
-                "alpha_error",
-                "beta",
+                "sky_restored",
+                "sky_primary_beam_corrected_restored",
             ],
         ),
     ],
@@ -56,9 +51,16 @@ def test_restoration_products_require_restoration(mode, keys):
             )
 
 
-@pytest.mark.parametrize("key", ["sky_restored", "sky_restored_primary_beam_corrected"])
+@pytest.mark.parametrize(
+    "key",
+    [
+        "sky_restored_flat_noise",
+        "sky_restored_flat_sky",
+        "sky_restored_primary_beam_corrected",
+    ],
+)
 def test_continuum_legacy_keys_report_replacements(key):
-    with pytest.raises(ValueError, match="sky_restored_flat_sky"):
+    with pytest.raises(ValueError, match="unknown imaging variable"):
         check_driver_workflow(
             {"image_data_variables_keep": [key], "restore": True},
             mode=CONTINUUM_SINGLE_FIELD,
@@ -69,7 +71,7 @@ def test_continuum_legacy_keys_report_replacements(key):
     "key,nterms", [("alpha", 1), ("alpha_error", 1), ("beta", 1), ("beta", 2)]
 )
 def test_spectral_products_require_their_taylor_coefficients(key, nterms):
-    with pytest.raises(ValueError, match="n_taylor_terms"):
+    with pytest.raises(ValueError, match="separate spectral_products"):
         check_driver_workflow(
             {
                 "image_data_variables_keep": [key],
@@ -84,7 +86,7 @@ def test_cube_corrected_output_requires_correction():
     with pytest.raises(ValueError, match="unavailable with restoration_output"):
         check_driver_workflow(
             {
-                "image_data_variables_keep": ["sky_restored_primary_beam_corrected"],
+                "image_data_variables_keep": ["sky_primary_beam_corrected_restored"],
                 "restore": True,
                 "restoration_output": "apparent",
             },
@@ -97,15 +99,13 @@ def test_cube_corrected_output_requires_correction():
     [
         (CUBE_SINGLE_FIELD, ["sky_residual"], 1, False),
         (CUBE_SINGLE_FIELD, ["sky_restored"], 1, False),
-        (CUBE_SINGLE_FIELD, ["sky_restored_primary_beam_corrected"], 1, True),
+        (CUBE_SINGLE_FIELD, ["sky_primary_beam_corrected_restored"], 1, True),
         (
             CONTINUUM_SINGLE_FIELD,
-            ["sky_restored_flat_noise", "sky_restored_flat_sky"],
+            ["sky_restored", "sky_primary_beam_corrected_restored"],
             1,
             False,
         ),
-        (CONTINUUM_SINGLE_FIELD, ["alpha", "alpha_error"], 2, False),
-        (CONTINUUM_SINGLE_FIELD, ["beta"], 3, False),
     ],
 )
 def test_available_products_preserve_configuration(mode, kept, nterms, correct):
@@ -128,11 +128,10 @@ def test_available_products_preserve_configuration(mode, kept, nterms, correct):
     "kind,key,restore,nterms",
     [
         ("cube", "alpha", True, 1),
-        ("cube", "sky_restored_flat_sky", True, 1),
         ("cube", "sky_restored", False, 1),
         ("continuum", "alpha", False, 2),
-        ("continuum", "sky_restored_flat_noise", False, 2),
-        ("continuum", "sky_restored_flat_sky", False, 2),
+        ("continuum", "sky_restored", False, 2),
+        ("continuum", "sky_primary_beam_corrected_restored", False, 2),
         ("continuum", "beta", True, 2),
         ("continuum", "sky_restored", True, 2),
     ],

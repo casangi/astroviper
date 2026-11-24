@@ -123,6 +123,7 @@ from astroviper.processing_functions.simulation.antenna_beams import (
 from astroviper.utils.beam_models import airy_disk_model
 from astroviper.utils.coordinate_transforms import inverse_sin_project
 from astroviper.utils.telescope_layout import read_telescope_layout
+from tests.utils.continuum_images import apparent_model_and_residual_for_numerics
 
 ARCSEC = np.pi / (180 * 3600)
 LAYOUT = "alma.cycle8.1"  # most compact 12 m configuration
@@ -535,7 +536,7 @@ def analyse(
     flux_rtol=FLUX_RTOL,
 ):
     """Per source / channel / Stokes recovery table, per-plane convergence table and floors."""
-    img = load_image(image_store)
+    img = apparent_model_and_residual_for_numerics(load_image(image_store))
     truth = load_image(truth_store)
     np.testing.assert_allclose(truth.l.values, img.l.values)
     np.testing.assert_allclose(truth.m.values, img.m.values)
@@ -547,7 +548,7 @@ def analyse(
     scenario_stokes = scenario["stokes"][:, :, stokes_index]
     model = img.SKY_MODEL.values[0]
     residual = img.SKY_RESIDUAL.values[0]
-    restored = img.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.values[0]
+    restored = img.SKY_PRIMARY_BEAM_CORRECTED_RESTORED.values[0]
     primary_beam = img.PRIMARY_BEAM.values[0]
     mask = img.MASK.values[0].astype(bool)
     beam = img.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.values[0]  # [channel, stokes, 3]
@@ -792,7 +793,7 @@ def test_parallel_hands_of_four_correlation_data(tmp_path):
         "SKY_MODEL",
         "SKY_RESIDUAL",
         "SKY_RESTORED",
-        "SKY_RESTORED_PRIMARY_BEAM_CORRECTED",
+        "SKY_PRIMARY_BEAM_CORRECTED_RESTORED",
         "POINT_SPREAD_FUNCTION",
         "PRIMARY_BEAM",
     ):
@@ -856,7 +857,7 @@ def test_entropy_stop_with_thermal_noise(tmp_path):
         assert len(entropy) == plane.n_cycles + 1
         assert followed.max() > followed[-1]
 
-    img = load_image(image_store)
+    img = apparent_model_and_residual_for_numerics(load_image(image_store))
     truth = load_image(truth_store)
     residual = img.SKY_RESIDUAL.values[0]
     restored = img.SKY_RESTORED.values[0]
@@ -1130,7 +1131,7 @@ def run_c8(work_dir, size, w_term, noise):
         image_store, truth_store, scenario, deconvolution, controls, cell_size=cell_size,
         flux_rtol=0.01 if noise else C8_FLUX_RTOL,
     )  # fmt: skip
-    img = load_image(image_store)
+    img = apparent_model_and_residual_for_numerics(load_image(image_store))
     model, residual = img.SKY_MODEL.values[0, 0], img.SKY_RESIDUAL.values[0, 0]
     truth = load_image(truth_store).SKY.values[0, 0, :2] * np.nan_to_num(
         img.PRIMARY_BEAM.values[0, 0]

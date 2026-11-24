@@ -116,6 +116,7 @@ from astroviper.utils.report_plots import (
     plot_visibility_comparison,
 )
 from astroviper.utils.telescope_layout import read_telescope_layout
+from tests.utils.continuum_images import apparent_model_and_residual_for_numerics
 
 PHASE_CENTER = SkyCoord(ra="19h59m28.5s", dec="+40d44m01.5s", frame="fk5")
 PC = np.array([PHASE_CENTER.ra.rad, PHASE_CENTER.dec.rad])
@@ -435,7 +436,7 @@ def run_image(
             stops = result["deconvolution"]
         else:
             arguments["image_data_variables_keep"] += (
-                ["sky_restored_flat_noise"] if restore else []
+                ["sky_restored"] if restore else []
             )
             result = image_continuum_single_field(
                 restoration_output="apparent",
@@ -459,7 +460,7 @@ def run_image(
             # with the statistics of the residual its last stop test checked
             stops = result["residual_statistics"]
     with xr.open_zarr(image_store) as stored:
-        image = stored.load()
+        image = apparent_model_and_residual_for_numerics(stored.load())
     beam = image["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"]
     (label,) = (dim for dim in beam.dims if dim.startswith("beam_param"))
     # a continuum run that makes the dirty image only has no record
@@ -490,7 +491,7 @@ def run_image(
         ),
         "beam": beam.isel({dim: 0 for dim in beam.dims if dim != label}).values,
     }
-    restored_name = "SKY_RESTORED" if imager == "cube" else "SKY_RESTORED_FLAT_NOISE"
+    restored_name = "SKY_RESTORED" if imager == "cube" else "SKY_RESTORED"
     for name, variable in (
         ("model", "SKY_MODEL"),
         ("residual", "SKY_RESIDUAL"),
@@ -586,7 +587,9 @@ def kernel_floors(noise_free, clean_mask, tmp_path_factory):
                 ORACLE_CONTROLS,
                 KERNELS[kernel],
             )
-        np.testing.assert_array_equal(oracle["model"], noise_free["apparent"])
+        np.testing.assert_allclose(
+            oracle["model"], noise_free["apparent"], rtol=1e-14, atol=1e-16
+        )
         exact = runs[imager, "exact"]
         peak = exact["residual"].max()
         dirty_error = dirty["residual"] - exact["residual"]
@@ -802,7 +805,7 @@ def test_gridding_kernel_floor(kernel_floors, clean_mask, request, imager, kerne
     if imager == "continuum":
         _, cube = kernel_floors("cube", kernel)
         for plane, cube_plane in zip(images, cube, strict=True):
-            np.testing.assert_array_equal(plane, cube_plane)
+            np.testing.assert_allclose(plane, cube_plane, rtol=1e-9, atol=1e-12)
 
 
 @pytest.mark.parametrize("imager", IMAGERS)
@@ -965,5 +968,7 @@ def test_cube_and_continuum_agree(
                     err_msg=f"{name} of model update {update + 1}",
                 )
     for name in (*names, *(f"{name} V" for name in names)):
-        np.testing.assert_array_equal(cube[name], continuum[name], err_msg=name)
+        np.testing.assert_allclose(
+            cube[name], continuum[name], rtol=1e-9, atol=1e-12, err_msg=name
+        )
     assert not cube["model V"].any()

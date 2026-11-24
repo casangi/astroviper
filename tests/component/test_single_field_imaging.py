@@ -1719,7 +1719,7 @@ def test_restoring_beam_restores_point_sources_to_the_common_beam(common_beam_cu
             continue
         plane = {"time": 0, "frequency": channel, "polarization": 0}
         primary_beam = image.PRIMARY_BEAM.isel(plane).values
-        for name in ("SKY_RESTORED", "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"):
+        for name in ("SKY_RESTORED", "SKY_PRIMARY_BEAM_CORRECTED_RESTORED"):
             restored = image[name].isel(plane).values
             for pixel, flux in COMMON_BEAM_SOURCES:
                 peak = flux * (primary_beam[pixel] if name == "SKY_RESTORED" else 1.0)
@@ -1744,7 +1744,7 @@ def test_restoring_beam_casa_image_has_one_restoring_beam(common_beam_cube, tmp_
     CASA image with one restoring beam, the target."""
     arcae = pytest.importorskip("arcae")
     restored = common_beam_cube["image"].xr_img.sel(data_group_name="restored")
-    restored.xr_img.delete_data_variables(["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"])
+    restored.xr_img.delete_data_variables(["SKY_PRIMARY_BEAM_CORRECTED_RESTORED"])
     (path,) = write_image(restored, str(tmp_path / "restored.im"), out_format="casa")
     with arcae.table(path) as table:
         imageinfo = table.getkeywords()["imageinfo"]
@@ -1775,7 +1775,7 @@ def test_restoring_beam_fits_files_carry_the_target_as_their_beam(common_beam_cu
     from xradio.image import open_image
 
     target = common_beam_cube["target"]
-    for name in ("SKY_RESTORED", "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"):
+    for name in ("SKY_RESTORED", "SKY_PRIMARY_BEAM_CORRECTED_RESTORED"):
         path = os.path.join(common_beam_cube["fits_store"], f"{name}.fits")
         with fits.open(path) as hdulist:
             assert len(hdulist) == 1, name
@@ -1833,7 +1833,7 @@ def test_without_a_restoring_beam_the_casa_image_has_a_beam_per_plane(
     from xradio.image import open_image
 
     restored = common_beam_cube["none_image"].xr_img.sel(data_group_name="restored")
-    restored.xr_img.delete_data_variables(["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"])
+    restored.xr_img.delete_data_variables(["SKY_PRIMARY_BEAM_CORRECTED_RESTORED"])
     (path,) = write_image(restored, str(tmp_path / "restored.im"), out_format="casa")
     with arcae.table(path) as table:
         imageinfo = table.getkeywords()["imageinfo"]
@@ -1879,7 +1879,7 @@ def test_without_a_restoring_beam_the_restored_fits_file_has_a_beam_per_plane(
     beams = open_image({"sky_restored": path}).BEAM_FIT_PARAMS_SKY_RESTORED.values
     np.testing.assert_allclose(beams, expected, rtol=np.finfo(np.float32).eps)
     path = os.path.join(
-        common_beam_cube["none_fits_store"], "SKY_RESTORED_PRIMARY_BEAM_CORRECTED.fits"
+        common_beam_cube["none_fits_store"], "SKY_PRIMARY_BEAM_CORRECTED_RESTORED.fits"
     )
     with fits.open(path) as hdulist:
         assert len(hdulist) == 1

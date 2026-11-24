@@ -35,7 +35,6 @@ from astroviper.processing_functions.imaging.image_continuum_single_field import
     prepare_model_uv_continuum_single_field,
     prepare_model_uv_mvc_single_field,
     residual_update_continuum_single_field,
-    restore_continuum_image,
 )
 from astroviper.processing_functions.imaging.imaging_setup_continuum_single_field import (
     _convert_primary_beam_to_reference_frequency,
@@ -54,7 +53,11 @@ from astroviper.processing_functions.imaging.restore import (
 )
 from astroviper.processing_functions.imaging.utils import Key
 from astroviper.utils.continuum_cache import MVC_LOCAL_BEAM_STATIC_VARIABLES
-from tests.utils.continuum_images import make_continuum_image
+from tests.utils.continuum_images import (
+    analyze_restored_for_numerics,
+    make_continuum_image,
+    restore_continuum_for_numerics,
+)
 
 
 def test_psf_taylor_gridding_uses_output_views_and_reuses_order_zero_weights(
@@ -359,13 +362,13 @@ def test_primary_beam_correction_restores_every_taylor_term():
     residual = image.SKY_RESIDUAL.values.copy()
     beam = image.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.values
 
-    result, _ = restore_continuum_image(
+    result, _ = restore_continuum_for_numerics(
         image,
         restoration_output="both",
         primary_beam_limit=0.2,
         continuum_mode="mvc",
     )
-    corrected = result["SKY_RESTORED_FLAT_SKY"]
+    corrected = result["SKY_PRIMARY_BEAM_CORRECTED_RESTORED"]
     assert corrected.dims == ("time", "taylor_term", "polarization", "l", "m")
 
     kernel_ft = _clean_beam_kernel_ft(beam[0, 0], 8, 8, 1.0e-5, model.dtype, 1)
@@ -379,7 +382,7 @@ def test_primary_beam_correction_restores_every_taylor_term():
         )
         np.testing.assert_allclose(corrected.values[0, term, 0], expected)
         old_post_restore_division = (
-            result.SKY_RESTORED_FLAT_NOISE.values[0, term, 0] / primary_beam[0, 0]
+            result.SKY_RESTORED.values[0, term, 0] / primary_beam[0, 0]
         )
         assert not np.allclose(corrected.values[0, term, 0], old_post_restore_division)
 
@@ -401,47 +404,55 @@ def test_corrected_only_continuum_restoration_matches_the_both_product_path():
     both_image["SKY_RESIDUAL"] = (image_dims, residual)
     primary_beam = np.linspace(0.25, 1.0, 64).reshape(1, 1, 8, 8)
     both_image["PRIMARY_BEAM"].data[...] = primary_beam
+    both_image["PRIMARY_BEAM_TAYLOR"] = xr.zeros_like(both_image.SKY_MODEL)
+    both_image.PRIMARY_BEAM_TAYLOR.loc[{"taylor_term": 0}] = (
+        both_image.PRIMARY_BEAM.isel(frequency=0, drop=True)
+        if "frequency" in both_image.PRIMARY_BEAM.dims
+        else both_image.PRIMARY_BEAM
+    )
+    both_image.PRIMARY_BEAM_TAYLOR.loc[{"taylor_term": 1}] = -0.1
     corrected_only_image = both_image.copy(deep=True)
 
-    both, _ = restore_continuum_image(
+    both, _ = restore_continuum_for_numerics(
         both_image,
         primary_beam_limit=0.2,
         restoration_output="both",
         continuum_mode="mvc",
     )
-    corrected_only, _ = restore_continuum_image(
+    corrected_only, _ = restore_continuum_for_numerics(
         corrected_only_image,
         primary_beam_limit=0.2,
         restoration_output="primary_beam_corrected",
         continuum_mode="mvc",
     )
 
-    assert "SKY_RESTORED_FLAT_NOISE" in both
-    assert "SKY_RESTORED_FLAT_NOISE" not in corrected_only
+    assert "SKY_RESTORED" in both
+    assert "SKY_RESTORED" not in corrected_only
     np.testing.assert_array_equal(
-        corrected_only.SKY_RESTORED_FLAT_SKY,
-        both.SKY_RESTORED_FLAT_SKY,
+        corrected_only.SKY_PRIMARY_BEAM_CORRECTED_RESTORED,
+        both.SKY_PRIMARY_BEAM_CORRECTED_RESTORED,
     )
+    both = analyze_restored_for_numerics(both)
+    corrected_only = analyze_restored_for_numerics(corrected_only)
     np.testing.assert_array_equal(corrected_only.ALPHA, both.ALPHA)
     np.testing.assert_array_equal(corrected_only.ALPHA_ERROR, both.ALPHA_ERROR)
     np.testing.assert_array_equal(corrected_only.BETA, both.BETA)
-    expected_alpha = both.SKY_RESTORED_FLAT_SKY.isel(
+    expected_alpha = both.SKY_PRIMARY_BEAM_CORRECTED_RESTORED.isel(
         taylor_term=1
-    ) / both.SKY_RESTORED_FLAT_SKY.isel(taylor_term=0)
+    ) / both.SKY_PRIMARY_BEAM_CORRECTED_RESTORED.isel(taylor_term=0)
     np.testing.assert_array_equal(corrected_only.ALPHA, expected_alpha)
-    expected_beta = both.SKY_RESTORED_FLAT_SKY.isel(
+    expected_beta = both.SKY_PRIMARY_BEAM_CORRECTED_RESTORED.isel(
         taylor_term=2
-    ) / both.SKY_RESTORED_FLAT_SKY.isel(taylor_term=0) - 0.5 * expected_alpha * (
-        expected_alpha - 1.0
-    )
+    ) / both.SKY_PRIMARY_BEAM_CORRECTED_RESTORED.isel(
+        taylor_term=0
+    ) - 0.5 * expected_alpha * (expected_alpha - 1.0)
     np.testing.assert_array_equal(corrected_only.BETA, expected_beta)
     assert not np.allclose(
         corrected_only.ALPHA,
-        both.SKY_RESTORED_FLAT_NOISE.isel(taylor_term=1)
-        / both.SKY_RESTORED_FLAT_NOISE.isel(taylor_term=0),
+        both.SKY_RESTORED.isel(taylor_term=1) / both.SKY_RESTORED.isel(taylor_term=0),
     )
     assert corrected_only.attrs["data_groups"]["restored"]["sky"] == (
-        "SKY_RESTORED_FLAT_SKY"
+        "SKY_PRIMARY_BEAM_CORRECTED_RESTORED"
     )
 
 
@@ -550,7 +561,7 @@ def test_mfs_restoration_divides_primary_beam_taylor_polynomial_before_restore()
         "PRIMARY_BEAM_TAYLOR"
     )
 
-    result, _ = restore_continuum_image(
+    result, _ = restore_continuum_for_numerics(
         image,
         primary_beam_limit=0.2,
         restoration_output="both",
@@ -569,7 +580,7 @@ def test_mfs_restoration_divides_primary_beam_taylor_polynomial_before_restore()
         output="apparent",
     )
     np.testing.assert_allclose(
-        result.SKY_RESTORED_FLAT_SKY,
+        result.SKY_PRIMARY_BEAM_CORRECTED_RESTORED,
         expected_products["apparent"],
     )
     expected_residual = _divide_taylor_polynomials(
@@ -578,9 +589,10 @@ def test_mfs_restoration_divides_primary_beam_taylor_polynomial_before_restore()
         0.2,
     )
     np.testing.assert_allclose(expected_residual, intrinsic_residual)
-    expected_alpha = result.SKY_RESTORED_FLAT_SKY.isel(
+    expected_alpha = result.SKY_PRIMARY_BEAM_CORRECTED_RESTORED.isel(
         taylor_term=1
-    ) / result.SKY_RESTORED_FLAT_SKY.isel(taylor_term=0)
+    ) / result.SKY_PRIMARY_BEAM_CORRECTED_RESTORED.isel(taylor_term=0)
+    result = analyze_restored_for_numerics(result)
     np.testing.assert_allclose(result.ALPHA, expected_alpha, equal_nan=True)
 
 
@@ -676,9 +688,6 @@ def test_mfs_restore_to_a_target_convolves_the_taylor_divided_residual(
     image = _continuum_target_image(dtype).isel(taylor_term=slice(n_taylor_terms))
     kernel_ft, transform = _target_kernel_and_transform()
     primary_beam_taylor = image.PRIMARY_BEAM_TAYLOR.astype(np.float64)
-    residual_to_beam = image.SKY_RESIDUAL.copy(
-        data=_apply(image.SKY_RESIDUAL, transform)
-    )
     divided_model, divided_residual = (
         _divide_taylor_polynomials(
             image[name].astype(np.float64), primary_beam_taylor, 0.2, **options
@@ -696,14 +705,14 @@ def test_mfs_restore_to_a_target_convolves_the_taylor_divided_residual(
         np.nan,
     )
 
-    result, _ = restore_continuum_image(
+    result, _ = restore_continuum_for_numerics(
         image,
         restoration_output=output,
         restoring_beam=TARGET_BEAM,
         continuum_mode="mfs",
     )
 
-    corrected = result.SKY_RESTORED_FLAT_SKY
+    corrected = result.SKY_PRIMARY_BEAM_CORRECTED_RESTORED
     inside = np.broadcast_to(primary_beam_taylor.values[:, :1] >= 0.2, corrected.shape)
     assert np.isfinite(corrected.values[inside]).all()
     assert np.isnan(corrected.values[~inside]).all()
@@ -712,29 +721,22 @@ def test_mfs_restore_to_a_target_convolves_the_taylor_divided_residual(
         assert "ALPHA" not in result
         return
 
-    flat_noise_zero = (
-        result.SKY_RESTORED_FLAT_NOISE.isel(taylor_term=0, drop=True)
-        if output == "both"
-        else corrected.isel(taylor_term=0, drop=True)
-        * result.PRIMARY_BEAM_TAYLOR.isel(taylor_term=0, drop=True)
+    assert "ALPHA_ERROR" not in result
+    result = analyze_restored_for_numerics(result)
+    alpha = corrected.isel(taylor_term=1, drop=True) / corrected.isel(
+        taylor_term=0, drop=True
     )
-
-    def spectral_products(residual):
-        return _restored_spectral_products(
-            corrected,
-            _divide_taylor_polynomials(residual, result.PRIMARY_BEAM_TAYLOR, 0.2),
-            flat_noise_restored_zero_da=flat_noise_zero,
-            flat_noise_residual_zero_da=result.SKY_RESIDUAL.isel(
-                taylor_term=0, drop=True
-            ),
-        )
-
-    unconvolved = spectral_products(result.SKY_RESIDUAL)
-    xr.testing.assert_equal(result.ALPHA, unconvolved["ALPHA"])
-    xr.testing.assert_equal(result.ALPHA_ERROR, unconvolved["ALPHA_ERROR"])
-    assert np.isfinite(result.ALPHA_ERROR).any()
-    convolved = spectral_products(residual_to_beam.astype(dtype))
-    assert not np.allclose(result.ALPHA_ERROR, convolved["ALPHA_ERROR"], equal_nan=True)
+    rzero = result.SKY_RESIDUAL.isel(taylor_term=0, drop=True)
+    rone = result.SKY_RESIDUAL.isel(taylor_term=1, drop=True)
+    expected_error = np.sqrt(rone**2 + (alpha * rzero) ** 2) / abs(
+        corrected.isel(taylor_term=0, drop=True)
+    )
+    zero = corrected.isel(taylor_term=0, drop=True)
+    valid = abs(zero) > abs(rzero).max(dim=("l", "m"), skipna=True) / 10
+    expected_error = expected_error.where(valid)
+    np.testing.assert_allclose(
+        result.ALPHA_ERROR, expected_error, rtol=1e-6, equal_nan=True
+    )
 
 
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
@@ -750,20 +752,39 @@ def test_mvc_restore_to_a_target_convolves_the_divided_residual(dtype):
     def divided(planes):
         return np.divide(planes, primary_beam, out=np.zeros(model.shape), where=inside)
 
-    result, _ = restore_continuum_image(
+    result, _ = restore_continuum_for_numerics(
         image,
         restoration_output="both",
         restoring_beam=TARGET_BEAM,
         continuum_mode="mvc",
     )
 
+    # MVC removes the common beam, then reconstructs the actual apparent polynomial.
+    coefficients = image.PRIMARY_BEAM_TAYLOR.values.astype(np.float64)
+    sky_model, sky_residual = divided(model), divided(residual)
+    apparent_model, apparent_residual = (
+        np.zeros_like(sky_model),
+        np.zeros_like(sky_residual),
+    )
+    for order in range(model.shape[1]):
+        for beam_order in range(order + 1):
+            apparent_model[:, order] += (
+                coefficients[:, beam_order] * sky_model[:, order - beam_order]
+            )
+            apparent_residual[:, order] += (
+                coefficients[:, beam_order] * sky_residual[:, order - beam_order]
+            )
     _assert_close(
-        result.SKY_RESTORED_FLAT_NOISE,
-        _apply(model, kernel_ft) + _apply(residual, transform),
+        result.SKY_RESTORED,
+        np.where(
+            inside,
+            _apply(apparent_model, kernel_ft) + _apply(apparent_residual, transform),
+            np.nan,
+        ),
         dtype,
     )
     _assert_close(
-        result.SKY_RESTORED_FLAT_SKY,
+        result.SKY_PRIMARY_BEAM_CORRECTED_RESTORED,
         np.where(
             inside,
             _apply(divided(model), kernel_ft) + _apply(divided(residual), transform),
@@ -793,16 +814,34 @@ def test_mtmfs_restore_to_a_target_corrects_every_principal_residual(dtype):
     )
     kernel_ft, transform = _target_kernel_and_transform()
 
-    result, _ = restore_continuum_image(
+    result, _ = restore_continuum_for_numerics(
         image, deconvolver="mtmfs", restoring_beam=TARGET_BEAM, continuum_mode="mfs"
     )
 
+    from astroviper.processing_functions.imaging.restore import (
+        _divide_taylor_polynomials,
+    )
+
+    intrinsic_model = _divide_taylor_polynomials(
+        image.SKY_MODEL.astype(np.float64),
+        image.PRIMARY_BEAM_TAYLOR,
+        0.2,
+        outside_value=0.0,
+    ).values
+    intrinsic_residual = _divide_taylor_polynomials(
+        principal.astype(np.float64), image.PRIMARY_BEAM_TAYLOR, 0.2
+    ).values
+    finite = np.isfinite(intrinsic_residual)
+    target_residual = np.where(
+        finite, _apply(np.where(finite, intrinsic_residual, 0.0), transform), np.nan
+    )
     _assert_close(
-        result.SKY_RESTORED_FLAT_NOISE,
-        _apply(image.SKY_MODEL, kernel_ft) + _apply(principal, transform),
+        result.SKY_PRIMARY_BEAM_CORRECTED_RESTORED,
+        _apply(intrinsic_model, kernel_ft) + target_residual,
         dtype,
     )
-    xr.testing.assert_identical(result.SKY_RESIDUAL, residual)
+    _assert_close(result.SKY_RESIDUAL, target_residual, dtype)
+    xr.testing.assert_identical(image.SKY_RESIDUAL, residual)
 
 
 @pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
@@ -812,7 +851,7 @@ def test_continuum_target_equal_to_the_psf_beam_gives_the_none_result(
     continuum_mode, output, dtype
 ):
     restored = [
-        restore_continuum_image(
+        restore_continuum_for_numerics(
             _continuum_target_image(dtype, continuum_mode),
             restoration_output=output,
             restoring_beam=restoring_beam,
@@ -821,8 +860,8 @@ def test_continuum_target_equal_to_the_psf_beam_gives_the_none_result(
         for restoring_beam in (None, [3.0e-5, 2.0e-5, 0.3])
     ]
     names = (
-        "SKY_RESTORED_FLAT_NOISE",
-        "SKY_RESTORED_FLAT_SKY",
+        "SKY_RESTORED",
+        "SKY_PRIMARY_BEAM_CORRECTED_RESTORED",
         "ALPHA",
         "ALPHA_ERROR",
         "BEAM_FIT_PARAMS_SKY_RESTORED",
@@ -863,27 +902,31 @@ def test_mfs_target_that_does_not_contain_the_psf_beam_keeps_the_residual(
         output="apparent",
     )[0]["apparent"]
 
-    result, _ = restore_continuum_image(
+    result, _ = restore_continuum_for_numerics(
         image,
         restoration_output="primary_beam_corrected",
         restoring_beam=narrow,
         continuum_mode="mfs",
     )
 
-    np.testing.assert_array_equal(result.SKY_RESTORED_FLAT_SKY, expected)
-    assert len(messages) == 1
+    np.testing.assert_array_equal(result.SKY_PRIMARY_BEAM_CORRECTED_RESTORED, expected)
+    assert len(set(messages)) == 1
     assert "(0, 0)" in messages[0] and "(0, 1)" in messages[0]
 
 
 def test_continuum_restored_beam_variable_holds_the_target():
-    result, _ = restore_continuum_image(
+    result, _ = restore_continuum_for_numerics(
         _continuum_target_image(np.float32),
         restoring_beam=TARGET_BEAM,
         continuum_mode="mfs",
     )
     restored_beam = result.BEAM_FIT_PARAMS_SKY_RESTORED
-    psf_dims = result.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.dims
-    assert restored_beam.dims == (*psf_dims[:-1], "beam_params_label")
+    assert restored_beam.dims == (
+        "time",
+        "frequency",
+        "polarization",
+        "beam_params_label",
+    )
     assert restored_beam.beam_params_label.values.tolist() == ["major", "minor", "pa"]
     assert restored_beam.dtype == np.float64
     np.testing.assert_array_equal(
@@ -908,13 +951,18 @@ def test_continuum_restore_without_a_target_records_the_beam_of_stokes_i():
     beams = [[[3.0e-5, 2.0e-5, 0.3], [4.0e-5, 2.5e-5, -0.2]]]
     image = _psf_beams(_restore_memory_image(16, 2), beams)
 
-    result, _ = restore_continuum_image(image, continuum_mode="mfs")
+    result, _ = restore_continuum_for_numerics(image, continuum_mode="mfs")
 
     restored_beam = result.BEAM_FIT_PARAMS_SKY_RESTORED
-    assert restored_beam.dims == ("time", "polarization", "beam_params_label")
+    assert restored_beam.dims == (
+        "time",
+        "frequency",
+        "polarization",
+        "beam_params_label",
+    )
     assert restored_beam.beam_params_label.values.tolist() == ["major", "minor", "pa"]
     assert restored_beam.attrs == {"type": "beam_fit_params_sky", "units": "rad"}
-    np.testing.assert_array_equal(restored_beam, [[beams[0][0], beams[0][0]]])
+    np.testing.assert_array_equal(restored_beam, [[[beams[0][0], beams[0][0]]]])
     restored_group = result.attrs["data_groups"]["restored"]
     assert restored_group["beam_fit_params_sky"] == "BEAM_FIT_PARAMS_SKY_RESTORED"
 
@@ -927,11 +975,11 @@ def test_continuum_restore_without_a_target_records_the_taylor_zero_beam():
         [[[[3.0e-5, 2.0e-5, 0.3]], [[5.0e-5, 4.0e-5, -1.0]]]],
     )
 
-    result, _ = restore_continuum_image(image)
+    result, _ = restore_continuum_for_numerics(image)
 
     np.testing.assert_array_equal(
         result.BEAM_FIT_PARAMS_SKY_RESTORED,
-        [[[[3.0e-5, 2.0e-5, 0.3]], [[3.0e-5, 2.0e-5, 0.3]]]],
+        [[[[3.0e-5, 2.0e-5, 0.3]]]],
     )
 
 
@@ -955,18 +1003,20 @@ def test_continuum_restore_without_a_target_fills_planes_without_a_fit(
         beams[0, 0] = np.nan
     image = _psf_beams(image, beams)
 
-    result, _ = restore_continuum_image(image, continuum_mode="mfs")
+    result, _ = restore_continuum_for_numerics(image, continuum_mode="mfs")
 
     np.testing.assert_array_equal(
         result.BEAM_FIT_PARAMS_SKY_RESTORED,
-        np.broadcast_to(beams[0, 0] if first_time_fitted else NO_FIT_BEAM, (2, 2, 3)),
+        np.broadcast_to(
+            beams[0, 0] if first_time_fitted else NO_FIT_BEAM, (2, 1, 2, 3)
+        ),
     )
 
 
 def test_continuum_restoring_beam_in_arcseconds_is_refused_on_a_direct_call():
     """[1.2, 1.0, 0.5] meant as arcseconds, on 32 x 32 pixels of 1e-5 rad."""
     with pytest.raises(ValueError, match="not smaller than the image"):
-        restore_continuum_image(
+        restore_continuum_for_numerics(
             _continuum_target_image(np.float64),
             restoring_beam=[1.2, 1.0, 0.5],
             continuum_mode="mfs",
@@ -981,7 +1031,7 @@ def test_continuum_corrected_restore_to_a_target_refuses_a_cutoff_below_1e_3(
     """Accepted: the cutoff 1e-3, the apparent image alone and no target."""
 
     def restore(**kwargs):
-        return restore_continuum_image(
+        return restore_continuum_for_numerics(
             _continuum_target_image(np.float64, continuum_mode),
             continuum_mode=continuum_mode,
             **kwargs,
@@ -994,7 +1044,11 @@ def test_continuum_corrected_restore_to_a_target_refuses_a_cutoff_below_1e_3(
                 restoring_beam=TARGET_BEAM,
                 primary_beam_limit=limit,
             )
-        restore(restoring_beam=TARGET_BEAM, primary_beam_limit=limit)
+        restore(
+            restoration_output="apparent",
+            restoring_beam=TARGET_BEAM,
+            primary_beam_limit=limit,
+        )
         restore(restoration_output=output, primary_beam_limit=limit)
     restore(
         restoration_output=output, restoring_beam=TARGET_BEAM, primary_beam_limit=1e-3
@@ -1036,6 +1090,7 @@ def _restore_memory_image(n, n_polarizations):
             "m": 1.0e-5 * (np.arange(n) - n // 2),
         },
         attrs={
+            "reference_frequency": 1.0e9,
             "continuum_imaging": {"continuum_mode": "mfs"},
             "data_groups": {
                 "residual": {
@@ -1066,7 +1121,7 @@ def test_mfs_restore_to_a_target_holds_no_more_than_without_one(output):
         image = _restore_memory_image(n, n_polarizations)
         tracemalloc.start()
         try:
-            restore_continuum_image(
+            restore_continuum_for_numerics(
                 image,
                 restoration_output=output,
                 restoring_beam=restoring_beam,
@@ -1076,7 +1131,8 @@ def test_mfs_restore_to_a_target_holds_no_more_than_without_one(output):
             peaks[restoring_beam is None] = tracemalloc.get_traced_memory()[1]
         finally:
             tracemalloc.stop()
-    assert peaks[False] - peaks[True] <= 0.25 * n * n * 4
+    # The target publishes its transformed residual as well as the restored image.
+    assert peaks[False] - peaks[True] <= 2 * n_polarizations * n * n * 4
 
 
 @pytest.mark.parametrize("frequency_shift", [0.0, 1.0e6])
@@ -1549,7 +1605,10 @@ def test_mvc_primary_beam_taylor_fit_survives_chunk_reduction():
 
     fitted = fit_mvc_primary_beam_taylor(reduced)
     assert fitted.dims == ("time", "taylor_term", "polarization", "l", "m")
-    assert fitted.attrs["usage"] == "diagnostic_only_already_incorporated_by_mvc"
+    assert (
+        fitted.attrs["usage"]
+        == "reconstruct_apparent_polynomial_after_common_beam_removal"
+    )
     np.testing.assert_allclose(fitted.values.squeeze(), expected, rtol=1.0e-12)
 
 

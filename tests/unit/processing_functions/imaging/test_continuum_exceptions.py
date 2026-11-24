@@ -55,7 +55,7 @@ def test_restore_requires_or_infers_consistent_continuum_mode():
         mvc_image,
         restoration_output="both",
     )
-    assert "SKY_RESTORED_FLAT_SKY" in restored_mvc
+    assert "SKY_PRIMARY_BEAM_CORRECTED_RESTORED" in restored_mvc
 
     image = make_continuum_image()
     image["SKY_RESIDUAL"].attrs.pop("continuum_mode")

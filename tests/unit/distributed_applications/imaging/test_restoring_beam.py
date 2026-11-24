@@ -171,7 +171,7 @@ def test_a_cube_target_equal_to_the_psf_beam_restores_bit_for_bit(
     assert received == [list(target)]
     assert all(type(value) is float for value in received[0])
     channel = {"frequency": 0}
-    for name in ("SKY_RESTORED", "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"):
+    for name in ("SKY_RESTORED", "SKY_PRIMARY_BEAM_CORRECTED_RESTORED"):
         np.testing.assert_array_equal(
             image[name].isel(channel).values, reference[name].isel(channel).values
         )
@@ -258,7 +258,7 @@ def test_fits_rows_without_a_fit_hold_the_tclean_beam(flagged_processing_set, tm
         np.testing.assert_array_equal(rows[1], rows[0], err_msg=name)
         if name == "SKY_RESTORED":
             np.testing.assert_array_equal(rows[:, 1], rows[:, 0])
-    with fits.open(image_store / "SKY_RESTORED_PRIMARY_BEAM_CORRECTED.fits") as hdulist:
+    with fits.open(image_store / "SKY_PRIMARY_BEAM_CORRECTED_RESTORED.fits") as hdulist:
         assert len(hdulist) == 1
         assert "CASAMBM" not in hdulist[0].header
         assert "BMAJ" not in hdulist[0].header
@@ -406,7 +406,7 @@ def test_a_continuum_target_equal_to_the_psf_beam_restores_bit_for_bit(
     assert keep == ["sky_residual"]
     assert received == [list(target)]
     assert all(type(value) is float for value in received[0])
-    for name in ("SKY_RESTORED_FLAT_NOISE", "SKY_RESTORED_FLAT_SKY", "SKY_RESIDUAL"):
+    for name in ("SKY_RESTORED", "SKY_PRIMARY_BEAM_CORRECTED_RESTORED", "SKY_RESIDUAL"):
         np.testing.assert_array_equal(image[name].values, reference[name].values)
     np.testing.assert_array_equal(
         image.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.values,

@@ -11,7 +11,7 @@ import numpy as np
 _MOMENT_MAXIMUM_VARIABLES = (
     ("sky_residual", "residual"),
     ("sky_model", "model"),
-    ("sky_restored_primary_beam_corrected", "primary beam corrected restored image"),
+    ("sky_primary_beam_corrected_restored", "primary beam corrected restored image"),
 )
 
 
@@ -421,7 +421,7 @@ def _add_moment_maximum(
                 f"No {description}: {key} was not written"
                 + (
                     " (it needs restore=True and restoration_output='primary_beam_corrected' or 'both')."
-                    if key == "sky_restored_primary_beam_corrected"
+                    if key == "sky_primary_beam_corrected_restored"
                     else "."
                 )
             )

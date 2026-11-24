@@ -563,16 +563,22 @@ IMAGING_PARAM_DOCS = {
     "image_cube_single_field.field_name": _FIELD_NAME_DOC,
     "image_continuum_single_field.field_name": _FIELD_NAME_DOC,
     "point_spread_function_cube_single_field.field_name": _FIELD_NAME_DOC,
-    "feather.selection": """``xarray`` ``isel`` selection applied to both input images (e.g. a
-frequency channel range or an ``l``/``m`` sub-window). Chunking is determined
-from the selected images.""",
+    "feather.selection": (
+        "``xarray`` ``isel`` selection applied to both input images (e.g. a\n"
+        "frequency channel range or an ``l``/``m`` sub-window). Chunking is determined\n"
+        "from the selected images."
+    ),
     "feather.fft_backend": """FFT backend used by the feather combination (``"scipy"`` or ``"pyfftw"``).""",
-    "require_complete": """Require all coordinates and cycle controls needed by a distributed driver.
-Lower-level entry points check only the configuration they receive.""",
-    "input_checked": """Skip configuration checks already performed by the calling layer.
-Runtime checks on newly created data always remain active. For graph nodes
-using an input_params dictionary, its input_checked entry also carries this
-flag. Set it only for an unchanged configuration in the same imaging mode.""",
+    "require_complete": (
+        "Require all coordinates and cycle controls needed by a distributed driver.\n"
+        "Lower-level entry points check only the configuration they receive."
+    ),
+    "input_checked": (
+        "Skip configuration checks already performed by the calling layer.\n"
+        "Runtime checks on newly created data always remain active. For graph nodes\n"
+        "using an input_params dictionary, its input_checked entry also carries this\n"
+        "flag. Set it only for an unchanged configuration in the same imaging mode."
+    ),
     "image_params": _IMAGE_PARAMS_DOC,
     "make_primary_beam_single_field.image_params": _PRIMARY_BEAM_IMAGE_PARAMS_DOC,
     "make_continuum_primary_beam_single_field.image_params": (
@@ -1022,17 +1028,15 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
         "precision. If ``False`` the image-domain arrays are double precision."
     ),
     "weight_memory_mode": (
-        "Storage policy for calculated continuum imaging weights.\n"
-        '``"in_memory"``\n'
-        "returns task-local weights to the driver and embeds them in subsequent\n"
-        'graphs. ``"in_place"`` writes each task\'s weights into a temporary group\n'
-        "in the output image store and reloads only the required partition during\n"
-        "each imaging cycle. It is the default because it bounds scheduler and\n"
-        "worker memory without modifying the input Processing Set. The temporary\n"
-        "group is removed when the run ends, also after an error. A completed cache\n"
-        "is copied into the input only when ``write_imaging_weights_to_ps=True``.\n"
-        "This option remains separate from ``memory_mode`` for now; the policies\n"
-        "may be unified later."
+        'Storage policy for calculated continuum imaging weights. ``"in_memory"``\n'
+        'returns task-local weights for subsequent graphs. ``"in_place"`` writes\n'
+        "partitions into a disposable output-store cache by default. With\n"
+        "``write_imaging_weights_to_ps=True``, XRADIO preallocates unregistered\n"
+        "Processing Set targets instead; tasks write and reload their own regions\n"
+        "there. Only after all tasks succeed does XRADIO register ``WEIGHT_IMAGING``\n"
+        "with provenance and consolidate metadata. Failed runs remove their staging\n"
+        "variables. Existing persisted weights are protected and require explicit\n"
+        "removal before replacement. No completed full-array cache is copied."
     ),
     "visibility_memory_mode": (
         "Continuum residual-update storage policy for observed visibility grids.\n"
@@ -1050,12 +1054,11 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
         "caching; other modes and first cycles leave it unset."
     ),
     "wideband_primary_beam_memory_mode": (
-        "MVC-only storage policy for the frequency-dependent primary beam.\n"
-        '``"in_place"`` stores it temporarily in the image Zarr store and reads\n'
-        'only task-local channels. The default ``"recompute"`` regenerates the\n'
-        'analytic beam inside every later map, and ``"in_memory"`` retains it at\n'
-        "the driver but passes each map only its local beam. The setting is ignored\n"
-        "for MFS."
+        'Must be ``"recompute"``. Continuum imaging regenerates frequency-dependent\n'
+        "channel beams for each residual update and retains only the fitted\n"
+        "``PRIMARY_BEAM`` polynomial in public outputs. MVC also retains its\n"
+        "frequency-independent ``COMMON_PRIMARY_BEAM``. Channel-beam cache policies\n"
+        "are disabled."
     ),
     "mvc_model_update_approximation": (
         "MVC approximation used to construct the Taylor residuals and PSFs.\n"
@@ -1098,20 +1101,22 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
         "beam."
     ),
     "restore_continuum_image.deconvolver": (
-        "Deconvolver that produced the model. MT-MFS restoration applies the\n"
-        "Taylor Hessian's principal solution to a private copy of every residual\n"
-        "Taylor term before restoration. The stored residual remains unchanged."
+        "Deconvolver that produced the internal model. MT-MFS finalization applies\n"
+        "the Taylor Hessian inverse to the normal-equation residual before primary-\n"
+        "beam correction. The public residual is this flat-sky principal residual;\n"
+        "the input cycle-control residual is unchanged."
     ),
     "restoration_output": (
-        'Restored products to compute: ``"apparent"``, ``"primary_beam_corrected"``,\n'
-        'or ``"both"``. Cube outputs are ``SKY_RESTORED`` and\n'
-        "``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``; continuum outputs are\n"
-        "``SKY_RESTORED_FLAT_NOISE`` and ``SKY_RESTORED_FLAT_SKY``.\n"
-        "Cube corrects the model and residual by the channel power primary beam\n"
-        "before convolution. MFS divides their Taylor polynomials; MVC divides\n"
-        "by its common power primary beam. Corrected pixels below\n"
-        "``primary_beam_limit`` are blanked with NaN. Imaging workflows use this\n"
-        "selector only when ``restore=True``."
+        'Restored products to compute: ``"apparent"`` gives ``SKY_RESTORED``\n'
+        '(flat noise), ``"primary_beam_corrected"`` gives\n'
+        '``SKY_PRIMARY_BEAM_CORRECTED_RESTORED`` (flat sky), and ``"both"`` gives both.\n'
+        "Every imager returns flat-sky ``SKY_MODEL`` and coefficient-space\n"
+        "``SKY_RESIDUAL`` even with ``restore=False``. Primary-beam correction happens\n"
+        "before convolution: channel-wise division for cubes, coupled triangular\n"
+        "polynomial division for MFS, and common-beam division for MVC. MVC reconstructs\n"
+        "apparent coefficients using the frequency-dependent beam polynomial.\n"
+        "Only requested restored products are allocated. Spectral diagnostics require\n"
+        "the separate ``spectral_products`` analysis tool."
     ),
     "restoring_beam": (
         "``None`` restores each plane with its own PSF fit [CASA ``tclean``\n"
@@ -1121,7 +1126,7 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
         "since CASA 5.6 (CAS-12148): the model is convolved with the unit-peak\n"
         "target beam, and the residual with the Gaussian that takes the plane's\n"
         "PSF beam to the target, times the ratio of the beam areas, so it is in\n"
-        "Jy per target beam. ``SKY_RESIDUAL`` is unchanged. A plane whose PSF\n"
+        "Jy per target beam. ``SKY_RESIDUAL`` records the residual at the target beam, preserving the public restoration identity. A plane whose PSF\n"
         "beam the target does not contain, or that has no PSF fit, keeps its\n"
         "residual unconvolved and unscaled, as ``tclean`` does, and is named in a\n"
         "warning. The continuum imager refuses a target that does not contain its\n"
@@ -1142,30 +1147,25 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
         "(the fit behind ``tclean``'s restoring beam)."
     ),
     "restore": (
-        "If ``True`` produce a restored image after deconvolution: the model\n"
-        "convolved with the clean beam (the Gaussian fit to the PSF) plus the\n"
-        "residual, written to the ``sky_restored`` (``SKY_RESTORED``) variable."
+        "Whether to compute the products selected by ``restoration_output`` in the\n"
+        "same imaging workflow. Flat-sky model and residual outputs are always\n"
+        "finalized. ``ALPHA``, ``ALPHA_ERROR`` and ``BETA`` are computed only by the\n"
+        "separate ``spectral_products`` analysis tool."
     ),
     "image_continuum_single_field.image_data_variables_keep": (
-        'Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,\n'
-        '``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).\n'
-        "Restoration automatically retains its selected restored Taylor\n"
-        'products, the derived ``"alpha"``, ``"alpha_error"``, and, when\n'
-        'available, ``"beta"``, and ``"beam_fit_params_sky_restored"``, the beam\n'
-        "the restore applied; with a ``restoring_beam`` also\n"
-        '``"beam_fit_params_point_spread_function"``.\n'
-        "Restored and spectral products require ``restore=True``. Alpha products\n"
-        "require at least two Taylor terms; beta requires at least three.\n"
-        "MFS can retain the Taylor UV grids ``visibility`` and ``uv_sampling``;\n"
-        "MVC cannot publish channel UV grids. Unavailable products are rejected\n"
-        "before input reads or graph construction."
+        "Logical image-variable keys to retain on disk. Flat-sky model, residual,\n"
+        "and the compact primary-beam polynomial are always retained. Restoration\n"
+        "retains only its selected restored images and their clean-beam metadata.\n"
+        "A target restoring beam also retains metadata for the transformed residual.\n"
+        "ALPHA, ALPHA_ERROR, and BETA are requested separately through spectral_products.\n"
+        "MFS can retain Taylor UV grids; MVC cannot publish channel UV grids.\n"
+        "Unavailable requests are rejected before reading input or building graphs."
     ),
     "image_continuum_single_field.restore": (
-        "If ``True`` restore every Taylor coefficient after deconvolution and\n"
-        "write the products selected by ``restoration_output``. With at least\n"
-        "two Taylor terms also write ``ALPHA`` and ``ALPHA_ERROR``; with at least\n"
-        "three also write ``BETA``. ``ALPHA_ERROR`` is a pixel-residual diagnostic,\n"
-        "not a statistically calibrated one-sigma uncertainty."
+        "Whether to restore every finalized flat-sky coefficient in this imaging\n"
+        "workflow. Compute only products selected by ``restoration_output``.\n"
+        "Model and principal-residual finalization also runs with ``restore=False``.\n"
+        "Spectral diagnostics are requested separately through ``spectral_products``."
     ),
     "clean_mask": (
         'Two-dimensional CLEAN mask of shape ``image_params["image_size"]``:\n'

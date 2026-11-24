@@ -422,7 +422,7 @@ class TestPrimaryBeamCorrectionInRestore:
         )
         primary_beam = xds["PRIMARY_BEAM"].values
         out, return_df = restore_image(xds, restoration_output="both")
-        corrected = out["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"].values
+        corrected = out["SKY_PRIMARY_BEAM_CORRECTED_RESTORED"].values
         inside = primary_beam >= 0.2
         # the true sky convolved with the beam: the restored image of the
         # model divided by the primary beam at the source, with no residual
@@ -440,7 +440,7 @@ class TestPrimaryBeamCorrectionInRestore:
         )
         assert np.isnan(corrected[~inside]).all()
         assert out.attrs["data_groups"]["restored"]["sky_primary_beam_corrected"] == (
-            "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
+            "SKY_PRIMARY_BEAM_CORRECTED_RESTORED"
         )
         assert list(return_df.columns) == ["T_restore", "T_correct_sky_by_primary_beam"]
         # the restored image itself is unchanged by the correction
@@ -460,7 +460,7 @@ class TestPrimaryBeamCorrectionInRestore:
         )
         primary_beam = xds["PRIMARY_BEAM"].values
         out, _ = restore_image(xds, restoration_output="both")
-        corrected = out["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"].values
+        corrected = out["SKY_PRIMARY_BEAM_CORRECTED_RESTORED"].values
         divided = out["SKY_RESTORED"].values / primary_beam
         np.testing.assert_allclose(
             corrected[0, 0, 0, 20, 44], divided[0, 0, 0, 20, 44], rtol=1e-6
@@ -484,8 +484,8 @@ class TestPrimaryBeamCorrectionInRestore:
         )
         consumed = restore_image(xds, consume_model=True, restoration_output="both")[0]
         np.testing.assert_array_equal(
-            consumed["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"].values,
-            reference["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"].values,
+            consumed["SKY_PRIMARY_BEAM_CORRECTED_RESTORED"].values,
+            reference["SKY_PRIMARY_BEAM_CORRECTED_RESTORED"].values,
         )
         assert "SKY_MODEL" not in consumed
 
@@ -510,7 +510,7 @@ class TestPrimaryBeamCorrectionInRestore:
         assert set(products) == {"primary_beam_corrected"}
         np.testing.assert_array_equal(
             products["primary_beam_corrected"],
-            reference.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.values,
+            reference.SKY_PRIMARY_BEAM_CORRECTED_RESTORED.values,
         )
 
     def test_zero_limit_excludes_zero_and_nonfinite_primary_beam_pixels(self):
@@ -527,7 +527,7 @@ class TestPrimaryBeamCorrectionInRestore:
             restoration_output="both",
             primary_beam_limit=0.0,
         )
-        corrected = out.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.values
+        corrected = out.SKY_PRIMARY_BEAM_CORRECTED_RESTORED.values
         supported = np.isfinite(primary_beam) & (primary_beam > 0.0)
 
         assert np.isfinite(corrected[supported]).all()
@@ -541,7 +541,7 @@ class TestPrimaryBeamCorrectionInRestore:
             )
         )
         out, _ = restore_image(xds, restoration_output="both", primary_beam_limit=0.6)
-        corrected = out["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"]
+        corrected = out["SKY_PRIMARY_BEAM_CORRECTED_RESTORED"]
         assert corrected.dtype == np.float64
         assert np.isnan(corrected.values[xds["PRIMARY_BEAM"].values < 0.6]).all()
         # no clean beam: the model is not restored and not convolved
@@ -556,7 +556,7 @@ class TestPrimaryBeamCorrectionInRestore:
         inside = primary_beam >= 0.2
         expected = (model + residual) / primary_beam
         np.testing.assert_allclose(
-            out["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"].values[inside],
+            out["SKY_PRIMARY_BEAM_CORRECTED_RESTORED"].values[inside],
             expected[inside],
             rtol=1e-6,
         )
@@ -628,8 +628,8 @@ def test_cube_restoration_selector_matches_both_products(
     apparent = output in ("apparent", "both")
     corrected = output in ("primary_beam_corrected", "both")
     assert ("SKY_RESTORED" in result) == apparent
-    assert ("SKY_RESTORED_PRIMARY_BEAM_CORRECTED" in result) == corrected
-    for name in ("SKY_RESTORED", "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"):
+    assert ("SKY_PRIMARY_BEAM_CORRECTED_RESTORED" in result) == corrected
+    for name in ("SKY_RESTORED", "SKY_PRIMARY_BEAM_CORRECTED_RESTORED"):
         if name in result:
             if restoring_beam is not None and output == "apparent":
                 # One inverse transform of both terms; "both" has one per term.
@@ -641,7 +641,7 @@ def test_cube_restoration_selector_matches_both_products(
                 np.testing.assert_array_equal(result[name], reference[name])
             assert result[name].dtype == dtype
     assert result.attrs["data_groups"]["restored"]["sky"] == (
-        "SKY_RESTORED" if apparent else "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
+        "SKY_RESTORED" if apparent else "SKY_PRIMARY_BEAM_CORRECTED_RESTORED"
     )
     if not apparent or not consume_model:
         xr.testing.assert_identical(result.SKY_MODEL, model)
@@ -735,7 +735,7 @@ def _restored(xds, output, consume_model, restoring_beam):
     )
     return {
         name: out[name].values
-        for name in ("SKY_RESTORED", "SKY_RESTORED_PRIMARY_BEAM_CORRECTED")
+        for name in ("SKY_RESTORED", "SKY_PRIMARY_BEAM_CORRECTED_RESTORED")
         if name in out
     }
 
@@ -767,7 +767,7 @@ def test_none_restores_each_plane_with_its_own_beam(output, dtype, consume_model
                 kernel_ft=kernel_ft,
             )
             np.testing.assert_array_equal(
-                restored["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"][0, f, q], expected
+                restored["SKY_PRIMARY_BEAM_CORRECTED_RESTORED"][0, f, q], expected
             )
 
 
@@ -829,7 +829,7 @@ def test_target_restore_matches_the_float64_construction(
                 + convolved(residual_zero, transform),
                 np.nan,
             ),
-            "SKY_RESTORED_PRIMARY_BEAM_CORRECTED": np.where(
+            "SKY_PRIMARY_BEAM_CORRECTED_RESTORED": np.where(
                 (primary_beam_plane >= 0.2) & finite,
                 model_part
                 + convolved(
@@ -845,7 +845,7 @@ def test_target_restore_matches_the_float64_construction(
             )
             error = np.nanmax(np.abs(value[0, 0, q] - expected[name]))
             assert error <= tolerance * np.nanmax(np.abs(expected[name]))
-        corrected = expected["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"]
+        corrected = expected["SKY_PRIMARY_BEAM_CORRECTED_RESTORED"]
         casa_order = model_part + _divided(
             convolved(residual_zero, transform), primary_beam_plane, 0.0
         )
@@ -968,7 +968,7 @@ def test_an_overflowing_quotient_is_the_only_nonfinite_pixel(output):
             primary_beam_limit=0.0,
             input_checked=True,
         )
-    corrected = out.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.values
+    corrected = out.SKY_PRIMARY_BEAM_CORRECTED_RESTORED.values
     np.testing.assert_array_equal(np.isnan(corrected), expected)
     assert np.isfinite(corrected[~expected]).all()
 
@@ -1042,7 +1042,7 @@ def test_planes_not_contained_or_without_a_fit_keep_their_residual(
                 kernel_ft=kernel_ft,
             )
             np.testing.assert_array_equal(
-                restored["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"][0, f, q], expected
+                restored["SKY_PRIMARY_BEAM_CORRECTED_RESTORED"][0, f, q], expected
             )
     frequency = xds.frequency.values.tolist()
     assert len(messages) == 1
@@ -1084,7 +1084,7 @@ def test_target_equal_within_the_tolerance_scales_the_residual(
                 _divided(residual[0, 0, q], primary_beam_plane, np.nan, dtype) * ratio
             )
             np.testing.assert_array_equal(
-                restored["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"][0, 0, q], expected
+                restored["SKY_PRIMARY_BEAM_CORRECTED_RESTORED"][0, 0, q], expected
             )
             assert np.isfinite(expected[primary_beam_plane >= 0.2]).all()
         if output != "primary_beam_corrected":

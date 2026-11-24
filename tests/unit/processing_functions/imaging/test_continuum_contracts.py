@@ -261,6 +261,7 @@ def test_pb_correction_rejects_invalid_final_products(fault):
     """An unreduced channel beam must not broadcast a continuum image to a cube."""
     image = make_continuum_image(continuum_mode="mvc")
     if fault == "channel_beam":
+        image = image.reindex(frequency=[100.0, 110.0])
         image["PRIMARY_BEAM"] = image.PRIMARY_BEAM.expand_dims(
             frequency=[100.0, 110.0], axis=1
         )
@@ -284,10 +285,11 @@ def test_pb_correction_rejects_invalid_final_products(fault):
 
 def test_restoration_accepts_inclusive_primary_beam_limit():
     image = make_continuum_image(continuum_mode="mvc")
-    restore_continuum_image(
+    result, _ = restore_continuum_image(
         image, restoration_output="both", primary_beam_limit=1.0, continuum_mode="mvc"
     )
-    assert image.SKY_RESTORED_FLAT_SKY.dims == image.SKY_MODEL.dims
+    assert result.SKY_PRIMARY_BEAM_CORRECTED_RESTORED.dims == result.SKY_MODEL.dims
+    assert "SKY_PRIMARY_BEAM_CORRECTED_RESTORED" not in image
 
 
 @pytest.mark.parametrize("deconvolver", ["MTMFS", "unknown", None])

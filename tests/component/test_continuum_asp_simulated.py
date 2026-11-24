@@ -18,9 +18,8 @@ its mask, the pixels outside the primary-beam support, where MVC sets the
 residual to 0. The application warns about it in MVC with the options on, and
 only there.
 
-The CLEAN model of each source (a box around it) must hold the true flux
-times the effective primary beam of the image (the model of continuum
-imaging is the sky seen through that beam, in MFS and MVC alike) within
+The public flat-sky CLEAN model of each source (a box around it) must hold
+the true flux within
 5 percent (measured: within 2.2 percent), the Stokes I residual must stay
 below 3 percent of the point source's apparent flux (measured: at most
 1.4 percent), and the cycle controller must have booked every model update.
@@ -186,7 +185,7 @@ def run_continuum_asp(simulated, directory, continuum_mode, options, clean_mask=
             memory_mode="in_memory",
             weight_memory_mode="in_memory",
             visibility_memory_mode="recompute",
-            wideband_primary_beam_memory_mode="in_memory",
+            wideband_primary_beam_memory_mode="recompute",
             overwrite=True,
             compute_backend="dask",
         )
@@ -236,7 +235,7 @@ def test_continuum_asp_recovers_simulated_sources(
     # MVC without a clean mask leaves the significance test no noise to measure.
     assert len(warnings) == int(continuum_mode == "mvc" and options == "asp_options_on")
 
-    assert image.sizes["taylor_term"] == 1
+    assert image.sizes["frequency_polynomial"] == 1
     assert image.sizes["frequency"] == 1
     assert list(image.polarization.values) == ["I", "V"]
     assert controller.cycles_done >= 2
@@ -253,29 +252,41 @@ def test_continuum_asp_recovers_simulated_sources(
 
     model = image.SKY_MODEL.values[0, 0, 0]  # Stokes I, Taylor term 0
     residual = image.SKY_RESIDUAL.values[0, 0, 0]
-    primary_beam = image.PRIMARY_BEAM.isel(frequency=0).values[0, 0]
+    primary_beam = image.PRIMARY_BEAM.isel(frequency_polynomial=0).values[0, 0]
     apparent = {}
     for name, box in source_boxes().items():
         apparent[name] = float(np.sum(truth[box] * primary_beam[box]))
         np.testing.assert_allclose(
             model[box].sum(),
-            apparent[name],
+            float(truth[box].sum()),
             rtol=0.05,
             err_msg=f"{continuum_mode} {name}",
         )
-    assert np.isfinite(residual).all() and np.isfinite(model).all()
-    assert np.abs(residual).max() < 0.03 * apparent["point"]
+    assert np.isfinite(model).all()
+    support_beam = (
+        image.COMMON_PRIMARY_BEAM.values[0, 0, 0]
+        if continuum_mode == "mvc"
+        else primary_beam
+    )
+    assert np.isfinite(
+        residual[np.isfinite(support_beam) & (support_beam >= 0.2)]
+    ).all()
+    assert np.nanmax(np.abs(residual * primary_beam)) < 0.03 * apparent["point"]
 
     # Asp writes the same sole, intrinsic restored product as Hogbom.
     beam = (
-        image.PRIMARY_BEAM_TAYLOR.isel(taylor_term=0, drop=True)
-        if continuum_mode == "mfs"
-        else image.PRIMARY_BEAM.isel(frequency=0, drop=True)
+        image.COMMON_PRIMARY_BEAM.isel(frequency=0, drop=True)
+        if continuum_mode == "mvc"
+        else image.PRIMARY_BEAM.isel(frequency_polynomial=0, drop=True)
     )
-    assert "SKY_RESTORED_FLAT_SKY" in image
-    assert "SKY_RESTORED_FLAT_NOISE" not in image
+    assert "SKY_PRIMARY_BEAM_CORRECTED_RESTORED" in image
+    assert "SKY_RESTORED" not in image
     np.testing.assert_array_equal(
-        np.isfinite(image.SKY_RESTORED_FLAT_SKY.isel(taylor_term=0, drop=True)),
+        np.isfinite(
+            image.SKY_PRIMARY_BEAM_CORRECTED_RESTORED.isel(
+                frequency_polynomial=0, drop=True
+            )
+        ),
         np.isfinite(beam) & (beam >= 0.2),
     )
 
@@ -324,14 +335,16 @@ def test_continuum_asp_with_an_explicit_clean_mask(
     )
     model = image.SKY_MODEL.values[0, 0, 0]  # Stokes I, Taylor term 0
     residual = image.SKY_RESIDUAL.values[0, 0, 0]
-    primary_beam = image.PRIMARY_BEAM.isel(frequency=0).values[0, 0]
+    primary_beam = image.PRIMARY_BEAM.isel(frequency_polynomial=0).values[0, 0]
     apparent = {
         name: float(np.sum(truth[box] * primary_beam[box]))
         for name, box in source_boxes().items()
     }
     gaussian_box = source_boxes()["gaussian"]
     assert mask[np.unravel_index(np.argmax(model), model.shape)]
-    np.testing.assert_allclose(model[point_box].sum(), apparent["point"], rtol=0.08)
-    assert abs(model[gaussian_box].sum()) < 0.03 * apparent["gaussian"]
-    assert np.abs(residual[mask]).max() < 0.03 * apparent["point"]
+    np.testing.assert_allclose(
+        model[point_box].sum(), float(truth[point_box].sum()), rtol=0.08
+    )
+    assert abs(model[gaussian_box].sum()) < 0.03 * float(truth[gaussian_box].sum())
+    assert np.abs((residual * primary_beam)[mask]).max() < 0.03 * apparent["point"]
     assert residual[gaussian_box].max() > 10 * np.abs(residual[mask]).max()

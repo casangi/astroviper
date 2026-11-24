@@ -39,7 +39,7 @@ DEFAULT_STATISTICS_VARIABLES = (
     # Written by correct_sky_by_primary_beam (restoration_output="primary_beam_corrected" or "both";
     # branch 265-port-sirius) -- resolved by upper-casing the key when the
     # io table of this branch does not list it yet.
-    "sky_restored_primary_beam_corrected",
+    "sky_primary_beam_corrected_restored",
     "sky_model",
     "sky_dirty",
     "sky_deconvolved",

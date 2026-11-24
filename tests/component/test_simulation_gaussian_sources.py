@@ -170,9 +170,9 @@ def test_gaussian_and_point_source_fluxes_recovered(tmp_path, monkeypatch):
 
     img = load_image(image_store)
     assert list(img.polarization.values) == ["I", "Q"]
-    corrected = img.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.values[0, 0, 0]
+    corrected = img.SKY_PRIMARY_BEAM_CORRECTED_RESTORED.values[0, 0, 0]
     # the sources are unpolarised (XX = YY): Stokes Q holds nothing
-    stokes_q = img.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.values[0, 0, 1]
+    stokes_q = img.SKY_PRIMARY_BEAM_CORRECTED_RESTORED.values[0, 0, 1]
     assert np.nanmax(np.abs(stokes_q)) < 1e-9 * np.nanmax(corrected)
     primary_beam = img.PRIMARY_BEAM.values[0, 0, 0]
     beam = img.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.values[0, 0, 0]

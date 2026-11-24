@@ -478,17 +478,19 @@ def test_mtmfs_ignores_masked_structure_below_the_primary_beam_limit(
         clean_mask=str(clean_mask),
     )
     image = load_image(image_store)
-    primary_beam = image.PRIMARY_BEAM.isel(time=0, frequency=0, polarization=0)
-    low_beam = (primary_beam > 0.05) & (primary_beam < 0.2)
-    residual = np.abs(image.SKY_RESIDUAL.isel(time=0, taylor_term=0, polarization=0))
-    model = np.abs(image.SKY_MODEL.isel(time=0, taylor_term=0, polarization=0))
-
+    beam = (
+        image.COMMON_PRIMARY_BEAM.isel(time=0, frequency=0, polarization=0)
+        if continuum_mode == "mvc"
+        else image.PRIMARY_BEAM.isel(time=0, frequency_polynomial=0, polarization=0)
+    )
+    support = np.isfinite(beam) & (beam >= 0.2)
+    residual = image.SKY_RESIDUAL.isel(time=0, frequency_polynomial=0, polarization=0)
+    model = abs(image.SKY_MODEL.isel(time=0, frequency_polynomial=0, polarization=0))
     assert result["n_cycles"] < 15
     assert result["controller"].total_iter_done > 0
     assert float(model.max()) > 0.0
-    if continuum_mode == "mfs":
-        assert float(residual.where(low_beam).max()) > threshold
-    assert float(model.where(low_beam, 0).max()) == 0.0
+    assert np.isnan(residual.where(~support)).all()
+    assert float(model.where(~support, 0).max()) == 0.0
 
 
 @pytest.mark.parametrize(

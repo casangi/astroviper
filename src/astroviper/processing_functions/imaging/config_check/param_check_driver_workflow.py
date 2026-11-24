@@ -113,7 +113,7 @@ def check_driver_workflow(config, *, mode, require_complete=False):
     # beam spreads over the corrected image. The cube restores at its cycle
     # control cutoff, or at 0.2 for 0, as image_cube_single_field does.
     if config.get("restoring_beam") is not None and config.get(
-        "restoration_output", "apparent"
+        "restoration_output", "primary_beam_corrected"
     ) in ("primary_beam_corrected", "both"):
         from astroviper.processing_functions.imaging.config_check._predicates import (
             check_restoring_beam_primary_beam_limit,
@@ -250,7 +250,7 @@ def check_driver_workflow(config, *, mode, require_complete=False):
         policies = {
             "weight_memory_mode": ("in_memory", "in_place"),
             "visibility_memory_mode": ("in_memory", "in_place", "recompute"),
-            "wideband_primary_beam_memory_mode": ("in_memory", "in_place", "recompute"),
+            "wideband_primary_beam_memory_mode": ("recompute",),
         }
         for name, allowed in policies.items():
             if name in config and config[name] not in allowed:

@@ -37,6 +37,7 @@ from astroviper.processing_functions.image_analysis.statistics import (
 )
 
 __all__ = [
+    "spectral_products",
     "DEFAULT_STATISTICS",
     "STATISTIC_FUNCTIONS",
     "create_statistics_state",
@@ -65,3 +66,7 @@ __all__ = [
     "plane_statistics_to_dataframe",
     "plane_statistics_from_dataframe",
 ]
+
+from astroviper.processing_functions.image_analysis.spectral_products import (
+    spectral_products,
+)

@@ -80,7 +80,7 @@ def test_exact_for_a_point_source():
     img_xds = _add_model_and_residual(_make_restored_image())
     primary_beam = img_xds["PRIMARY_BEAM"].values
     img_xds, return_df = correct_sky_by_primary_beam(img_xds)
-    corrected = img_xds["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"].values
+    corrected = img_xds["SKY_PRIMARY_BEAM_CORRECTED_RESTORED"].values
     inside = primary_beam >= 0.2
     # the true sky (flux / P at the source) convolved with the clean beam
     reference = _add_model_and_residual(
@@ -96,7 +96,7 @@ def test_exact_for_a_point_source():
     # Registered on the data group under the corrected-sky role.
     assert (
         img_xds.attrs["data_groups"]["restored"]["sky_primary_beam_corrected"]
-        == "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
+        == "SKY_PRIMARY_BEAM_CORRECTED_RESTORED"
     )
     assert "T_correct_sky_by_primary_beam" in return_df.columns
 
@@ -106,7 +106,7 @@ def test_residual_is_divided_by_the_primary_beam():
     img_xds["SKY_RESIDUAL"].values[...] = 0.5
     primary_beam = img_xds["PRIMARY_BEAM"].values
     img_xds, _ = correct_sky_by_primary_beam(img_xds)
-    corrected = img_xds["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"].values
+    corrected = img_xds["SKY_PRIMARY_BEAM_CORRECTED_RESTORED"].values
     inside = primary_beam >= 0.2
     np.testing.assert_array_equal(corrected[inside], 0.5 / primary_beam[inside])
     assert np.isnan(corrected[~inside]).all()
@@ -115,7 +115,7 @@ def test_residual_is_divided_by_the_primary_beam():
 def test_limit_and_dtype():
     img_xds = _add_model_and_residual(_make_restored_image(dtype=np.float32))
     img_xds, _ = correct_sky_by_primary_beam(img_xds, primary_beam_limit=0.5)
-    corrected = img_xds["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"]
+    corrected = img_xds["SKY_PRIMARY_BEAM_CORRECTED_RESTORED"]
     assert corrected.dtype == np.float32
     primary_beam = img_xds["PRIMARY_BEAM"].values
     assert np.isnan(corrected.values[primary_beam < 0.5]).all()

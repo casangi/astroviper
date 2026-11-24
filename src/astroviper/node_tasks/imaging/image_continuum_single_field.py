@@ -192,12 +192,37 @@ def _write_cache_region(io_engine, target, array_path, indexers, values):
     )
 
 
-def _write_continuum_weights_in_place(ps_xdt, image_store, io_engine):
+def _write_continuum_weights_in_place(
+    ps_xdt, image_store, io_engine, persisted_imaging_weights=None
+):
     """Write task-local imaging weights into the output-store cache."""
     import os
 
     import numpy as np
     import zarr
+
+    if persisted_imaging_weights:
+        from xradio import write_data_variable_region
+
+        from astroviper.utils.imaging_weight_persistence import weight_region_selection
+
+        for name, child in ps_xdt.items():
+            transaction = persisted_imaging_weights[name]
+            weight_name = next(
+                group["weight_imaging"]
+                for group in child.ds.attrs["data_groups"].values()
+                if group.get("weight_imaging") in child.ds
+            )
+            weight = child.ds[weight_name].transpose(*transaction["dimensions"])
+            write_data_variable_region(
+                transaction["store"],
+                group_path=name,
+                variable_name="WEIGHT_IMAGING",
+                selection=weight_region_selection(child.ds, transaction),
+                data=weight.values,
+                transaction=transaction,
+            )
+        return
 
     root = zarr.open_group(image_store, mode="r+", use_consolidated=False)
     if _CONTINUUM_WEIGHT_CACHE_GROUP not in root:
@@ -272,11 +297,43 @@ def _load_continuum_weights_in_place(
     ps_xdt,
     image_store,
     processing_set_data_group_name,
+    persisted_imaging_weights=None,
 ):
     """Load only this task's imaging-weight partition from the output cache."""
     import numpy as np
     import xarray as xr
     import zarr
+
+    if persisted_imaging_weights:
+        from xradio import read_data_variable_region
+
+        from astroviper.utils.imaging_weight_persistence import weight_region_selection
+
+        weights = {}
+        for name, child in ps_xdt.items():
+            transaction = persisted_imaging_weights[name]
+            dims = transaction["dimensions"]
+            values = read_data_variable_region(
+                transaction["store"],
+                group_path=name,
+                variable_name="WEIGHT_IMAGING",
+                selection=weight_region_selection(child.ds, transaction),
+                transaction=transaction,
+            )
+            weights[name] = xr.Dataset(
+                {
+                    "WEIGHT_IMAGING": xr.DataArray(
+                        values, dims=dims, coords={dim: child.ds[dim] for dim in dims}
+                    )
+                },
+                attrs={"weight_imaging_name": "WEIGHT_IMAGING"},
+            )
+        return _attach_imaging_weights_continuum(
+            ps_xdt,
+            weights,
+            processing_set_data_group_name=processing_set_data_group_name,
+            weight_imaging_name="WEIGHT_IMAGING",
+        )
 
     root = zarr.open_group(image_store, mode="r", use_consolidated=False)
     if _CONTINUUM_WEIGHT_CACHE_GROUP not in root:
@@ -1108,6 +1165,7 @@ def residual_update_continuum_single_field(
     image_data_variables_keep=None,
     memory_mode="in_memory",
     weight_memory_mode="in_place",
+    persisted_imaging_weights=None,
     visibility_memory_mode="recompute",
     wideband_primary_beam_memory_mode="recompute",
     io_engine="chunk",
@@ -1295,17 +1353,15 @@ def residual_update_continuum_single_field(
         Currently only ``"in_memory"`` is supported.
 
     weight_memory_mode : {"in_memory", "in_place"}, optional
-        Storage policy for calculated continuum imaging weights.
-        ``"in_memory"``
-        returns task-local weights to the driver and embeds them in subsequent
-        graphs. ``"in_place"`` writes each task's weights into a temporary group
-        in the output image store and reloads only the required partition during
-        each imaging cycle. It is the default because it bounds scheduler and
-        worker memory without modifying the input Processing Set. The temporary
-        group is removed when the run ends, also after an error. A completed cache
-        is copied into the input only when ``write_imaging_weights_to_ps=True``.
-        This option remains separate from ``memory_mode`` for now; the policies
-        may be unified later.
+        Storage policy for calculated continuum imaging weights. ``"in_memory"``
+        returns task-local weights for subsequent graphs. ``"in_place"`` writes
+        partitions into a disposable output-store cache by default. With
+        ``write_imaging_weights_to_ps=True``, XRADIO preallocates unregistered
+        Processing Set targets instead; tasks write and reload their own regions
+        there. Only after all tasks succeed does XRADIO register ``WEIGHT_IMAGING``
+        with provenance and consolidate metadata. Failed runs remove their staging
+        variables. Existing persisted weights are protected and require explicit
+        removal before replacement. No completed full-array cache is copied.
 
     visibility_memory_mode : {"in_memory", "in_place", "recompute"}, optional
         Continuum residual-update storage policy for observed visibility grids.
@@ -1317,13 +1373,12 @@ def residual_update_continuum_single_field(
         cycle. MFS caches the globally reduced Taylor UV grid; MVC caches each
         map task's exclusively owned frequency-resolved UV planes.
 
-    wideband_primary_beam_memory_mode : {"in_memory", "in_place", "recompute"}, optional
-        MVC-only storage policy for the frequency-dependent primary beam.
-        ``"in_place"`` stores it temporarily in the image Zarr store and reads
-        only task-local channels. The default ``"recompute"`` regenerates the
-        analytic beam inside every later map, and ``"in_memory"`` retains it at
-        the driver but passes each map only its local beam. The setting is ignored
-        for MFS.
+    wideband_primary_beam_memory_mode : {"recompute"}, optional
+        Must be ``"recompute"``. Continuum imaging regenerates frequency-dependent
+        channel beams for each residual update and retains only the fitted
+        ``PRIMARY_BEAM`` polynomial in public outputs. MVC also retains its
+        frequency-independent ``COMMON_PRIMARY_BEAM``. Channel-beam cache policies
+        are disabled.
 
     io_engine : {"chunk", "xradio"}, optional
         I/O engine of the node tasks. ``"chunk"`` reads and writes Zarr chunk
@@ -1591,6 +1646,7 @@ def residual_update_continuum_single_field(
             ps_xdt,
             image_store,
             processing_set_data_group_name,
+            persisted_imaging_weights,
         )
 
     elif is_first_cycle and not weight_cache_is_active:
@@ -1810,7 +1866,9 @@ def residual_update_continuum_single_field(
 
         if weight_memory_mode == "in_place":
             start = time.time()
-            _write_continuum_weights_in_place(ps_xdt, image_store, io_engine)
+            _write_continuum_weights_in_place(
+                ps_xdt, image_store, io_engine, persisted_imaging_weights
+            )
             T_write_imaging_weights = time.time() - start
             return_weight_datasets = {}
 
@@ -2225,6 +2283,7 @@ def degrid_imaging_weights_continuum_node(
     instrument_polarization_basis="linear",
     processing_function_threads=1,
     weight_memory_mode="in_place",
+    persisted_imaging_weights=None,
     io_engine="chunk",
     data_group=None,
     input_data=None,
@@ -2308,17 +2367,15 @@ def degrid_imaging_weights_continuum_node(
         Number of threads handed to the per-processing-function (C++ / FFT)
         kernels.
     weight_memory_mode : {"in_memory", "in_place"}, optional
-        Storage policy for calculated continuum imaging weights.
-        ``"in_memory"``
-        returns task-local weights to the driver and embeds them in subsequent
-        graphs. ``"in_place"`` writes each task's weights into a temporary group
-        in the output image store and reloads only the required partition during
-        each imaging cycle. It is the default because it bounds scheduler and
-        worker memory without modifying the input Processing Set. The temporary
-        group is removed when the run ends, also after an error. A completed cache
-        is copied into the input only when ``write_imaging_weights_to_ps=True``.
-        This option remains separate from ``memory_mode`` for now; the policies
-        may be unified later.
+        Storage policy for calculated continuum imaging weights. ``"in_memory"``
+        returns task-local weights for subsequent graphs. ``"in_place"`` writes
+        partitions into a disposable output-store cache by default. With
+        ``write_imaging_weights_to_ps=True``, XRADIO preallocates unregistered
+        Processing Set targets instead; tasks write and reload their own regions
+        there. Only after all tasks succeed does XRADIO register ``WEIGHT_IMAGING``
+        with provenance and consolidate metadata. Failed runs remove their staging
+        variables. Existing persisted weights are protected and require explicit
+        removal before replacement. No completed full-array cache is copied.
     io_engine : {"chunk", "xradio"}, optional
         I/O engine of the node tasks. ``"chunk"`` reads and writes Zarr chunk
         blobs (and FITS data blocks) directly by byte offset
@@ -2538,7 +2595,9 @@ def degrid_imaging_weights_continuum_node(
 
     if weight_memory_mode == "in_place":
         start = time.time()
-        _write_continuum_weights_in_place(ps_xdt, image_store, io_engine)
+        _write_continuum_weights_in_place(
+            ps_xdt, image_store, io_engine, persisted_imaging_weights
+        )
         T_write_imaging_weights = time.time() - start
         weight_datasets = {}
 
@@ -3905,14 +3964,30 @@ def continuum_finalize_node(
 
     T_primary_beam_taylor = time.time() - beam_fit_start
 
-    # restore
+    from astroviper.processing_functions.imaging.finalize_image import (
+        finalize_image_products,
+        public_continuum_layout,
+    )
+
+    img_xds = finalize_image_products(
+        img_xds,
+        continuum_mode=input_params.get("continuum_mode", "mfs"),
+        deconvolver=input_params.get("deconvolver", "hogbom"),
+        primary_beam_limit=input_params.get("primary_beam_limit", 0.2),
+        image_data_group_in_residual_name=input_params.get(
+            "image_data_group_in_name", "residual"
+        ),
+    )
+    # Restoration remains optional; public model/residual finalization does not.
     if input_params.get("restore", False):
         from astroviper.processing_functions.imaging.image_continuum_single_field import (
             restore_continuum_image,
         )
 
         continuum_mode = input_params.get("continuum_mode", "mfs")
-        restoration_output = input_params.get("restoration_output", "apparent")
+        restoration_output = input_params.get(
+            "restoration_output", "primary_beam_corrected"
+        )
         img_xds, restore_timing_df = restore_continuum_image(
             img_xds,
             image_data_group_in_residual_name=(
@@ -3940,12 +4015,18 @@ def continuum_finalize_node(
     else:
         input_data["timing_restore"] = None
 
+    img_xds.attrs["continuum_bandwidth"] = input_params.get(
+        "continuum_bandwidth", img_xds.attrs.get("continuum_bandwidth", 0.0)
+    )
+    if "public_frequency_attrs" in input_params:
+        img_xds.frequency.attrs = dict(input_params["public_frequency_attrs"])
+    img_xds = public_continuum_layout(img_xds)
     input_data["image"] = img_xds
     input_data.pop("static_xds", None)
 
     # Preserve the final accumulated model as a separate driver-visible
     # state object as well as installing it in the output image.
-    input_data["model_xds"] = model_xds
+    input_data["model_xds"] = img_xds[["SKY_MODEL"]]
 
     finalization_timing = pd.DataFrame(
         {
