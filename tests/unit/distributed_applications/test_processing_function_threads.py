@@ -131,7 +131,7 @@ FFTW_FFT2 = "fft.fft2[pyfftw]"
 GRIDDED_IMAGING = {AA_GRID, AA_UV_SAMPLING, AA_DEGRID, FFTW_IFFT2, FFTW_FFT2}
 RESTORE = {"fft.rfft2[pyfftw]", "fft.ifft[pyfftw]", "fft.irfft[pyfftw]"}
 MASK_FFTS = {"fft.rfft2[pyfftw]", "fft.irfft2[pyfftw]", "fft.set_workers[pyfftw]"}
-SPATIAL_HESSIAN = {"fft.rfft2[numpy]"}
+SPATIAL_HESSIAN = {"fft.rfft2[pyfftw]"}
 MTMFS = {"mtmfs.clean", "mtmfs.hessian"}
 VISIBILITY_KERNEL = "visibility_kernel_cpp.calculate_visibilities"
 # The entry points each run reaches, and no others; R6's report runs the

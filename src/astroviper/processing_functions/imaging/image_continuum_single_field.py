@@ -3921,8 +3921,9 @@ def model_update_mtmfs_single_field(
     hessian_cache : mutable mapping or None, optional
         Workflow-owned mutable cache for content-verified PSF/Hessian diagnostics.
         Reuse requires matching PSF contents, coordinates, precision, Taylor basis,
-        geometry, scales, scale bias, and cell sampling. Changing-product checks
-        always run. None disables reuse; input_checked does not control this cache.
+        geometry, scales, scale bias, cell sampling and FFT library (fft_backend).
+        Changing-product checks always run. None disables reuse; input_checked does
+        not control this cache.
 
     Returns
     -------

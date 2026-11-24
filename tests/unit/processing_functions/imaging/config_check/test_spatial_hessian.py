@@ -1,5 +1,6 @@
 """Full PSF convolution blocks retain interactions between delta components."""
 
+import importlib
 import json
 
 import numpy as np
@@ -73,6 +74,31 @@ def test_fourier_blocks_match_explicit_spatial_delta_component_matrix():
     # Its largest mode amplification agrees with the spectral norm here.
     expected_max = 1 / np.sqrt(1 - 0.5**2)
     assert result["max_order_zero_noise_amplification"] == pytest.approx(expected_max)
+
+
+@pytest.mark.parametrize("fft_backend", [None, "numpy", "scipy", "pyfftw"])
+def test_model_product_checker_hands_its_fft_backend_to_the_spatial_check(
+    monkeypatch, diagnostic_warnings, fft_backend
+):
+    """The model product checker hands the configuration's fft_backend, "numpy"
+    without one, to the spatial check, whose rfft2 calls run on one thread."""
+    fft = importlib.import_module("astroviper.processing_functions.fft")
+    calls = []
+    real = fft.rfft2
+
+    def spy(*args, **kwargs):
+        calls.append((kwargs["fft_backend"], kwargs["processing_function_threads"]))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(fft, "rfft2", spy)
+    image = make_runaway_taylor_image()
+    image.POINT_SPREAD_FUNCTION.values[0, :, 0] = coupled_psfs(size=32)
+    config = {"deconvolver": "mtmfs"}
+    if fft_backend is not None:
+        config["fft_backend"] = fft_backend
+    with diagnostic_warnings(match="Spatial Taylor-Hessian diagnostic"):
+        check_model_products(image, config, mode=CONTINUUM_SINGLE_FIELD)
+    assert calls and set(calls) == {(fft_backend or "numpy", 1)}
 
 
 def test_model_product_checker_retains_spatial_diagnostics_and_local_guards(

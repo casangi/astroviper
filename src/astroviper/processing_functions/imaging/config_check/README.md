@@ -519,8 +519,9 @@ Dimension/basis/precision, model, mask and derived-control checks always run;
 
 Expensive PSF/Hessian diagnostics may reuse an explicit workflow-owned
 `hessian_cache`. A content digest and coordinate labels identify the actual PSF;
-Taylor count, precision, image geometry, reference frequency, scales, scale bias
-and cell sampling also participate in the key. Changed inputs force fresh
+Taylor count, precision, image geometry, reference frequency, scales, scale bias,
+cell sampling and the FFT library of the spatial diagnostics (`fft_backend`) also
+participate in the key. Changed inputs force fresh
 checks, including in-place PSF edits and replacement products after worker
 transfer. A linear PSF read avoids repeating scale convolutions and spatial
 Fourier diagnostics. Only successful checks populate the cache. Cached

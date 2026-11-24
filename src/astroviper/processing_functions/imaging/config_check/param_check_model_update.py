@@ -817,7 +817,9 @@ def check_model_products(
     img_xds : xarray.Dataset
         Image products; validation never changes their arrays or configuration.
     config : mapping
-        Deconvolver, image parameters, and cycle/deconvolution controls.
+        Deconvolver, image parameters, cycle/deconvolution controls and the FFT
+        library of the spatial Hessian diagnostics (``fft_backend``, ``"numpy"``
+        without one).
     mode : ImagingMode
         Imaging kind and field layout.
     image_data_group_in_name, image_data_group_out_name : str
@@ -826,8 +828,9 @@ def check_model_products(
     hessian_cache : mutable mapping or None, optional
         Workflow-owned mutable cache for content-verified PSF/Hessian diagnostics.
         Reuse requires matching PSF contents, coordinates, precision, Taylor basis,
-        geometry, scales, scale bias, and cell sampling. Changing-product checks
-        always run. None disables reuse; input_checked does not control this cache.
+        geometry, scales, scale bias, cell sampling and FFT library (fft_backend).
+        Changing-product checks always run. None disables reuse; input_checked does
+        not control this cache.
 
     Returns
     -------
@@ -1123,6 +1126,7 @@ def check_model_products(
     from astroviper.processing_functions.imaging.model_update.deconvolvers import mtmfs
 
     psf_values = psf.transpose(*psf_dims).values
+    fft_backend = config.get("fft_backend", "numpy")
     hessian_fields = (
         "taylor_hessian_condition_number",
         "taylor_hessian_order_zero_noise_amplification",
@@ -1145,6 +1149,7 @@ def check_model_products(
             diagnostics,
             small_scale_bias=controls.get("small_scale_bias", 0.0),
             cell_size=config.get("image_params", {}).get("cell_size"),
+            fft_backend=fft_backend,
         )
         if hessian_cache.get("key") == cache_key:
             # Only static diagnostics are reused. All changing-product checks
@@ -1283,6 +1288,7 @@ def check_model_products(
                     "time_index": time_index,
                     "polarization_index": polarization_index,
                 },
+                fft_backend=fft_backend,
             )
             diagnostics["taylor_hessian_spatial_blocks"].append(
                 {
