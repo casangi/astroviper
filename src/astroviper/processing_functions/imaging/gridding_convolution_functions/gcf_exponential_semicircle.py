@@ -134,11 +134,11 @@ def aliasing_error(transform, x, n_alias=10):
 ALIASING_ERROR_FLOOR = 1e-12
 
 
-def _max_aliasing_error(params, support, x):
-    beta, mu = params
+def _max_aliasing_error(kernel_transform, params, support, x):
+    p1, p2 = params
 
     def transform(pos):
-        return exponential_semicircle_transform(pos, support, beta, mu)
+        return kernel_transform(pos, support, p1, p2)
 
     return float(np.max(aliasing_error(transform, x)))
 
@@ -185,7 +185,12 @@ def _optimize_exponential_semicircle(support, x0, n_x):
         if not (0.1 <= beta <= 6.0 and 0.25 <= mu <= 1.0):
             return np.log(10.0)
         return np.log(
-            max(_max_aliasing_error(params, support, x), ALIASING_ERROR_FLOOR)
+            max(
+                _max_aliasing_error(
+                    exponential_semicircle_transform, params, support, x
+                ),
+                ALIASING_ERROR_FLOOR,
+            )
         )
 
     coarse_x = np.linspace(0.0, x0, 17)
@@ -205,7 +210,10 @@ def _optimize_exponential_semicircle(support, x0, n_x):
     )
     beta, mu = (float(v) for v in result.x)
     x = np.linspace(0.0, x0, int(n_x))
-    error = max(_max_aliasing_error((beta, mu), support, x), ALIASING_ERROR_FLOOR)
+    error = max(
+        _max_aliasing_error(exponential_semicircle_transform, (beta, mu), support, x),
+        ALIASING_ERROR_FLOOR,
+    )
     return beta, mu, float(error)
 
 
@@ -276,7 +284,10 @@ def exponential_semicircle_parameters(support, x0):
         beta, mu, _ = optimize_exponential_semicircle(support, float(x0))
         beta, mu = round(beta, 4), round(mu, 4)
     x = np.linspace(0.0, x0, 129)
-    error = max(_max_aliasing_error((beta, mu), support, x), ALIASING_ERROR_FLOOR)
+    error = max(
+        _max_aliasing_error(exponential_semicircle_transform, (beta, mu), support, x),
+        ALIASING_ERROR_FLOOR,
+    )
     return beta, mu, float(error)
 
 
