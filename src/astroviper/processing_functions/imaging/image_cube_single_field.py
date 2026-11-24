@@ -1244,6 +1244,7 @@ def image_cube_single_field(
                 planes_stopped=auto_mask_planes_stopped,
                 threshold_reached=threshold_reached,
                 processing_function_threads=processing_function_threads,
+                fft_backend=fft_backend,
                 input_checked=True,
             )
             timing["T_auto_mask"] += time.time() - start

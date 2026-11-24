@@ -664,6 +664,20 @@ class TestFftBackend:
         restore = {name for caller, name, _ in seen if caller == "restore"}
         assert restore == {"rfft2", "ifft", "irfft"}
 
+    @pytest.mark.parametrize("fft_backend", ["numpy", "scipy", "pyfftw"])
+    def test_the_automatic_mask(self, monkeypatch, fft_backend):
+        """Every call of FUNCTIONS in a run with the automatic mask carries
+        the processing function's fft_backend; their callers are the
+        gridder normalization and the mask."""
+        seen = self.backends(monkeypatch, fft_backend, auto_mask_params={})
+        assert {backend for _, _, backend in seen} == {fft_backend}
+        assert {caller for caller, _, _ in seen} == {
+            "normalize_image",
+            "make_auto_mask",
+        }
+        mask = {name for caller, name, _ in seen if caller == "make_auto_mask"}
+        assert mask == {"set_workers", "rfft2", "irfft2"}
+
 
 class TestAutoMaskFlag:
     """The loop works threshold_reached out from its own threshold_per_cycle."""

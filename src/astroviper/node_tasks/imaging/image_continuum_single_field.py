@@ -3713,6 +3713,7 @@ def continuum_cycle_append_node(
             ),
             image_data_group_in_name=image_data_group_name,
             image_data_group_out_name=image_data_group_name,
+            fft_backend=input_params.get("fft_backend", "pyfftw"),
             input_checked=True,
         )
         T_auto_mask = time.time() - start

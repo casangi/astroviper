@@ -676,6 +676,21 @@ def test_append_takes_threshold_reached_from_the_record(
     assert auto_mask_call["input_checked"] is True
 
 
+@pytest.mark.parametrize("fft_backend", [None, "numpy", "scipy", "pyfftw"])
+def test_append_hands_its_fft_backend_to_the_mask(auto_mask_call, fft_backend):
+    """The append node hands fft_backend to the mask, "pyfftw" without one."""
+    params = {
+        "is_first_cycle": True,
+        "auto_mask_params": {},
+        "cycle_control_params": {"threshold": 0.1},
+    }
+    if fft_backend is not None:
+        params["fft_backend"] = fft_backend
+    continuum_node.continuum_cycle_append_node({"image": xr.Dataset()}, params)
+
+    assert auto_mask_call["fft_backend"] == (fft_backend or "pyfftw")
+
+
 def test_append_has_no_threshold_reached_for_the_first_mask(auto_mask_call):
     continuum_node.continuum_cycle_append_node(
         {"image": xr.Dataset()},
