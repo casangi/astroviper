@@ -184,6 +184,20 @@ permits validation only: graph construction, scheduling, and execution remain
 in `distributed_applications/`; input/output data I/O remains outside the
 validation module. Other processing functions retain the normal layer rules.
 
+**`parked/` package:**
+`src/astroviper/parked/` keeps old code for reference instead of deleting it;
+its README lists each parked module and where it came from (path and commit).
+The package is outside the four layers and is not tested or maintained:
+nothing outside it may import from it, and coverage leaves it out
+(`[tool.coverage.run]` in [`pyproject.toml`](pyproject.toml)).
+
+**Layer-rule test:**
+`tests/unit/test_layer_rule.py` checks every import statement of
+`src/astroviper`, parsed with `ast` without importing the package, and fails
+on an import from a higher layer and on an import from `parked/` by a module
+outside it. The only upward imports it accepts are four existing ones inside
+functions of `utils/`, which it lists; do not add another.
+
 ### Public API surface
 Each layer/subdomain re-exports its entry points via `__init__.py`. The imaging
 entry point is exposed at all three layers as `image_cube_single_field`, the
@@ -646,6 +660,14 @@ When applicable multiple instances of map-reduce can be done in a single distrib
   host's worker threads), at least 1, and 1 where these are not known (MPI, a scheduler not
   recognised). When a host's worker threads times the count exceed its CPUs, it logs one warning
   that lists every such host; it never refuses a count.
+  `tests/unit/distributed_applications/test_processing_function_threads.py` runs each
+  application that takes the count and tests that the count reaches each C++ kernel and
+  Python FFT that takes one and that its runs call (every C++ kernel with a count but
+  Asp's plane `clean`, which no application calls), and that `0` is resolved; it tests the
+  warning with one application. List a new extension module there, and a new binding that
+  takes the count, with a run that reaches it.
+  `tests/unit/processing_functions/test_kernel_thread_counts.py` fails on a kernel source,
+  other than the vendored pocketfft, that names `hardware_concurrency`.
 
 ### Why this design (do not regress it)
 GraphVIPER deliberately **loads data inside compute nodes** rather than as
@@ -761,6 +783,9 @@ per-variable nodes.
   key is the function name. JSON schemas check basic structure, types, and
   allowed strings; numerical bounds and conditional relationships belong in
   Python.
+  A schema runs only at the distributed application it decorates; the validators
+  of `processing_functions/imaging/config_check/` can also run below it (next
+  bullet), so an allowed-value list may be in both: change both together.
   - **Validate at every callable layer:** distributed applications, node tasks,
     and processing functions validate direct calls by default. Imaging entry
     points use keyword-only `input_checked=False`. Import and call the applicable
@@ -797,6 +822,9 @@ per-variable nodes.
 ## 9. Do / Don't (gotchas)
 
 **Do**
+- Look for an existing implementation before writing a new one, in AstroVIPER
+  (for C++, `processing_functions/include/`), XRADIO, ToolVIPER and GraphVIPER,
+  and use it instead of writing another.
 - Mirror existing patterns in `processing_functions/imaging/` for any new
   science function (data-group in/out resolution → compute in place → register
   group → return stats/timings).
