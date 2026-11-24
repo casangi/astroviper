@@ -1,8 +1,8 @@
 """Python wrapper of the multithreaded C++ visibility kernel.
 
 Mirrors :func:`astroviper.processing_functions.simulation.calculate_visibilities`
-(NumPy implementation): the per-(time, source) rotation vectors are computed
-here in NumPy (cheap, ``n_time * n_source`` 3x3 products) and the heavy
+(NumPy implementation): the per-(time, source) rotation vectors are the NumPy
+implementation's (cheap, ``n_time * n_source`` 3x3 products) and the heavy
 ``time x baseline x source x frequency`` loop runs in C++ with the GIL released.
 """
 
@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import numpy as np
 
-from astroviper.utils.coordinate_transforms import calculate_uvw_rotation
+from astroviper.processing_functions.simulation.calculate_visibilities import (
+    _rotation_vectors,
+)
 
 
 def cpp_kernel_available() -> bool:
@@ -85,21 +87,8 @@ def calculate_visibilities_cpp(
     mueller_selection = np.ascontiguousarray(mueller_selection, dtype=np.int64)
 
     n_time, n_baseline, _ = uvw.shape
-    n_source = source_ra_dec.shape[1]
-    f_pc_time = n_time if phase_center.shape[0] == 1 else 1
-    f_src_time = n_time if source_ra_dec.shape[0] == 1 else 1
-
-    # rotation vectors k = R @ lmn_rot and 1/n per (time, source)
-    k_vector = np.empty((n_time, n_source, 3), dtype=np.float64)
-    inverse_n = np.empty((n_time, n_source), dtype=np.float64)
-    for i_time in range(n_time):
-        pc = phase_center[i_time // f_pc_time]
-        for i_source in range(n_source):
-            rotation, lmn_rot = calculate_uvw_rotation(
-                pc, source_ra_dec[i_time // f_src_time, i_source]
-            )
-            k_vector[i_time, i_source] = rotation @ lmn_rot
-            inverse_n[i_time, i_source] = 1.0 / (1.0 - lmn_rot[2])
+    k_vector, n = _rotation_vectors(phase_center, source_ra_dec, n_time)
+    inverse_n = 1.0 / n
 
     if pointing_ra_dec is None:
         pointing = np.ascontiguousarray(

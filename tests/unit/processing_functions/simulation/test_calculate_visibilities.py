@@ -482,7 +482,7 @@ def test_cpp_kernel_phase_is_that_of_the_direct_fourier_transform(uvw_factor):
         np.array([0, 5, 10, 15]), implementation="cpp",
     )[..., 0]  # fmt: skip
     rotation, lmn_rot = calculate_uvw_rotation(pc, src)
-    k = rotation @ lmn_rot  # as calculate_visibilities_cpp forms it
+    k = rotation @ lmn_rot  # as _rotation_vectors forms it
     path = uvw[..., 0] * k[0] + uvw[..., 1] * k[1] + uvw[..., 2] * k[2]
     turns = path[..., None] * (f["frequency"] / SPEED_OF_LIGHT)
     cos, sin = cos_sin_turns(turns.ravel())
