@@ -967,11 +967,8 @@ def test_weight_degrid_node_writes_in_place_and_returns_no_array_cache(monkeypat
     monkeypatch.setattr(
         continuum_node,
         "_write_continuum_weights_in_place",
-        lambda ps_xdt,
-        ps_store,
-        io_engine,
-        persisted_imaging_weights=None: written.update(
-            processing_set=ps_xdt, store=ps_store
+        lambda ps_xdt, ps_store, io_engine, persisted_imaging_weights=None: (
+            written.update(processing_set=ps_xdt, store=ps_store)
         ),
     )
     params = _weight_node_params()
@@ -2455,11 +2452,7 @@ def test_plain_step_planes_follow_the_residual_the_model_update_ends_with(
     monkeypatch.setattr(
         continuum_node,
         "_prepare_post_update_continuum_model_state",
-        lambda model_update_xds,
-        input_params,
-        previous_model_xds=None,
-        *,
-        input_checked: (
+        lambda model_update_xds, input_params, previous_model_xds=None, *, input_checked: (
             xr.Dataset(),
             None,
         ),
