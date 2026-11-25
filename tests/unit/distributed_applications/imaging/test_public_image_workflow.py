@@ -121,6 +121,25 @@ def test_off_axis_workflow_public_outputs(
     )
     finalize = finalizer.finalize_image_products
     captured = []
+    restored_groups = []
+    restore_image = finalizer.restore_finalized_image
+
+    def record_restoration(*args, **kwargs):
+        result, timing = restore_image(*args, **kwargs)
+        restored_groups.append(
+            {
+                name: {
+                    role: value
+                    for role, value in group.items()
+                    if role not in ("date", "description")
+                }
+                for name, group in result.attrs["data_groups"].items()
+                if name in ("restored", "primary_beam_corrected_restored")
+            }
+        )
+        return result, timing
+
+    monkeypatch.setattr(finalizer, "restore_finalized_image", record_restoration)
 
     def record(*args, **kwargs):
         captured.append(kwargs["apparent_inputs"])
@@ -149,6 +168,42 @@ def test_off_axis_workflow_public_outputs(
     assert image.SKY_MODEL.attrs["sky_convention"] == "flat_sky"
     assert image.SKY_RESIDUAL.attrs["residual_representation"] == "coefficient_space"
     assert all(name not in image for name in ("ALPHA", "ALPHA_ERROR", "BETA"))
+    saved_groups = {
+        name: {
+            role: value
+            for role, value in group.items()
+            if role not in ("date", "description")
+        }
+        for name, group in image.attrs["data_groups"].items()
+        if name in ("restored", "primary_beam_corrected_restored")
+    }
+    if restore:
+        assert restored_groups
+        retained_groups = [
+            {
+                name: {role: value for role, value in group.items() if value in image}
+                for name, group in groups.items()
+            }
+            for groups in restored_groups
+        ]
+        assert all(groups == saved_groups for groups in retained_groups)
+        expected_sky = (
+            "SKY_PRIMARY_BEAM_CORRECTED_RESTORED"
+            if output == "primary_beam_corrected"
+            else "SKY_RESTORED"
+        )
+        assert saved_groups["restored"]["sky"] == expected_sky
+        assert ("primary_beam_corrected_restored" in saved_groups) == (output == "both")
+        from astroviper.processing_functions.image_analysis.image_statistics import (
+            get_image_masksum,
+        )
+
+        assert (
+            get_image_masksum(image, "restored").shape == image[expected_sky].shape[:3]
+        )
+    else:
+        assert not saved_groups
+        assert not restored_groups
     for name in ("SKY_RESTORED", "SKY_PRIMARY_BEAM_CORRECTED_RESTORED"):
         requested = output == "both" or output == (
             "apparent" if name == "SKY_RESTORED" else "primary_beam_corrected"

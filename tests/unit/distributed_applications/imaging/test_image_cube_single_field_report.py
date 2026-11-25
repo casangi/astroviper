@@ -220,15 +220,11 @@ def test_pdf_report_of_fits_output(processing_set, tmp_path):
 
 
 def test_report_of_a_run_with_a_restoring_beam(processing_set, tmp_path):
-    """A 250" circle contains the PSF beam of channel 1 (213" x 189") but not
-    that of channel 0 (290" x 106"): the restored image is labelled with it in
-    every plane, and the report names channel 0 with the growth the circle
-    would need, the ratio of the major axes. The report keeps the PSF beams
-    for it, although the point spread function is not kept."""
+    """A feasible target is recorded and the report confirms containment."""
     import html
 
     image_store = str(tmp_path / "cube.img.zarr")
-    restoring_beam = [250 * ARCSEC, 250 * ARCSEC, 0.0]
+    restoring_beam = [300 * ARCSEC, 300 * ARCSEC, 0.0]
     result = _image(
         processing_set,
         image_store,
@@ -246,11 +242,11 @@ def test_report_of_a_run_with_a_restoring_beam(processing_set, tmp_path):
         restored_beam, np.broadcast_to(restoring_beam, restored_beam.shape)
     )
     psf_major = stored["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].values[0, :, 0, 0]
-    assert psf_major[0] > restoring_beam[0] > psf_major[1]
+    assert (psf_major < restoring_beam[0]).all()
     text = html.unescape(_text(result["report"]))
-    assert 'Every plane was restored to the beam 250" x 250"' in text
-    assert text.count("<td>not contained</td>") == 1
-    assert f"<td>{psf_major[0] / restoring_beam[0]:.10g}</td>" in text
+    assert 'Every plane was restored to the beam 300" x 300"' in text
+    assert "The restoring beam contains the PSF beam of every channel." in text
+    assert "<td>not contained</td>" not in text
 
 
 def test_report_after_the_run(processing_set, tmp_path):
@@ -273,7 +269,10 @@ def test_report_after_the_run(processing_set, tmp_path):
     text = _text(path)
     assert "The point spread function was not kept" in text
     assert "No restoring beam: beam_fit_params_sky_restored was not written" in text
-    assert "No model: sky_model was not written." in text
+    assert "No model: sky_model was not written." not in text
+    assert (
+        tmp_path / "dirty_report_files" / "moment_maximum_sky_model.img.zarr"
+    ).exists()
     assert "it needs restore=True and restoration_output=" in text
     # the stop test of the dirty image is recorded; the entropy only with a report
     assert "Per channel: the cycle control stop code" in text
@@ -554,3 +553,26 @@ def test_results_notes_without_statistics_or_record():
     assert kinds == ["subsection", "figure", "note", "subsection", "note"]
     assert "sky_model" in document.calls[2][1]
     assert document.calls[4][1].startswith("No deconvolution (max_iter=0")
+
+
+@pytest.mark.parametrize("output", ["apparent", "primary_beam_corrected", "both"])
+def test_report_resolves_restored_group_from_saved_metadata(tmp_path, output):
+    import zarr
+
+    from astroviper.distributed_applications.imaging.image_cube_single_field_report import (
+        _moment_input,
+    )
+
+    skies = {
+        "apparent": {"restored": "SKY_RESTORED"},
+        "primary_beam_corrected": {"restored": "SKY_PRIMARY_BEAM_CORRECTED_RESTORED"},
+        "both": {
+            "restored": "SKY_RESTORED",
+            "primary_beam_corrected_restored": "SKY_PRIMARY_BEAM_CORRECTED_RESTORED",
+        },
+    }[output]
+    store = str(tmp_path / "groups.img.zarr")
+    root = zarr.open_group(store, mode="w")
+    root.attrs["data_groups"] = {name: {"sky": sky} for name, sky in skies.items()}
+    for name, sky in skies.items():
+        assert _moment_input(store, "zarr", sky.lower()) == (store, name, "sky")

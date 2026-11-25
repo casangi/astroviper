@@ -274,7 +274,9 @@ def image_data_groups_for_kept_variables(image_data_variables_keep):
         kept variables. The group layout mirrors what the processing
         functions register on the in-memory per-chunk image dataset
         (``residual`` / ``model`` / ``restored``); kept variables with no
-        data-group membership are skipped.
+        data-group membership are skipped. A sole restored image belongs to
+        ``restored``. With both restored products, the corrected image belongs
+        to ``primary_beam_corrected_restored`` instead.
     """
     registry = imaging_data_variables_and_dims_double_precision
     data_groups = {}
@@ -283,6 +285,11 @@ def image_data_groups_for_kept_variables(image_data_variables_keep):
         if membership is None:
             continue
         group_name, role = membership
+        if (
+            key == "sky_primary_beam_corrected_restored"
+            and "sky_restored" not in image_data_variables_keep
+        ):
+            group_name = "restored"
         data_groups.setdefault(group_name, {})[role] = registry[key]["name"]
     shared = {
         role: value

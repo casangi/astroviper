@@ -57,6 +57,43 @@ class TestImageDataGroupsForKeptVariables:
             }
         }
 
+    @pytest.mark.parametrize(
+        "keys,expected_skies",
+        [
+            (["sky_restored"], {"restored": "SKY_RESTORED"}),
+            (
+                ["sky_primary_beam_corrected_restored"],
+                {"restored": "SKY_PRIMARY_BEAM_CORRECTED_RESTORED"},
+            ),
+            (
+                ["sky_restored", "sky_primary_beam_corrected_restored"],
+                {
+                    "restored": "SKY_RESTORED",
+                    "primary_beam_corrected_restored": "SKY_PRIMARY_BEAM_CORRECTED_RESTORED",
+                },
+            ),
+        ],
+    )
+    @pytest.mark.parametrize("keep_beam", [False, True])
+    @pytest.mark.parametrize("reverse", [False, True])
+    def test_restored_groups_follow_selection_independently_of_keep_order(
+        self, keys, expected_skies, keep_beam, reverse
+    ):
+        kept = [*keys, "sky_model", "sky_residual", "primary_beam"]
+        if keep_beam:
+            kept.append("beam_fit_params_sky_restored")
+        if reverse:
+            kept.reverse()
+        original = list(kept)
+        groups = image_data_groups_for_kept_variables(kept)
+        assert set(groups) == {"model", "residual", *expected_skies}
+        for name, sky in expected_skies.items():
+            expected = {"sky": sky, "primary_beam": "PRIMARY_BEAM"}
+            if keep_beam:
+                expected["beam_fit_params_sky"] = "BEAM_FIT_PARAMS_SKY_RESTORED"
+            assert groups[name] == expected
+        assert kept == original
+
     def test_continuum_spectral_products_join_the_restored_group(self):
         """Alpha, its error, and beta have stable public registry roles."""
         groups = image_data_groups_for_kept_variables(["alpha", "alpha_error", "beta"])

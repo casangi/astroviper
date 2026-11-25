@@ -400,10 +400,16 @@ def _moment_input(image_store, output_image_format, key):
     of ``moments`` for the image variable ``key``."""
     if output_image_format == "fits":
         return os.path.join(image_store, key.upper() + ".fits"), "base", "sky"
-    from astroviper.utils.io import imaging_data_variable_data_group_roles
+    import zarr
 
-    group, role = imaging_data_variable_data_group_roles[key]
-    return image_store, group, role
+    from astroviper.utils.io import imaging_data_variables_and_dims_double_precision
+
+    variable = imaging_data_variables_and_dims_double_precision[key]["name"]
+    groups = zarr.open_group(image_store, mode="r").attrs.get("data_groups", {})
+    for group, roles in groups.items():
+        if roles.get("sky") == variable:
+            return image_store, group, "sky"
+    raise ValueError(f"No image data group registers {variable} as its sky")
 
 
 def _add_moment_maximum(
