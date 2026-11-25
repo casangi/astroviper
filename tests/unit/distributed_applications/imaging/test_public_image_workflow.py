@@ -247,8 +247,10 @@ def test_off_axis_workflow_public_outputs(
             )
 
 
+@pytest.mark.parametrize("mode", ["mfs", "mvc"])
+@pytest.mark.parametrize("weighting", ["natural", "uniform", "briggs"])
 def test_persisted_weights_are_written_directly_to_the_processing_set(
-    tmp_path, observation
+    tmp_path, observation, mode, weighting
 ):
     import shutil
 
@@ -256,11 +258,17 @@ def test_persisted_weights_are_written_directly_to_the_processing_set(
 
     store = str(tmp_path / "persistent.ps.zarr")
     shutil.copytree(observation, store)
-    arguments = workflow_arguments(tmp_path, store, "mfs", False)
+    arguments = workflow_arguments(tmp_path, store, mode, False)
+    weight_params = {"weighting": weighting}
+    if weighting != "natural":
+        weight_params["weighting_scope"] = "global"
+    if weighting == "briggs":
+        weight_params["robust"] = 0.5
+    arguments["imaging_weights_params"] = weight_params
     with dask.config.set(scheduler="synchronous"):
         applications.imaging.image_continuum_single_field(
             deconvolver="mtmfs",
-            continuum_mode="mfs",
+            continuum_mode=mode,
             write_imaging_weights_to_ps=True,
             **arguments,
         )
@@ -276,12 +284,35 @@ def test_persisted_weights_are_written_directly_to_the_processing_set(
             disk["WEIGHT_IMAGING"].attrs["provenance"]["imaging_weights_params"][
                 "weighting"
             ]
-            == "natural"
+            == weighting
         )
         assert disk["WEIGHT_IMAGING"].attrs["provenance"]["data_selection"]
         assert not any(key.startswith("_WEIGHT_IMAGING_") for key in disk.array_keys())
     image = zarr.open_group(arguments["image_store"], mode="r", use_consolidated=False)
     assert "_CONTINUUM_WEIGHT_CACHE" not in image
+
+    # The persistent cache must feed the same imaging weights back into each
+    # cycle as the independent in-memory global-weighting path.
+    baseline = dict(
+        arguments,
+        image_store=str(tmp_path / "baseline.img.zarr"),
+        ps_store=observation,
+        weight_memory_mode="in_memory",
+    )
+    with dask.config.set(scheduler="synchronous"):
+        applications.imaging.image_continuum_single_field(
+            deconvolver="mtmfs", continuum_mode=mode, **baseline
+        )
+    persisted_image = load_image(arguments["image_store"])
+    reference_image = load_image(baseline["image_store"])
+    for variable in ("SKY_MODEL", "SKY_RESIDUAL"):
+        np.testing.assert_allclose(
+            persisted_image[variable],
+            reference_image[variable],
+            rtol=1e-12,
+            atol=1e-14,
+            equal_nan=True,
+        )
 
 
 def test_failed_imaging_graph_does_not_publish_weights(
@@ -424,3 +455,92 @@ def test_impossible_target_stops_at_first_psf_fit(
                 deconvolver="mtmfs", continuum_mode=mode, **arguments
             )
     assert fits == [True]
+
+
+@pytest.mark.parametrize("mode", ["mfs", "mvc"])
+@pytest.mark.parametrize("weighting", ["uniform", "briggs"])
+@pytest.mark.parametrize("failure_stage", ["weight_write", "imaging"])
+def test_global_persistent_weight_failures_clean_staging_and_preserve_input(
+    tmp_path, observation, monkeypatch, mode, weighting, failure_stage
+):
+    import copy
+    import importlib
+    import shutil
+
+    import zarr
+
+    driver = importlib.import_module(
+        "astroviper.distributed_applications.imaging.image_continuum_single_field"
+    )
+    node = importlib.import_module(
+        "astroviper.node_tasks.imaging.image_continuum_single_field"
+    )
+    store = str(tmp_path / "failed-global.ps.zarr")
+    shutil.copytree(observation, store)
+    original = open_processing_set(store)
+    snapshots = {
+        name: {
+            "groups": copy.deepcopy(child.ds.attrs["data_groups"]),
+            "variables": set(child.ds.data_vars),
+            "weight": child.ds.WEIGHT.values.copy(),
+            "flag": child.ds.FLAG.values.copy(),
+        }
+        for name, child in original.items()
+    }
+    write = node._write_continuum_weights_in_place
+    writes = []
+
+    def record_write(ps_xdt, image_store, io_engine, persisted_imaging_weights=None):
+        assert persisted_imaging_weights
+        write(ps_xdt, image_store, io_engine, persisted_imaging_weights)
+        for name in ps_xdt:
+            transaction = persisted_imaging_weights[name]
+            disk = zarr.open_group(store, path=name, mode="r", use_consolidated=False)
+            staged = disk[transaction["staging_name"]]
+            assert np.isfinite(staged[:]).any()
+            assert staged.attrs["xradio_incomplete"]
+            assert "weight_imaging" not in disk.attrs["data_groups"]["base"]
+        writes.append(True)
+        if failure_stage == "weight_write":
+            raise RuntimeError("injected failure after persistent weight write")
+
+    monkeypatch.setattr(node, "_write_continuum_weights_in_place", record_write)
+    if failure_stage == "imaging":
+
+        def failed_graph(**kwargs):
+            assert len(writes) > 1
+            raise RuntimeError("injected failure after global weighting")
+
+        monkeypatch.setattr(driver, "compute_continuum_graph", failed_graph)
+    arguments = workflow_arguments(tmp_path, store, mode, False)
+    arguments["imaging_weights_params"] = {
+        "weighting": weighting,
+        "weighting_scope": "global",
+    }
+    if weighting == "briggs":
+        arguments["imaging_weights_params"]["robust"] = 0.5
+    with (
+        dask.config.set(scheduler="synchronous"),
+        pytest.raises(RuntimeError, match="injected"),
+    ):
+        applications.imaging.image_continuum_single_field(
+            deconvolver="mtmfs",
+            continuum_mode=mode,
+            write_imaging_weights_to_ps=True,
+            **arguments,
+        )
+    assert writes
+    for name, child in open_processing_set(store).items():
+        before = snapshots[name]
+        assert child.ds.attrs["data_groups"] == before["groups"]
+        assert set(child.ds.data_vars) == before["variables"]
+        np.testing.assert_array_equal(child.ds.WEIGHT, before["weight"])
+        np.testing.assert_array_equal(child.ds.FLAG, before["flag"])
+        disk = zarr.open_group(store, path=name, mode="r", use_consolidated=False)
+        assert "WEIGHT_IMAGING" not in disk
+        assert not any(key.startswith("_WEIGHT_IMAGING_") for key in disk.array_keys())
+        from pathlib import Path
+
+        assert not (Path(store) / name / ".WEIGHT_IMAGING.lock").exists()
+    image = zarr.open_group(arguments["image_store"], mode="r", use_consolidated=False)
+    assert "_CONTINUUM_WEIGHT_CACHE" not in image

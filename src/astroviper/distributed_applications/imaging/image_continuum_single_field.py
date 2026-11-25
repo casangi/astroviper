@@ -3851,6 +3851,7 @@ def image_continuum_single_field(
             "instrument_polarization_basis": (instrument_polarization_basis),
             "processing_function_threads": (processing_function_threads),
             "weight_memory_mode": weight_memory_mode,
+            "persisted_imaging_weights": persisted_imaging_weights,
             "image_store": image_store,
             "data_group": input_params["data_group"],
             "io_engine": io_engine,
