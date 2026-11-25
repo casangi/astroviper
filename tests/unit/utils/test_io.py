@@ -525,3 +525,27 @@ def test_continuum_bandwidth_uses_selected_observation_channel_edges():
         1: {"data_selection": {"ms": {"frequency": [2]}}},
     }
     np.testing.assert_allclose(continuum_frequency_span(tree, mapping), 1.3e9)
+
+
+@pytest.mark.parametrize("missing", [0.0, float("nan")])
+def test_cube_beam_fill_uses_largest_fit_across_all_written_regions(tmp_path, missing):
+    import numpy as np
+    import zarr
+
+    from astroviper.utils.io import fill_zarr_restored_beams_without_fit
+
+    store = str(tmp_path / "assembled.img.zarr")
+    root = zarr.open_group(store, mode="w")
+    beams = root.create_array(
+        "BEAM_FIT_PARAMS_SKY_RESTORED", shape=(1, 3, 1, 3), dtype="f8"
+    )
+    # Different workers may finish in any order. A missing plane must wait
+    # for the largest fit, even when a smaller fit has already been written.
+    beams[:, :2] = [[[[3e-5, 2e-5, 0.0]], [[missing, missing, missing]]]]
+    beams[:, 2] = [[[6e-5, 4e-5, 0.2]]]
+    fill_zarr_restored_beams_without_fit(store)
+    actual = beams[:]
+    np.testing.assert_array_equal(actual[:, 0], [[[3e-5, 2e-5, 0.0]]])
+    np.testing.assert_array_equal(actual[:, 1], actual[:, 2])
+    fill_zarr_restored_beams_without_fit(store)
+    np.testing.assert_array_equal(beams[:], actual)

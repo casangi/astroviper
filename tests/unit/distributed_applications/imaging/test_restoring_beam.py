@@ -210,7 +210,7 @@ def test_fits_rows_without_a_fit_hold_the_tclean_beam(flagged_processing_set, tm
     """FITS output: after the run the BEAMS rows of the flagged channel hold the
     beam of largest area, channel 0's, in the restored image (the beams the
     restore applied, those of Stokes I) as in the residual image (the PSF
-    beams); the primary beam corrected image has no beam."""
+    beams); both restored conventions carry their restored-beam tables."""
     from astropy.io import fits
 
     image_store = tmp_path / "none_fits"
@@ -232,18 +232,18 @@ def test_fits_rows_without_a_fit_hold_the_tclean_beam(flagged_processing_set, tm
             io_engine="chunk",
             output_image_format="fits",
         )
-    for name in ("SKY_RESTORED", "SKY_RESIDUAL"):
+    for name in ("SKY_RESTORED", "SKY_PRIMARY_BEAM_CORRECTED_RESTORED", "SKY_RESIDUAL"):
         with fits.open(image_store / f"{name}.fits") as hdulist:
             beams = hdulist["BEAMS"].data
             rows = np.stack([beams[column] for column in ("BMAJ", "BMIN", "BPA")], -1)
         rows = rows.reshape(2, 2, 3)  # (channel, Stokes I and Q)
         assert np.all(rows[:, :, :2] > 0), name
         np.testing.assert_array_equal(rows[1], rows[0], err_msg=name)
-        if name == "SKY_RESTORED":
+        if name != "SKY_RESIDUAL":
             np.testing.assert_array_equal(rows[:, 1], rows[:, 0])
     with fits.open(image_store / "SKY_PRIMARY_BEAM_CORRECTED_RESTORED.fits") as hdulist:
-        assert len(hdulist) == 1
-        assert "CASAMBM" not in hdulist[0].header
+        assert len(hdulist) == 2
+        assert hdulist[0].header["CASAMBM"]
         assert "BMAJ" not in hdulist[0].header
 
 
@@ -422,3 +422,81 @@ def test_a_continuum_target_that_does_not_contain_the_psf_beam_is_refused_before
             restoring_beam=[ARCSEC, ARCSEC, 0.0],
         )
     assert [str(error) for error in refusals] == [str(refusal.value)]
+
+
+@pytest.fixture(scope="module")
+def entirely_flagged_processing_set(processing_set, tmp_path_factory):
+    import shutil
+
+    import zarr
+
+    store = tmp_path_factory.mktemp("entirely_flagged") / "point.ps.zarr"
+    shutil.copytree(processing_set, store)
+    for name in open_processing_set(str(store)):
+        zarr.open_array(f"{store}/{name}/FLAG", mode="r+")[:] = True
+    return str(store)
+
+
+@pytest.mark.parametrize("output_format", ["zarr", "fits"])
+@pytest.mark.parametrize("n_tasks", [1, 2])
+def test_entirely_empty_cube_gets_artificial_beam_only_after_assembly(
+    entirely_flagged_processing_set, tmp_path, monkeypatch, output_format, n_tasks
+):
+    from astroviper.processing_functions.imaging.restore import NO_FIT_BEAM
+
+    finalizer = importlib.import_module(
+        "astroviper.processing_functions.imaging.finalize_image"
+    )
+    restore = finalizer.restore_finalized_image
+    per_channel_beams = []
+
+    def record(*args, **kwargs):
+        result, timing = restore(*args, **kwargs)
+        per_channel_beams.append(result.BEAM_FIT_PARAMS_SKY_RESTORED.values.copy())
+        return result, timing
+
+    monkeypatch.setattr(finalizer, "restore_finalized_image", record)
+    store = tmp_path / ("empty.img.zarr" if output_format == "zarr" else "empty_fits")
+    with dask.config.set(scheduler="synchronous"):
+        image_cube_single_field(
+            ps_store=entirely_flagged_processing_set,
+            image_store=str(store),
+            image_params=_image_params(entirely_flagged_processing_set),
+            imaging_weights_params={"weighting": "natural"},
+            cycle_control_params={
+                **CYCLE_CONTROL_PARAMS,
+                "max_iter": 0,
+                "max_cycles": 0,
+            },
+            image_data_variables_keep=["beam_fit_params_point_spread_function"],
+            processing_set_data_group_name="base",
+            n_mapping_parallelism={"frequency": n_tasks},
+            restore=True,
+            restoration_output="both",
+            output_image_format=output_format,
+            io_engine="chunk",
+        )
+    assert len(per_channel_beams) == 2
+    assert all(not beam.any() for beam in per_channel_beams)
+    if output_format == "zarr":
+        image = xr.open_zarr(store).load()
+        np.testing.assert_array_equal(image.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION, 0.0)
+        beams = image.BEAM_FIT_PARAMS_SKY_RESTORED.values
+        np.testing.assert_array_equal(beams, np.broadcast_to(NO_FIT_BEAM, beams.shape))
+        assert not np.nan_to_num(image.SKY_MODEL.values).any()
+    else:
+        from astropy.io import fits
+
+        for name in (
+            "SKY_RESTORED",
+            "SKY_PRIMARY_BEAM_CORRECTED_RESTORED",
+            "SKY_RESIDUAL",
+        ):
+            with fits.open(store / f"{name}.fits") as hdus:
+                rows = hdus["BEAMS"].data
+                beams = np.stack(
+                    [rows[column] for column in ("BMAJ", "BMIN", "BPA")], -1
+                )
+            np.testing.assert_allclose(
+                beams, np.broadcast_to(NO_FIT_BEAM, beams.shape), rtol=1e-6
+            )

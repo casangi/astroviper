@@ -399,3 +399,37 @@ def test_invalid_target_preserves_public_products_and_temporary_inputs(
     xr.testing.assert_identical(finalized, original)
     if apparent_inputs is not None:
         assert all(apparent_inputs[key] is value for key, value in saved.items())
+
+
+@pytest.mark.parametrize("missing", [0.0, np.nan])
+@pytest.mark.parametrize("has_valid_fit", [False, True])
+def test_deferred_fallback_preserves_missing_beams_without_changing_pixels(
+    missing, has_valid_fit
+):
+    from astroviper.processing_functions.imaging.restore import NO_FIT_BEAM
+
+    image, _, _ = image_case(None)
+    image = xr.concat([image, image.assign_coords(frequency=[1.1e9])], dim="frequency")
+    image.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.values[...] = missing
+    if has_valid_fit:
+        image.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.values[:, 0] = [3e-5, 2e-5, 0.0]
+    finalized = finalize_image_products(image)
+    original = finalized.copy(deep=True)
+    deferred, _ = restore_finalized_image(
+        finalized, restoration_output="both", defer_beam_fallback=True
+    )
+    standalone, _ = restore_finalized_image(finalized, restoration_output="both")
+    np.testing.assert_equal(
+        deferred.BEAM_FIT_PARAMS_SKY_RESTORED.values,
+        image.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.values,
+    )
+    np.testing.assert_array_equal(
+        standalone.BEAM_FIT_PARAMS_SKY_RESTORED,
+        np.broadcast_to(
+            [3e-5, 2e-5, 0.0] if has_valid_fit else NO_FIT_BEAM,
+            standalone.BEAM_FIT_PARAMS_SKY_RESTORED.shape,
+        ),
+    )
+    for name in ("SKY_RESTORED", "SKY_PRIMARY_BEAM_CORRECTED_RESTORED"):
+        xr.testing.assert_identical(deferred[name], standalone[name])
+    xr.testing.assert_identical(finalized, original)

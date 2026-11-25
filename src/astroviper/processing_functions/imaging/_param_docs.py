@@ -1127,6 +1127,10 @@ IMAGING_PARAM_DOCS = {
         "Only requested restored products are allocated. Spectral diagnostics require\n"
         "the separate ``spectral_products`` analysis tool."
     ),
+    "defer_beam_fallback": (
+        "Preserve missing native beam markers until the full cube is assembled.\n"
+        "The caller must fill beam metadata after every channel has been written."
+    ),
     "restoring_beam": (
         "``None`` restores each plane with its own PSF fit [CASA ``tclean``\n"
         "``restoringbeam=''``]. ``[major, minor, pa]`` (FWHM and position angle\n"

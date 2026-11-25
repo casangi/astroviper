@@ -293,6 +293,7 @@ def restore_finalized_image(
     image_data_group_in_model_name="model",
     image_data_group_out_restore_name="restored",
     apparent_inputs=None,
+    defer_beam_fallback=False,
 ):
     """Restore requested public flat-sky and flat-noise products.
 
@@ -321,6 +322,9 @@ def restore_finalized_image(
         Temporary apparent inputs from finalize_image_products. Entries are
         consumed during restoration and are not retained in the result. When
         absent, apparent inputs are reconstructed on the valid flat-sky domain.
+    defer_beam_fallback : bool, optional
+        Preserve missing native beam markers for distributed cube assembly.
+        The driver must fill them after every channel has been written.
 
     Returns
     -------
@@ -426,11 +430,13 @@ def restore_finalized_image(
     if restoration_output in ("apparent", "both"):
         del apparent_model, apparent_residual
 
-    restored_beams = (
-        restoring_beam
-        if restoring_beam is not None
-        else fill_planes_without_fit(beam.values[:, :, :1], no_fit_beam=NO_FIT_BEAM)
-    )
+    restored_beams = beam.values[:, :, :1]
+    if restoring_beam is not None:
+        restored_beams = restoring_beam
+    elif not defer_beam_fallback:
+        restored_beams = fill_planes_without_fit(
+            restored_beams, no_fit_beam=NO_FIT_BEAM
+        )
     # Beam-fit parameters are frequency/reference-frequency quantities, not Taylor coefficients.
     beam_for_metadata = (
         beam.rename({param: "beam_params_label"})

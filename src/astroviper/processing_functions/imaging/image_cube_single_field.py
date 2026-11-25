@@ -544,6 +544,7 @@ def image_cube_single_field(
     task_id=0,
     *,
     input_checked: bool = False,
+    defer_beam_fallback=False,
 ):
     """Run the imaging cycle CLEAN loop for one single-field image chunk.
 
@@ -1063,6 +1064,10 @@ def image_cube_single_field(
         using an input_params dictionary, its input_checked entry also carries this
         flag. Set it only for an unchanged configuration in the same imaging mode.
 
+    defer_beam_fallback : bool, optional
+        Preserve missing native beam markers until the full cube is assembled.
+        The caller must fill beam metadata after every channel has been written.
+
     Returns
     -------
     img_xds : xarray.Dataset
@@ -1460,6 +1465,7 @@ def image_cube_single_field(
             apparent_inputs=apparent_inputs,
             restoration_output=restoration_output,
             restoring_beam=restoring_beam,
+            defer_beam_fallback=defer_beam_fallback,
         )
         accumulate_timing(timing, restore_return_df)
 

@@ -1489,6 +1489,7 @@ def image_cube_single_field(
             auto_mask_params=auto_mask_params,
             task_id=task_id,
             input_checked=True,
+            defer_beam_fallback=True,
         )
 
         start = time.time()
