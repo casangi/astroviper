@@ -207,6 +207,8 @@ def test_continuum_public_api_matches_shared_imaging_names_and_defaults():
     assert "continuum_mode" in parameters
     assert parameters["mvc_model_update_approximation"].default == "local_beam_moments"
     assert "wideband_primary_beam_memory_mode" in parameters
+    assert parameters["weight_memory_mode"].default == "in_place"
+    assert "write_imaging_weights_to_ps" not in parameters
 
 
 def test_continuum_image_for_disk_keeps_requested_products_without_copying_data():
@@ -751,7 +753,6 @@ def _run_tw_hydra_continuum(
     visibility_memory_mode="recompute",
     wideband_primary_beam_memory_mode="recompute",
     write_visibility_model_to_ps=False,
-    write_imaging_weights_to_ps=False,
     clear_cache=True,
     scheduler="synchronous",
     processing_set_data_group_name="base",
@@ -817,7 +818,6 @@ def _run_tw_hydra_continuum(
             wideband_primary_beam_memory_mode=wideband_primary_beam_memory_mode,
             cache_directory=cache_directory,
             write_visibility_model_to_ps=write_visibility_model_to_ps,
-            write_imaging_weights_to_ps=write_imaging_weights_to_ps,
             clear_cache=clear_cache,
             io_engine=io_engine,
             output_image_format=output_image_format,
@@ -1166,8 +1166,7 @@ def test_tw_hydra_in_place_weights_can_be_retained(tmp_path, tw_hydra_store):
         2,
         "mfs",
         {"weighting": "natural", "weighting_scope": "local"},
-        weight_memory_mode="in_place",
-        write_imaging_weights_to_ps=True,
+        weight_memory_mode="in_processing_set",
     )
 
     reopened = open_processing_set(str(in_place_store))
@@ -1246,12 +1245,9 @@ def test_tw_hydra_refused_deconvolvers_write_nothing(
         ),
         pytest.param(
             {"weighting": "natural", "weighting_scope": "local"},
-            {
-                "weight_memory_mode": "in_memory",
-                "write_imaging_weights_to_ps": True,
-            },
-            "requires weight_memory_mode='in_place'",
-            id="keep-weights-in-memory",
+            {"weight_memory_mode": "cache"},
+            "weight_memory_mode",
+            id="unsupported-weight-mode",
         ),
     ],
 )
@@ -1571,8 +1567,7 @@ def test_tw_hydra_rerun_calculates_its_own_weights(
             2,
             "mfs",
             briggs,
-            weight_memory_mode="in_place",
-            write_imaging_weights_to_ps=True,
+            weight_memory_mode="in_processing_set",
         )
         assert not np.array_equal(
             earlier.POINT_SPREAD_FUNCTION.values,

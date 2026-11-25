@@ -5,6 +5,7 @@ from copy import deepcopy
 import pytest
 
 from astroviper.processing_functions.imaging.config_check import (
+    CONTINUUM_SINGLE_FIELD,
     CUBE_SINGLE_FIELD,
     check_driver_workflow,
 )
@@ -37,6 +38,7 @@ def test_workflow_schema_rejected(options):
         {"io_engine": "xradio", "write_visibility_model_to_ps": True},
         {"io_engine": "chunk", "write_visibility_model_to_ps": True},
         {"io_engine": "chunk", "write_imaging_weights_to_ps": True},
+        {"io_engine": "chunk", "weight_memory_mode": "in_processing_set"},
     ],
 )
 def test_msv2_storage_restrictions(options):
@@ -251,3 +253,19 @@ def test_append_pair_accepts_absent_or_complete_arguments(node, params):
     )
 
     check_continuum_graph_arguments(node, params)
+
+
+@pytest.mark.parametrize("mode", ["in_memory", "in_place", "in_processing_set"])
+def test_continuum_weight_storage_modes(mode):
+    config = {"weight_memory_mode": mode}
+    check_driver_workflow(config, mode=CONTINUUM_SINGLE_FIELD)
+    assert config == {"weight_memory_mode": mode}
+
+
+@pytest.mark.parametrize("removed_value", [False, True])
+def test_continuum_rejects_removed_weight_persistence_flag(removed_value):
+    with pytest.raises(ValueError, match="removed.*weight_memory_mode"):
+        check_driver_workflow(
+            {"write_imaging_weights_to_ps": removed_value},
+            mode=CONTINUUM_SINGLE_FIELD,
+        )

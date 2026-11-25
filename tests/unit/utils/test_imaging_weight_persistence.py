@@ -124,3 +124,57 @@ def test_persistence_leaves_unselected_children_untouched(weight_store):
     handles = prepare_imaging_weights(tree, store, "base", mapping)
     assert set(handles) == {"ms"}
     discard_imaging_weights(handles)
+
+
+@pytest.mark.parametrize(
+    "node_name",
+    [
+        "residual_update_continuum_single_field",
+        "degrid_imaging_weights_continuum_node",
+    ],
+)
+@pytest.mark.parametrize(
+    "mode,targets",
+    [
+        ("in_processing_set", None),
+        ("in_processing_set", {}),
+        ("in_memory", {"ms": {"target": "staged"}}),
+        ("in_place", {"ms": {"target": "staged"}}),
+    ],
+)
+def test_nodes_reject_inconsistent_storage_targets_before_io(node_name, mode, targets):
+    import importlib
+    import inspect
+
+    module = importlib.import_module(
+        "astroviper.node_tasks.imaging.image_continuum_single_field"
+    )
+    node = getattr(module, node_name)
+    arguments = {
+        name: None
+        for name, parameter in inspect.signature(node).parameters.items()
+        if parameter.default is inspect.Parameter.empty
+    }
+    with pytest.raises(ValueError, match="weight_memory_mode"):
+        node(
+            **arguments,
+            input_checked=True,
+            weight_memory_mode=mode,
+            persisted_imaging_weights=targets,
+        )
+
+
+@pytest.mark.parametrize(
+    "mode,targets",
+    [
+        ("in_memory", None),
+        ("in_place", None),
+        ("in_memory", {}),
+        ("in_place", {}),
+        ("in_processing_set", {"ms": {"target": "staged"}}),
+    ],
+)
+def test_consistent_storage_targets(mode, targets):
+    from astroviper.utils.imaging_weight_persistence import check_weight_storage_targets
+
+    check_weight_storage_targets(mode, targets)

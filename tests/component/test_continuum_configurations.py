@@ -563,8 +563,7 @@ def test_hogbom_multi_term_rejection_precedes_every_write(
             restore=restore,
             continuum_mode=continuum_mode,
             processing_set_data_group_name="base",
-            weight_memory_mode="in_place",
-            write_imaging_weights_to_ps=True,
+            weight_memory_mode="in_processing_set",
             overwrite=True,
         )
     assert snapshot(store) == input_before

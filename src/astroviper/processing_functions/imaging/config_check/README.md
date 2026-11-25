@@ -583,3 +583,21 @@ Persisted continuum weights use the assumed XRADIO #661 staged region-I/O API.
 Tasks write directly into preallocated Processing Set targets, and read only
 their selected regions. XRADIO owns registration, history, provenance, consolidation,
 and cleanup. Without persistence, the disposable output-store cache remains in use.
+
+### Continuum imaging-weight storage
+
+`weight_memory_mode` is the single imaging-weight storage control:
+
+- `in_memory`: retain task-local weights in RAM between imaging cycles.
+- `in_place` (default): write a disposable cache in the image store and remove
+  it when the run ends.
+- `in_processing_set`: write task-local regions into staged Processing Set
+  arrays, then register and retain `WEIGHT_IMAGING` with provenance only after
+  imaging succeeds. Failed runs remove unpublished arrays and locks. Existing
+  persisted weights are protected; subsequent runs still calculate new weights.
+
+The former continuum `write_imaging_weights_to_ps` switch has been removed;
+configuration dictionaries containing it are rejected. Processing Set persistence
+is not available for read-only Measurement Set v2 input. Node tasks require
+matching staging descriptors for `in_processing_set`, even when configuration
+validation was skipped with `input_checked=True`.

@@ -1029,14 +1029,14 @@ IMAGING_PARAM_DOCS = {
     ),
     "weight_memory_mode": (
         'Storage policy for calculated continuum imaging weights. ``"in_memory"``\n'
-        'returns task-local weights for subsequent graphs. ``"in_place"`` writes\n'
-        "partitions into a disposable output-store cache by default. With\n"
-        "``write_imaging_weights_to_ps=True``, XRADIO preallocates unregistered\n"
-        "Processing Set targets instead; tasks write and reload their own regions\n"
-        "there. Only after all tasks succeed does XRADIO register ``WEIGHT_IMAGING``\n"
-        "with provenance and consolidate metadata. Failed runs remove their staging\n"
-        "variables. Existing persisted weights are protected and require explicit\n"
-        "removal before replacement. No completed full-array cache is copied."
+        'retains task-local weights in RAM for subsequent graphs. ``"in_place"``\n'
+        'uses a disposable output-store cache and is the default. ``"in_processing_set"``\n'
+        "writes and reloads task-local regions in staged Processing Set arrays.\n"
+        "Only after imaging succeeds are WEIGHT_IMAGING and its provenance registered\n"
+        "and retained in the input Processing Set; failed runs remove their staging\n"
+        "targets. Existing persisted weights are protected against replacement.\n"
+        "Every run calculates its own weights; retained weights are not reused\n"
+        "automatically. No completed full-array cache is copied."
     ),
     "visibility_memory_mode": (
         "Continuum residual-update storage policy for observed visibility grids.\n"

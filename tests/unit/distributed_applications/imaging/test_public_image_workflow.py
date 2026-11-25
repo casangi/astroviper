@@ -249,8 +249,9 @@ def test_off_axis_workflow_public_outputs(
 
 @pytest.mark.parametrize("mode", ["mfs", "mvc"])
 @pytest.mark.parametrize("weighting", ["natural", "uniform", "briggs"])
+@pytest.mark.parametrize("reference_mode", ["in_memory", "in_place"])
 def test_persisted_weights_are_written_directly_to_the_processing_set(
-    tmp_path, observation, mode, weighting
+    tmp_path, observation, mode, weighting, reference_mode
 ):
     import shutil
 
@@ -269,7 +270,7 @@ def test_persisted_weights_are_written_directly_to_the_processing_set(
         applications.imaging.image_continuum_single_field(
             deconvolver="mtmfs",
             continuum_mode=mode,
-            write_imaging_weights_to_ps=True,
+            weight_memory_mode="in_processing_set",
             **arguments,
         )
     reopened = open_processing_set(store)
@@ -292,12 +293,12 @@ def test_persisted_weights_are_written_directly_to_the_processing_set(
     assert "_CONTINUUM_WEIGHT_CACHE" not in image
 
     # The persistent cache must feed the same imaging weights back into each
-    # cycle as the independent in-memory global-weighting path.
+    # cycle as the independent RAM or disposable-cache path.
     baseline = dict(
         arguments,
         image_store=str(tmp_path / "baseline.img.zarr"),
         ps_store=observation,
-        weight_memory_mode="in_memory",
+        weight_memory_mode=reference_mode,
     )
     with dask.config.set(scheduler="synchronous"):
         applications.imaging.image_continuum_single_field(
@@ -341,7 +342,7 @@ def test_failed_imaging_graph_does_not_publish_weights(
         applications.imaging.image_continuum_single_field(
             deconvolver="mtmfs",
             continuum_mode="mfs",
-            write_imaging_weights_to_ps=True,
+            weight_memory_mode="in_processing_set",
             **arguments,
         )
     for name, child in open_processing_set(store).items():
@@ -526,7 +527,7 @@ def test_global_persistent_weight_failures_clean_staging_and_preserve_input(
         applications.imaging.image_continuum_single_field(
             deconvolver="mtmfs",
             continuum_mode=mode,
-            write_imaging_weights_to_ps=True,
+            weight_memory_mode="in_processing_set",
             **arguments,
         )
     assert writes

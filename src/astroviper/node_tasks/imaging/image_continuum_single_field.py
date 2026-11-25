@@ -1253,10 +1253,10 @@ def residual_update_continuum_single_field(
         ``node_task_data_mapping`` to avoid copying every task's weights into
         every map-node parameter dictionary.
     weight_cache_is_active : bool, optional
-        ``True`` when this run's in-place imaging weights are already
-        registered in the Processing Set (global weighting with
-        ``weight_memory_mode="in_place"``); the first imaging cycle then uses
-        them. Otherwise it uses ``weight_cache_mapping`` or calculates the
+        ``True`` when this run's imaging weights are already written to the
+        disposable cache or staged Processing Set targets (global weighting with
+        ``weight_memory_mode="in_place"`` or ``"in_processing_set"``); the first
+        imaging cycle then uses them. Otherwise it uses ``weight_cache_mapping`` or calculates the
         imaging weights: weights that an earlier run or another tool
         registered are not used.
     primary_beam_xds : xarray.Dataset, optional
@@ -1352,16 +1352,16 @@ def residual_update_continuum_single_field(
     memory_mode : str, optional
         Currently only ``"in_memory"`` is supported.
 
-    weight_memory_mode : {"in_memory", "in_place"}, optional
+    weight_memory_mode : {"in_memory", "in_place", "in_processing_set"}, optional
         Storage policy for calculated continuum imaging weights. ``"in_memory"``
-        returns task-local weights for subsequent graphs. ``"in_place"`` writes
-        partitions into a disposable output-store cache by default. With
-        ``write_imaging_weights_to_ps=True``, XRADIO preallocates unregistered
-        Processing Set targets instead; tasks write and reload their own regions
-        there. Only after all tasks succeed does XRADIO register ``WEIGHT_IMAGING``
-        with provenance and consolidate metadata. Failed runs remove their staging
-        variables. Existing persisted weights are protected and require explicit
-        removal before replacement. No completed full-array cache is copied.
+        retains task-local weights in RAM for subsequent graphs. ``"in_place"``
+        uses a disposable output-store cache and is the default. ``"in_processing_set"``
+        writes and reloads task-local regions in staged Processing Set arrays.
+        Only after imaging succeeds are WEIGHT_IMAGING and its provenance registered
+        and retained in the input Processing Set; failed runs remove their staging
+        targets. Existing persisted weights are protected against replacement.
+        Every run calculates its own weights; retained weights are not reused
+        automatically. No completed full-array cache is copied.
 
     visibility_memory_mode : {"in_memory", "in_place", "recompute"}, optional
         Continuum residual-update storage policy for observed visibility grids.
@@ -1511,6 +1511,10 @@ def residual_update_continuum_single_field(
 
         check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
         check_driver_workflow(locals(), mode=CONTINUUM_SINGLE_FIELD)
+
+    from astroviper.utils.imaging_weight_persistence import check_weight_storage_targets
+
+    check_weight_storage_targets(weight_memory_mode, persisted_imaging_weights)
 
     import time
 
@@ -1864,7 +1868,7 @@ def residual_update_continuum_single_field(
                 },
             )
 
-        if weight_memory_mode == "in_place":
+        if weight_memory_mode in ("in_place", "in_processing_set"):
             start = time.time()
             _write_continuum_weights_in_place(
                 ps_xdt, image_store, io_engine, persisted_imaging_weights
@@ -2298,8 +2302,8 @@ def degrid_imaging_weights_continuum_node(
     corresponding planes from the globally reduced weight-density products,
     degrids the global Briggs weighting solution onto the local visibility
     samples, and either returns the weights or writes them to the temporary
-    output-image cache according to ``weight_memory_mode``, together with
-    timing metadata.
+    output-image cache or staged Processing Set targets according to
+    ``weight_memory_mode``, together with timing metadata.
 
     No density gridding or Briggs-factor calculation is performed here.
 
@@ -2366,16 +2370,16 @@ def degrid_imaging_weights_continuum_node(
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
         kernels.
-    weight_memory_mode : {"in_memory", "in_place"}, optional
+    weight_memory_mode : {"in_memory", "in_place", "in_processing_set"}, optional
         Storage policy for calculated continuum imaging weights. ``"in_memory"``
-        returns task-local weights for subsequent graphs. ``"in_place"`` writes
-        partitions into a disposable output-store cache by default. With
-        ``write_imaging_weights_to_ps=True``, XRADIO preallocates unregistered
-        Processing Set targets instead; tasks write and reload their own regions
-        there. Only after all tasks succeed does XRADIO register ``WEIGHT_IMAGING``
-        with provenance and consolidate metadata. Failed runs remove their staging
-        variables. Existing persisted weights are protected and require explicit
-        removal before replacement. No completed full-array cache is copied.
+        retains task-local weights in RAM for subsequent graphs. ``"in_place"``
+        uses a disposable output-store cache and is the default. ``"in_processing_set"``
+        writes and reloads task-local regions in staged Processing Set arrays.
+        Only after imaging succeeds are WEIGHT_IMAGING and its provenance registered
+        and retained in the input Processing Set; failed runs remove their staging
+        targets. Existing persisted weights are protected against replacement.
+        Every run calculates its own weights; retained weights are not reused
+        automatically. No completed full-array cache is copied.
     io_engine : {"chunk", "xradio"}, optional
         I/O engine of the node tasks. ``"chunk"`` reads and writes Zarr chunk
         blobs (and FITS data blocks) directly by byte offset
@@ -2418,6 +2422,10 @@ def degrid_imaging_weights_continuum_node(
 
         check_weight_density_method(imaging_weights_params)
         check_driver_workflow(locals(), mode=CONTINUUM_SINGLE_FIELD)
+
+    from astroviper.utils.imaging_weight_persistence import check_weight_storage_targets
+
+    check_weight_storage_targets(weight_memory_mode, persisted_imaging_weights)
 
     import time
 
@@ -2593,7 +2601,7 @@ def degrid_imaging_weights_continuum_node(
     T_write_imaging_weights = 0.0
     n_processing_set_children = len(weight_datasets)
 
-    if weight_memory_mode == "in_place":
+    if weight_memory_mode in ("in_place", "in_processing_set"):
         start = time.time()
         _write_continuum_weights_in_place(
             ps_xdt, image_store, io_engine, persisted_imaging_weights

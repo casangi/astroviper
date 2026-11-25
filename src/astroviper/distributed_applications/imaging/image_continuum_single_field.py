@@ -2481,7 +2481,6 @@ def image_continuum_single_field(
     wideband_primary_beam_memory_mode: str = "recompute",
     cache_directory: str | None = None,
     write_visibility_model_to_ps: bool = False,
-    write_imaging_weights_to_ps: bool = False,
     clear_cache: bool = True,
     vizualize_graph: bool = False,
     disk_chunk_sizes: dict[str, int] | str | None = None,
@@ -2598,10 +2597,6 @@ def image_continuum_single_field(
         Reserved processing-set model-persistence switch. Continuum imaging does
         not currently write predicted model visibilities to the input Processing
         Set.
-    write_imaging_weights_to_ps : bool
-        Copy the completed disk-backed imaging weights into the input Processing
-        Set; requires ``weight_memory_mode="in_place"``. Later runs do not use
-        them: every run calculates its own imaging weights.
     compute_backend : str, optional
         Reserved backend selector. The continuum driver currently builds and
         computes Dask graphs regardless of this value.
@@ -3172,16 +3167,16 @@ def image_continuum_single_field(
         Reserved for a future node-task finalization path. Continuum imaging
         currently raises ``NotImplementedError`` when this is supplied rather
         than silently discarding the requested layout at finalization.
-    weight_memory_mode : {"in_memory", "in_place"}, optional
+    weight_memory_mode : {"in_memory", "in_place", "in_processing_set"}, optional
         Storage policy for calculated continuum imaging weights. ``"in_memory"``
-        returns task-local weights for subsequent graphs. ``"in_place"`` writes
-        partitions into a disposable output-store cache by default. With
-        ``write_imaging_weights_to_ps=True``, XRADIO preallocates unregistered
-        Processing Set targets instead; tasks write and reload their own regions
-        there. Only after all tasks succeed does XRADIO register ``WEIGHT_IMAGING``
-        with provenance and consolidate metadata. Failed runs remove their staging
-        variables. Existing persisted weights are protected and require explicit
-        removal before replacement. No completed full-array cache is copied.
+        retains task-local weights in RAM for subsequent graphs. ``"in_place"``
+        uses a disposable output-store cache and is the default. ``"in_processing_set"``
+        writes and reloads task-local regions in staged Processing Set arrays.
+        Only after imaging succeeds are WEIGHT_IMAGING and its provenance registered
+        and retained in the input Processing Set; failed runs remove their staging
+        targets. Existing persisted weights are protected against replacement.
+        Every run calculates its own weights; retained weights are not reused
+        automatically. No completed full-array cache is copied.
 
     visibility_memory_mode : {"in_memory", "in_place", "recompute"}, optional
         Continuum residual-update storage policy for observed visibility grids.
@@ -3640,7 +3635,6 @@ def image_continuum_single_field(
     )
     input_params["cache_directory"] = cache_directory
     input_params["write_visibility_model_to_ps"] = write_visibility_model_to_ps
-    input_params["write_imaging_weights_to_ps"] = write_imaging_weights_to_ps
     input_params["clear_cache"] = clear_cache
     input_params["processing_function_threads"] = processing_function_threads
     input_params["cycle_control_params"] = cycle_control_params
@@ -3783,13 +3777,13 @@ def image_continuum_single_field(
     )
 
     persisted_imaging_weights = {}
-    if write_imaging_weights_to_ps:
+    if weight_memory_mode == "in_processing_set":
         persisted_imaging_weights = prepare_imaging_weights(
             ps_xdt, ps_store, processing_set_data_group_name, node_task_data_mapping
         )
     input_params["persisted_imaging_weights"] = persisted_imaging_weights
     weight_cache_is_active = False
-    if weight_memory_mode == "in_place" and not write_imaging_weights_to_ps:
+    if weight_memory_mode == "in_place":
         start = time.time()
         _create_continuum_weight_cache_store(
             ps_xdt,
@@ -3873,7 +3867,7 @@ def image_continuum_single_field(
                     reduce_mode=reduce_mode,
                     reduce_n_batch=reduce_n_batch,
                 )
-                if weight_memory_mode == "in_place":
+                if weight_memory_mode in ("in_place", "in_processing_set"):
                     weight_return_dict["weight_cache_mapping"] = None
                     weight_cache_is_active = True
             else:
@@ -4261,7 +4255,7 @@ def image_continuum_single_field(
 
             if (
                 is_first_cycle
-                and weight_memory_mode == "in_place"
+                and weight_memory_mode in ("in_place", "in_processing_set")
                 and not weight_cache_is_active
             ):
                 weight_cache_is_active = True
@@ -4412,7 +4406,7 @@ def image_continuum_single_field(
             timing_distributed_application["T_consolidate_metadata"] = (
                 time.time() - start
             )
-        if write_imaging_weights_to_ps:
+        if weight_memory_mode == "in_processing_set":
             persist_start = time.time()
             publish_imaging_weights(
                 persisted_imaging_weights,

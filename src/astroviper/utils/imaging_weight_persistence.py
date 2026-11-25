@@ -4,6 +4,35 @@ import numpy as np
 import zarr
 
 
+def check_weight_storage_targets(weight_memory_mode, transactions):
+    """Check runtime write targets independently of configuration validation.
+
+    Processing Set storage requires staging descriptors. Other storage modes
+    must not receive them, since the region-I/O helpers route by descriptor.
+
+    Parameters
+    ----------
+    weight_memory_mode : str
+        Selected continuum imaging-weight storage policy.
+    transactions : dict or None
+        Staged XRADIO descriptors keyed by Processing Set child.
+
+    Raises
+    ------
+    ValueError
+        If the selected policy and runtime targets are inconsistent.
+    """
+    if weight_memory_mode == "in_processing_set":
+        if not transactions:
+            raise ValueError(
+                "weight_memory_mode='in_processing_set' requires staged imaging-weight targets"
+            )
+    elif transactions:
+        raise ValueError(
+            "Staged imaging-weight targets require weight_memory_mode='in_processing_set'"
+        )
+
+
 def prepare_imaging_weights(ps_xdt, store, data_group_name, task_mapping=None):
     """Preflight every child, then preallocate unregistered task-write targets.
 

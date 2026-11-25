@@ -248,19 +248,16 @@ def check_driver_workflow(config, *, mode, require_complete=False):
     # Only these storage policies have node-task implementations.
     if mode.imaging_kind == "continuum":
         policies = {
-            "weight_memory_mode": ("in_memory", "in_place"),
+            "weight_memory_mode": ("in_memory", "in_place", "in_processing_set"),
             "visibility_memory_mode": ("in_memory", "in_place", "recompute"),
             "wideband_primary_beam_memory_mode": ("recompute",),
         }
         for name, allowed in policies.items():
             if name in config and config[name] not in allowed:
                 raise ValueError(f"{name} must be one of {allowed}.")
-        if (
-            config.get("write_imaging_weights_to_ps", False)
-            and config.get("weight_memory_mode", "in_place") != "in_place"
-        ):
+        if "write_imaging_weights_to_ps" in config:
             raise ValueError(
-                "write_imaging_weights_to_ps requires weight_memory_mode='in_place'."
+                "Continuum write_imaging_weights_to_ps was removed; use weight_memory_mode='in_processing_set'."
             )
         if (
             config.get("image_chunking") is not None
@@ -607,11 +604,13 @@ def check_input_storage(config, *, input_is_msv2, allow_msv2=True):
         raise ValueError(
             f"{store} is a Measurement Set v2; convert it with xradio.measurement_set.convert_msv2_to_processing_set and use the processing set."
         )
-    if config.get("write_visibility_model_to_ps", False) or config.get(
-        "write_imaging_weights_to_ps", False
+    if (
+        config.get("write_visibility_model_to_ps", False)
+        or config.get("write_imaging_weights_to_ps", False)
+        or config.get("weight_memory_mode") == "in_processing_set"
     ):
         raise ValueError(
-            f"write_visibility_model_to_ps and write_imaging_weights_to_ps must be False for a Measurement Set v2 ps_store ({store}): an imaging run never writes into its input Measurement Set."
+            f"Input persistence is not supported for a Measurement Set v2 ps_store ({store}): write_visibility_model_to_ps and write_imaging_weights_to_ps must be False, and weight_memory_mode must not be in_processing_set."
         )
 
 
