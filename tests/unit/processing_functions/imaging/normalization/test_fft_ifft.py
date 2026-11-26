@@ -517,18 +517,20 @@ def test_fftw_unaligned_transform_passes_the_thread_count(transform, monkeypatch
     ]
     + [(63, "aligned"), (143, "aligned"), (192, "spilled")],
 )
-def test_pyfftw_gives_one_thread_bits_with_three(n, layout, dtype):
-    """pyFFTW with 3 threads gives the bits of one thread: on the padded grids
-    of the numerical harness, aligned and spilled (the line path), and on 143
-    aligned and 192 spilled, whose bits change from 5 threads on (measured on
-    arm64 with pyFFTW 0.15.1)."""
+def test_pyfftw_with_three_threads_stays_within_rounding(n, layout, dtype):
+    """pyFFTW with 3 threads stays within 8 eps of the peak of one thread: on the
+    padded grids of the numerical harness, aligned and spilled (the line path), and
+    on 143 aligned and 192 spilled. On arm64 with pyFFTW 0.15.1 it gives the bits of
+    one thread, which change from 5 threads on at 143 and 192 (measured); on the
+    Linux CI (x86_64) 3 threads change them at some of these sizes."""
     values = _plane(n, dtype)
     for one, three in zip(
         _both_transforms(values, 1, layout, "pyfftw"),
         _both_transforms(values, 3, layout, "pyfftw"),
         strict=True,
     ):
-        np.testing.assert_array_equal(three, one)
+        bound = 8 * np.finfo(dtype).eps * np.abs(one).max()
+        assert np.abs(three - one).max() <= bound
 
 
 @pytest.mark.parametrize("dtype", [np.complex64, np.complex128])
