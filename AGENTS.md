@@ -566,6 +566,18 @@ When applicable multiple instances of map-reduce can be done in a single distrib
   distributed_applications to the C++ kernels (the same parameter name at every layer of the
   stack).
 
+### BLAS and threads
+OpenBLAS before 0.3.34 returns wrong matrix products and LAPACK results when
+several threads of one process call it at once
+([OpenMathLib/OpenBLAS#5825](https://github.com/OpenMathLib/OpenBLAS/issues/5825),
+[#5836](https://github.com/OpenMathLib/OpenBLAS/issues/5836)). Node tasks share
+a process on Dask's threaded scheduler (no distributed client, as in pytest),
+with `processes=False`, or with several task threads per worker and more than
+one BLAS thread. There, set `OMP_NUM_THREADS=1`, `OPENBLAS_NUM_THREADS=1` and
+`MKL_NUM_THREADS=1` before NumPy is imported (threadpoolctl is not enough);
+`tests/conftest.py` does so for pytest. Do not add locks around BLAS calls
+instead.
+
 ### Why this design (do not regress it)
 GraphVIPER deliberately **loads data inside compute nodes** rather than as
 separate Dask array nodes. This (a) fixes Dask "memory backpressure" for large
