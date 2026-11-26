@@ -187,6 +187,8 @@ validation module. Other processing functions retain the normal layer rules.
 **`parked/` package:**
 `src/astroviper/parked/` keeps old code for reference instead of deleting it;
 its README lists each parked module and where it came from (path and commit).
+Code that nothing uses any more is moved there unchanged rather than deleted;
+an unused wrapper of code that stays is removed.
 The package is outside the four layers and is not tested or maintained:
 nothing outside it may import from it, and coverage leaves it out
 (`[tool.coverage.run]` in [`pyproject.toml`](pyproject.toml)).
@@ -195,7 +197,9 @@ nothing outside it may import from it, and coverage leaves it out
 `tests/unit/test_layer_rule.py` checks every import statement of
 `src/astroviper`, parsed with `ast` without importing the package, and fails
 on an import from a higher layer and on an import from `parked/` by a module
-outside it. The only upward imports it accepts are four existing ones inside
+outside it. The top-level packages `calibration/` and `data/` are outside the
+layers, as `parked/` is: the layer order does not apply to imports from or into
+them. The only upward imports it accepts are four existing ones inside
 functions of `utils/`, which it lists; do not add another.
 
 ### Public API surface
@@ -228,11 +232,7 @@ performance measures and the plots of `utils/resource_plots.py` read.
 ### The `simulation` subdomain (port of SIRIUS)
 `simulate_processing_set` is a **pure generator**: there is no input processing
 set; the node task is mapped over `parallel_coords = {"time", "frequency"}` and
-each task writes its block into an MSv4 skeleton the driver created. The
-subdomain itself (structure, the `sky_components` interface and its analytic
-kinds, uvw and beam conventions, shipped data, legacy fixtures, status) is
-documented in `SIRIUS_PORT_PLAN.md` at the repo root; keep that file current
-when the simulator changes.
+each task writes its block into an MSv4 skeleton the driver created.
 
 ### Imaging implementation notes
 The cube imager's primary beam (`ipower=2`, the CASA power-pattern definition) and
@@ -808,7 +808,7 @@ per-variable nodes.
     or graph construction; lower entry points check the settings they receive.
     Raise on malformed configuration without inserting defaults, coercing
     values, or substituting another configuration. Documented optional defaults
-    must not modify the caller's mapping. Do not add duplicate inline rules or
+    must not modify the caller's mapping. Do not add inline rules or
     use the legacy default-inserting `check_params` helper for these checks.
   - **Keep runtime validation active:** `input_checked` skips configuration
     checks only. Checks on newly loaded data, derived products, numerical
