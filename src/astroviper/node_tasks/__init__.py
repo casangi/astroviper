@@ -3,7 +3,12 @@ from __future__ import annotations
 
 from importlib import metadata
 
-from astroviper.node_tasks import image_analysis, imaging, simulation
+from astroviper.node_tasks import (
+    image_analysis,
+    imaging,
+    simulation,
+    visibility_manipulation,
+)
 
 __all__ = [
     "__version__",
@@ -11,6 +16,7 @@ __all__ = [
     "imaging",
     "image_analysis",
     "simulation",
+    "visibility_manipulation",
 ]
 
 # Package version

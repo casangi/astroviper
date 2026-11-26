@@ -75,6 +75,7 @@ def _load_registry():
         ("imaging", "IMAGING_PARAM_DOCS"),
         ("image_analysis", "IMAGE_ANALYSIS_PARAM_DOCS"),
         ("simulation", "SIMULATION_PARAM_DOCS"),
+        ("visibility_manipulation", "VISIBILITY_MANIPULATION_PARAM_DOCS"),
     ]
     merged = {}
     for subdomain, attr in registries:
@@ -148,6 +149,9 @@ def _target_files():
         "distributed_applications/simulation/simulate_processing_set.py",
         "node_tasks/simulation/simulate_processing_set.py",
         "processing_functions/simulation/simulate_processing_set.py",
+        "distributed_applications/visibility_manipulation/uv_continuum_subtraction.py",
+        "node_tasks/visibility_manipulation/uv_continuum_subtraction.py",
+        "processing_functions/visibility_manipulation/uv_continuum_subtraction.py",
     ]
     return [root / r for r in rel]
 

@@ -324,3 +324,24 @@ def modify_data_groups_xds(
         )
     else:
         xds.attrs["data_groups"][data_group_out_name]["description"] = description
+
+
+def remove_data_group_xds(xds: xr.Dataset, data_group_name: str):
+    """Remove a data group from an xarray Dataset.
+
+    Only the entry of ``xds.attrs["data_groups"]`` is removed: the data
+    variables of the group are kept, as other data groups may share them.
+
+    Parameters
+    ----------
+    xds : xr.Dataset
+        The dataset whose ``data_groups`` attribute is modified in place.
+    data_group_name : str
+        The data group to remove.
+
+    Returns
+    -------
+    dict or None
+        The removed data group, ``None`` if the dataset has no such group.
+    """
+    return xds.attrs.get("data_groups", {}).pop(data_group_name, None)
