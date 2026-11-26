@@ -7,7 +7,6 @@ pipeline:
 - :func:`_validate_deconvolve_params`: parameter validation and defaults.
 - :func:`_plane_peak_abs_signed`: signed peak-residual helper.
 - :func:`progress_callback`: logging cadence.
-- :func:`get_phase_center`: phase-center extraction from coordinates.
 - :func:`hogbom_clean`: 5-D cube wrapper around ``hogbom.clean_cube``.
 - :func:`deconvolve`: the end-to-end xarray-driven entry point.
 
@@ -28,7 +27,6 @@ from astroviper.processing_functions.imaging.model_update.deconvolve import (
     _validate_deconvolve_params,
     asp_clean,
     deconvolve,
-    get_phase_center,
     hogbom_clean,
     hogbom_clean_many_threads,
     validate_exact_psf_subtraction,
@@ -353,30 +351,6 @@ class TestPlanePeakAbsSigned:
         result = _plane_peak_abs_signed(arr, mask=mask)
         # 0.5 is NOT > 0.5, so the 5.0 pixel is excluded.
         assert np.isnan(result)
-
-
-# ---------------------------------------------------------------------------
-# get_phase_center
-# ---------------------------------------------------------------------------
-
-
-class TestGetPhaseCenter:
-    def test_reads_centre_pixel(self):
-        ny, nx = 4, 4
-        ra = np.arange(ny * nx, dtype=np.float64).reshape(ny, nx)
-        dec = -ra
-
-        xds = xr.Dataset(
-            coords={
-                "right_ascension": (["l", "m"], ra),
-                "declination": (["l", "m"], dec),
-            }
-        )
-        result = get_phase_center(xds)
-        # Centre pixel is (ny//2, nx//2).
-        expected_ra = ra[ny // 2, nx // 2]
-        expected_dec = dec[ny // 2, nx // 2]
-        assert result == f"{expected_ra},{expected_dec}"
 
 
 # ---------------------------------------------------------------------------
