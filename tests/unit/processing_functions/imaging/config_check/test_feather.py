@@ -8,8 +8,10 @@ import pytest
 import xarray as xr
 
 from astroviper.processing_functions.imaging.config_check import (
+    check_feather_combination,
     check_feather_config,
     check_feather_inputs,
+    check_feather_output,
 )
 
 
@@ -93,4 +95,81 @@ def test_feather_requires_sky_in_each_opened_image(missing):
     with pytest.raises(ValueError, match=f"{missing} must contain a SKY"):
         check_feather_inputs(
             bad if missing == "highres" else good, bad if missing == "lowres" else good
+        )
+
+
+@pytest.mark.parametrize(
+    "sdfactor, axes, fft_backend, error",
+    [
+        (True, ("l", "m"), "scipy", TypeError),
+        ("1", ("l", "m"), "scipy", TypeError),
+        (np.array([1.0, 2.0]), ("l", "m"), "scipy", TypeError),
+        (np.nan, ("l", "m"), "scipy", ValueError),
+        (np.inf, ("l", "m"), "scipy", ValueError),
+        (1.0, "lm", "scipy", TypeError),
+        (1.0, ("l", 1), "scipy", TypeError),
+        (1.0, ("l",), "scipy", ValueError),
+        (1.0, ("l", "l"), "scipy", ValueError),
+        (1.0, ("l", "m", "n"), "scipy", ValueError),
+        (1.0, ("l", "m"), "fftw", ValueError),
+    ],
+)
+def test_invalid_combination_is_refused(sdfactor, axes, fft_backend, error):
+    with pytest.raises(error):
+        check_feather_combination(sdfactor, axes, fft_backend)
+
+
+@pytest.mark.parametrize("sdfactor", [1, 0.5, np.float32(2.0), np.int64(3)])
+def test_valid_combination_is_accepted_unchanged(sdfactor):
+    axes = ["l", "m"]
+    check_feather_combination(sdfactor, axes, "numpy")
+    assert axes == ["l", "m"]
+
+
+@pytest.mark.parametrize("fmt, engine", [("png", "chunk"), ("fits", "xradio")])
+def test_invalid_output_is_refused(fmt, engine):
+    with pytest.raises(ValueError):
+        check_feather_output(fmt, engine)
+
+
+@pytest.mark.parametrize(
+    "kwargs, error",
+    [
+        ({"sdfactor": "1"}, TypeError),
+        ({"sdfactor": np.nan}, ValueError),
+        ({"fft_backend": "fftw"}, ValueError),
+        ({"output_image_format": "png"}, ValueError),
+    ],
+)
+def test_invalid_settings_precede_opening(monkeypatch, kwargs, error):
+    driver = importlib.import_module(
+        "astroviper.distributed_applications.imaging.feather"
+    )
+    monkeypatch.setattr(
+        driver, "_open_input_image", lambda *args: pytest.fail("opened image")
+    )
+    with pytest.raises(error):
+        driver.feather({"name": "out"}, "hi", "lo", **kwargs)
+
+
+def test_checked_configuration_skips_the_combination_check(monkeypatch, tmp_path):
+    """With input_checked=True the driver reaches the image opening."""
+
+    class Opened(Exception):
+        pass
+
+    def opened(*args):
+        raise Opened
+
+    driver = importlib.import_module(
+        "astroviper.distributed_applications.imaging.feather"
+    )
+    monkeypatch.setattr(driver, "_open_input_image", opened)
+    with pytest.raises(Opened):
+        driver.feather(
+            {"name": str(tmp_path / "out")},
+            "hi",
+            "lo",
+            sdfactor="1",
+            input_checked=True,
         )

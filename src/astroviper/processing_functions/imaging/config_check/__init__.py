@@ -16,8 +16,10 @@ from astroviper.processing_functions.imaging.config_check.param_check_driver_wor
     check_driver_workflow,
 )
 from astroviper.processing_functions.imaging.config_check.param_check_feather import (
+    check_feather_combination,
     check_feather_config,
     check_feather_inputs,
+    check_feather_output,
 )
 from astroviper.processing_functions.imaging.config_check.param_check_find_continuum import (
     check_find_continuum_channel_range,
@@ -43,8 +45,10 @@ __all__ = [
     "CUBE_SINGLE_FIELD",
     "CONTINUUM_SINGLE_FIELD",
     "check_config",
+    "check_feather_combination",
     "check_feather_config",
     "check_feather_inputs",
+    "check_feather_output",
     "check_find_continuum_channel_range",
     "check_find_continuum_cluster_threads",
     "check_find_continuum_config",

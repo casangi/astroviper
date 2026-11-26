@@ -37,8 +37,9 @@ def feather(input_params, graph_mode=True):
         set by the driver: ``input_data_store`` (``{"sd": path, "int": path}``),
         ``image_store``, ``image_data_variables_keep`` (``["sky"]``),
         ``sdfactor``, ``axes``, ``selection``, ``fft_backend``,
-        ``processing_function_threads``, ``io_engine`` and
-        ``output_image_format``.
+        ``processing_function_threads``, ``io_engine``,
+        ``output_image_format`` and ``input_checked`` (``True`` skips the
+        configuration checks the driver made).
     graph_mode : bool, optional
         If ``True`` (default) the ``SKY`` slice is written into the pre-allocated
         image store with :func:`~astroviper.utils.io.write_result_chunk`.  If
@@ -69,6 +70,19 @@ def feather(input_params, graph_mode=True):
     selection = input_params.get("selection", {})
     io_engine = input_params.get("io_engine", "chunk")
     output_image_format = input_params.get("output_image_format", "zarr")
+    fft_backend = input_params.get("fft_backend", "scipy")
+    if not input_params.get("input_checked", False):
+        from astroviper.processing_functions.imaging.config_check.param_check_feather import (
+            check_feather_combination,
+            check_feather_output,
+        )
+        from astroviper.utils.node_task_io import check_io_engine
+
+        check_io_engine(io_engine)
+        check_feather_output(output_image_format, io_engine)
+        check_feather_combination(
+            input_params["sdfactor"], input_params["axes"], fft_backend
+        )
 
     # Load this chunk's single-dish ("sd") and interferometer ("int") images.
     # load_image with block_des reads only this task's frequency slice; .load()
@@ -87,8 +101,9 @@ def feather(input_params, graph_mode=True):
         xdses["int"],
         sdfactor=input_params["sdfactor"],
         axes=input_params["axes"],
-        fft_backend=input_params.get("fft_backend", "scipy"),
+        fft_backend=fft_backend,
         processing_function_threads=input_params.get("processing_function_threads", 1),
+        input_checked=True,
     )
     T_feather = time.time() - start
 

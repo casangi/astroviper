@@ -152,10 +152,11 @@ def feather(
     from astroviper.utils.node_task_io import check_io_engine
 
     check_io_engine(io_engine)
-    if output_image_format not in ("zarr", "fits"):
-        raise ValueError("output_image_format must be 'zarr' or 'fits'.")
-    if output_image_format == "fits" and io_engine != "chunk":
-        raise ValueError("FITS output needs io_engine='chunk'.")
+    from astroviper.processing_functions.imaging.config_check.param_check_feather import (
+        check_feather_output,
+    )
+
+    check_feather_output(output_image_format, io_engine)
     import dask
     import zarr
     from graphviper.graph_tools import generate_dask_workflow
@@ -177,16 +178,19 @@ def feather(
 
     if selection is None:
         selection = {}
+    axes = ("l", "m")
     if compressor is None:
         compressor = Blosc(cname="lz4", clevel=5)
 
     # --- Supplied configuration and filesystem policy ---
     if not input_checked:
         from astroviper.processing_functions.imaging.config_check.param_check_feather import (
+            check_feather_combination,
             check_feather_config,
         )
 
         check_feather_config(outim, highres, lowres)
+        check_feather_combination(sdfactor, axes, fft_backend)
     overwrite = outim.get("overwrite", False)
     if not overwrite and os.path.exists(outim["name"]):
         raise RuntimeError(
@@ -322,7 +326,7 @@ def feather(
             ["sky", "beam_fit_params_sky"] if output_image_format == "fits" else ["sky"]
         ),
         "output_image_format": output_image_format,
-        "axes": ("l", "m"),
+        "axes": axes,
         "sdfactor": sdfactor,
         "selection": selection,
         "fft_backend": fft_backend,
@@ -330,6 +334,7 @@ def feather(
         "to_disk": True,
         "compressor": compressor,
         "io_engine": io_engine,
+        "input_checked": True,
     }
 
     t0 = time.time()

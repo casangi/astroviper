@@ -7,6 +7,8 @@ processing-function convention the inputs are NumPy-backed ``xarray`` datasets
 ``tests/unit/distributed_applications/imaging/test_feather.py``.
 """
 
+import importlib
+
 import numpy as np
 import pytest
 import xarray as xr
@@ -125,6 +127,71 @@ def test_feather_core_missing_single_dish_beam_raises():
     sd = sd.drop_vars("BEAM_FIT_PARAMS_SKY")
     with pytest.raises(RuntimeError, match="single dish"):
         feather_core(sd, intf)
+
+
+@pytest.mark.parametrize(
+    "kwargs, error",
+    [
+        ({"sdfactor": "1"}, TypeError),
+        ({"axes": ("l",)}, ValueError),
+        ({"fft_backend": "fftw"}, ValueError),
+    ],
+)
+def test_feather_core_refuses_invalid_configuration(monkeypatch, kwargs, error):
+    """The configuration is refused before the first transform."""
+    feather = importlib.import_module("astroviper.processing_functions.imaging.feather")
+    monkeypatch.setattr(
+        feather, "fft_lm_to_uv", lambda *args, **kwargs: pytest.fail("transformed")
+    )
+    sd, intf = _make_pair()
+    with pytest.raises(error):
+        feather_core(sd, intf, **kwargs)
+
+
+def test_feather_core_checked_configuration_is_not_checked_again(monkeypatch):
+    from astroviper.processing_functions.imaging.config_check import (
+        param_check_feather,
+    )
+
+    monkeypatch.setattr(
+        param_check_feather,
+        "check_feather_combination",
+        lambda *args: pytest.fail("checked again"),
+    )
+    sd, intf = _make_pair()
+    out = feather_core(sd, intf, input_checked=True)
+    assert out["SKY"].shape == intf["SKY"].shape
+
+
+def test_feather_application_hands_input_checked_to_its_node_tasks(
+    monkeypatch, tmp_path
+):
+    """The application's node tasks get input_checked=True in their input_params."""
+    driver = importlib.import_module(
+        "astroviper.distributed_applications.imaging.feather"
+    )
+    graph_map = importlib.import_module("graphviper.graph_tools.map")
+    opened = iter(_make_pair())
+    monkeypatch.setattr(driver, "_open_input_image", lambda *args: next(opened))
+
+    class Mapped(Exception):
+        pass
+
+    seen = {}
+
+    def fake_map(**kwargs):
+        seen.update(kwargs["input_params"])
+        raise Mapped
+
+    monkeypatch.setattr(graph_map, "map", fake_map)
+    with pytest.raises(Mapped):
+        driver.feather(
+            {"name": str(tmp_path / "out.img.zarr")},
+            "hi",
+            "lo",
+            thread_info={"n_threads": 1, "memory_per_thread": 8.0},
+        )
+    assert seen["input_checked"] is True
 
 
 if __name__ == "__main__":  # pragma: no cover

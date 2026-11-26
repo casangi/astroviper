@@ -108,6 +108,8 @@ def feather_core(
     axes: tuple = ("l", "m"),
     fft_backend: str = "scipy",
     processing_function_threads: int = 1,
+    *,
+    input_checked: bool = False,
 ) -> xr.Dataset:
     """Combine a single-dish and an interferometer image with the feather algorithm.
 
@@ -137,6 +139,9 @@ def feather_core(
         ``"pyfftw"`` selects the FFTW-backed backend.
     processing_function_threads : int, default 1
         Number of FFT worker threads.
+    input_checked : bool, optional
+        Skip the configuration checks of ``sdfactor``, ``axes`` and
+        ``fft_backend`` already made by the calling layer. Default ``False``.
 
     Returns
     -------
@@ -147,9 +152,22 @@ def feather_core(
 
     Raises
     ------
+    TypeError, ValueError
+        Unless ``input_checked``: ``sdfactor`` is not a finite real scalar,
+        ``axes`` are not two distinct axis names, or ``fft_backend`` is not one
+        of the three.
+    ImportError
+        Unless ``input_checked``: the library ``fft_backend`` names is not
+        installed.
     RuntimeError
         If either input is missing its ``BEAM_FIT_PARAMS_SKY`` variable.
     """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check.param_check_feather import (
+            check_feather_combination,
+        )
+
+        check_feather_combination(sdfactor, axes, fft_backend)
     if _beam not in int_xds.data_vars:
         raise RuntimeError("Unable to find BEAM data variable in interferometer image.")
     if _beam not in sd_xds.data_vars:

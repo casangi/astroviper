@@ -452,6 +452,11 @@ Feather has a separate validation entry point, without a cube/continuum mode.
 `check_feather_inputs` checks the shapes and dtypes of opened `SKY` products
 without loading pixels. The driver retains file access, existence checks, and
 chunking. A missing overwrite key is read as `False` without changing `outim`.
+`check_feather_combination` checks `sdfactor`, `axes` and `fft_backend`, and
+`check_feather_output` the output format against the I/O engine. The
+application, the node task and `feather_core` run the combination check unless
+`input_checked`; the node task also runs the output check unless
+`input_checked`, and the application always runs it.
 
 Output layout is checked from supplied coordinates at entry and again with the
 constructed image dimensions and task boundaries when these become available.

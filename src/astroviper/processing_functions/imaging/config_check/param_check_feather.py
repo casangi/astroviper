@@ -7,7 +7,9 @@ These checks neither open files nor insert configuration defaults.
 import numpy as np
 
 from astroviper.processing_functions.imaging.config_check._common import (
+    check_fft_backend,
     require_boolean,
+    require_finite_real,
     require_mapping,
 )
 
@@ -47,6 +49,44 @@ def check_feather_config(outim, highres, lowres):
         raise ValueError("outim['name'] must be a nonempty image path.")
     if "overwrite" in outim:
         require_boolean("outim['overwrite']", outim["overwrite"])
+
+
+def check_feather_combination(sdfactor, axes, fft_backend):
+    """Validate the settings of the feather combination without modifying them.
+
+    Parameters
+    ----------
+    sdfactor : float
+        Finite real scalar scaling of the single-dish image.
+    axes : tuple or list of str
+        Two distinct names of the spatial axes.
+    fft_backend : {"numpy", "scipy", "pyfftw"}
+        An installed FFT library.
+    """
+    require_finite_real("sdfactor", sdfactor, scalar=True)
+    if not isinstance(axes, (tuple, list)) or not all(
+        isinstance(axis, str) for axis in axes
+    ):
+        raise TypeError("feather axes must be a tuple or list of axis names.")
+    if len(axes) != 2 or axes[0] == axes[1]:
+        raise ValueError("feather axes must name two distinct axes.")
+    check_fft_backend(fft_backend)
+
+
+def check_feather_output(output_image_format, io_engine):
+    """Require a supported output format for the I/O engine.
+
+    Parameters
+    ----------
+    output_image_format : {"zarr", "fits"}
+        Format of the output image.
+    io_engine : str
+        I/O engine of the node tasks; FITS output needs ``"chunk"``.
+    """
+    if output_image_format not in ("zarr", "fits"):
+        raise ValueError("output_image_format must be 'zarr' or 'fits'.")
+    if output_image_format == "fits" and io_engine != "chunk":
+        raise ValueError("FITS output needs io_engine='chunk'.")
 
 
 # ========================================================================
