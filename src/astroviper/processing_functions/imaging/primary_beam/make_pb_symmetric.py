@@ -3,8 +3,9 @@
 This module collects analytic primary-beam models kept for reference and
 cross-validation (e.g. the stakeholder test asserts that
 :func:`airy_disk_rorder` and :func:`airy_disk_rorder_v2` agree).  The
-single-field imager does not use them: its primary beam is the simulator's
-antenna beam model, evaluated by
+continuum imager evaluates its textbook Airy beam with
+:func:`airy_disk_rorder_v2`. The cube imager does not use them: its primary
+beam is the simulator's antenna beam model, evaluated by
 :func:`~astroviper.processing_functions.simulation.antenna_beams.symmetric_beam_response`.
 
 Notes

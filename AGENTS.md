@@ -235,13 +235,17 @@ documented in `SIRIUS_PORT_PLAN.md` at the repo root; keep that file current
 when the simulator changes.
 
 ### Imaging implementation notes
-The imaging primary beam (`ipower=2`, the CASA power-pattern definition) and
+The cube imager's primary beam (`ipower=2`, the CASA power-pattern definition) and
 the simulator's analytic and beam-polynomial antenna beams are evaluated by one
 function, `processing_functions/simulation/antenna_beams.py::symmetric_beam_response`
-(the C++ visibility kernel reproduces it): the obscured Airy disks of
+(the C++ visibility kernel reproduces it; the cube imager interpolates the
+textbook Airy disk from a radial table, within 1e-9 of it): the obscured Airy disks of
 `processing_functions/imaging/primary_beam/airy_disk.py` (textbook by default,
 CASA's `PBMath1DAiry` with `func="casa_airy"`) and the EVLA beam polynomial,
-zero beyond `max_rad_1GHz` when the model has one. The Adaptive Scale Pixel
+zero beyond `max_rad_1GHz` when the model has one. The continuum imager evaluates
+its prescriptions in `processing_functions/imaging/primary_beam/continuum_primary_beam.py`:
+CASA's `PBMath1DAiry` with the rounding of CASA's single-precision beam image, and the
+textbook Airy disk of `make_pb_symmetric.airy_disk_rorder_v2`. The Adaptive Scale Pixel
 deconvolver (`processing_functions/imaging/model_update/deconvolvers/aspclean/`, a port of
 CASA's `AspMatrixCleaner`) does its FFTs through
 `processing_functions/include/fft.hpp`, as MTMFS does, over the vendored

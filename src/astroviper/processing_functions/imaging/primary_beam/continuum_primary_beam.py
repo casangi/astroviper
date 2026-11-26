@@ -15,13 +15,14 @@ EVLA polynomial prescriptions are not implemented here.
 from __future__ import annotations
 
 import numpy as np
-from scipy.special import j1
 
+from astroviper.processing_functions.imaging.primary_beam.airy_disk import (
+    CASA_AIRY_N_SAMPLE,
+    CASA_AIRY_TWIDDLE,
+    SPEED_OF_LIGHT,
+    casa_airy_pattern,
+)
 from astroviper.utils.param_docs import shares_param_docs
-
-SPEED_OF_LIGHT = 299792458.0
-CASA_AIRY_TWIDDLE = (180 * 7.016 * SPEED_OF_LIGHT) / ((np.pi**2) * 1e9 * 1.566 * 24.5)
-CASA_AIRY_N_SAMPLE = 10000
 
 
 def casa_airy_disk_response(
@@ -92,18 +93,7 @@ def casa_airy_disk_response(
         )
     else:
         r = rho * k * aperture * CASA_AIRY_TWIDDLE
-    r = np.asarray(r)
-    safe = np.where(r == 0, 1.0, r)
-    if blockage_diameter == 0.0:
-        val = 2.0 * j1(safe) / safe
-    else:
-        area_ratio = (dish_diameter / blockage_diameter) ** 2
-        length_ratio = dish_diameter / blockage_diameter
-        val = (
-            area_ratio * 2.0 * j1(safe) / safe
-            - 2.0 * j1(safe * length_ratio) / (safe * length_ratio)
-        ) / (area_ratio - 1.0)
-    val = np.where(r == 0, 1.0, val)
+    val = casa_airy_pattern(r, dish_diameter, blockage_diameter)
     if n_sample is not None:
         # The CASA voltage table and output image are single precision.
         val = val.astype(np.float32)[np.clip(index, 0, n_sample - 1).astype(np.int64)]

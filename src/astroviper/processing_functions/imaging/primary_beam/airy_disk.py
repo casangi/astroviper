@@ -1,7 +1,7 @@
 """Airy-disk antenna response functions shared by imaging and simulation.
 
-These are the single source of truth for the analytic Airy voltage/power
-patterns in AstroVIPER:
+These are the analytic Airy voltage/power patterns of the cube imager and the
+simulator:
 
 * :func:`airy_disk_response` -- the textbook obscured Airy pattern
   (https://en.wikipedia.org/wiki/Airy_disk, *Obscured Airy pattern* section);
@@ -79,6 +79,35 @@ def airy_disk_response(
     return val**ipower
 
 
+def casa_airy_pattern(r, dish_diameter, blockage_diameter):
+    """CASA ``PBMath1DAiry`` voltage pattern at the argument ``r``.
+
+    Parameters
+    ----------
+    r : np.ndarray
+        The pattern's argument, as the caller forms it.
+    dish_diameter, blockage_diameter : float, metres
+
+    Returns
+    -------
+    np.ndarray
+        1 at ``r = 0``. A blockage enters with CASA's inverted argument
+        ``r * dish_diameter / blockage_diameter``.
+    """
+    r = np.asarray(r)
+    safe = np.where(r == 0, 1.0, r)
+    if blockage_diameter == 0.0:
+        val = 2.0 * j1(safe) / safe
+    else:
+        area_ratio = (dish_diameter / blockage_diameter) ** 2
+        length_ratio = dish_diameter / blockage_diameter
+        val = (
+            area_ratio * 2.0 * j1(safe) / safe
+            - 2.0 * j1(safe * length_ratio) / (safe * length_ratio)
+        ) / (area_ratio - 1.0)
+    return np.where(r == 0, 1.0, val)
+
+
 def casa_airy_disk_response(
     l: np.ndarray,  # noqa: E741
     m: np.ndarray,
@@ -123,16 +152,5 @@ def casa_airy_disk_response(
         r = (np.trunc(rho / r_inc) * r_inc) * aperture * k * CASA_AIRY_TWIDDLE
     else:
         r = np.arcsin(rho * k * aperture)
-    r = np.asarray(r)
-    safe = np.where(r == 0, 1.0, r)
-    if blockage_diameter == 0.0:
-        val = 2.0 * j1(safe) / safe
-    else:
-        area_ratio = (dish_diameter / blockage_diameter) ** 2
-        length_ratio = dish_diameter / blockage_diameter
-        val = (
-            area_ratio * 2.0 * j1(safe) / safe
-            - 2.0 * j1(safe * length_ratio) / (safe * length_ratio)
-        ) / (area_ratio - 1.0)
-    val = np.where(r == 0, 1.0, val)
+    val = casa_airy_pattern(r, dish_diameter, blockage_diameter)
     return val**ipower
