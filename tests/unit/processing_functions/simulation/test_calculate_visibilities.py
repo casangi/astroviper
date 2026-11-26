@@ -105,8 +105,9 @@ def test_visibilities_with_zernike_beams(name, implementation, monkeypatch):
 
     The legacy sampler indexed the Jones image with ``l`` and ``m`` swapped; the
     port samples ``JONES[..., l, m]`` correctly, so the values differ by up to
-    ~10 %.  Reproducing the swap in the sampler recovers the legacy values to
-    machine precision, which proves the rest of the kernel is identical.
+    ~10 %.  SIRIUS also turned the beams by -pa, so its beam at pa is the port's
+    at -pa (#391).  Reproducing the swap in the sampler at -pa recovers the legacy
+    values to machine precision, which proves the rest of the kernel is identical.
     """
     vis, f = run_legacy_scenario(name, implementation)
     rel = np.abs(vis - f["visibility"]).max() / np.abs(f["visibility"]).max()
@@ -116,6 +117,12 @@ def test_visibilities_with_zernike_beams(name, implementation, monkeypatch):
     original = antenna_beams.bilinear_interpolate
     monkeypatch.setattr(
         antenna_beams, "bilinear_interpolate", lambda image, x, y: original(image, y, x)
+    )
+    parallactic_angles = antenna_beams.calculate_parallactic_angles
+    monkeypatch.setattr(
+        antenna_beams,
+        "calculate_parallactic_angles",
+        lambda *args: -parallactic_angles(*args),
     )
     if implementation == "cpp":
         pytest.skip("legacy axis swap can only be reproduced in the NumPy sampler")
