@@ -117,13 +117,16 @@ bool same_bits(const V& a, const V& b) {
 
 // pocketfft's own rule: the sizes must give several threads to the rows and
 // the columns of the half spectrum, or the identity checks prove nothing.
+// pocketfft counts a pass's threads with the vector length of its elements:
+// T in the real rows, cmplx<T> in the complex columns.
 template <typename T>
 void check_sizes_use_threads(int nx, int ny) {
     const std::size_t vlen = pocketfft::detail::VLEN<T>::val;
+    const std::size_t complex_vlen = pocketfft::detail::VLEN<pocketfft::detail::cmplx<T>>::val;
     const pocketfft::shape_t image{static_cast<std::size_t>(ny), static_cast<std::size_t>(nx)};
     const pocketfft::shape_t half{static_cast<std::size_t>(ny), static_cast<std::size_t>(nx / 2 + 1)};
     if (pocketfft::detail::util::thread_count(8, image, 1, vlen) < 2 ||
-        pocketfft::detail::util::thread_count(8, half, 0, vlen) < 2)
+        pocketfft::detail::util::thread_count(8, half, 0, complex_vlen) < 2)
         throw std::runtime_error("the image is too small for pocketfft to use several threads");
 }
 
