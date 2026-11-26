@@ -44,8 +44,8 @@ repos:
     hooks:
       - id: nbstripout
 
-  # Verify the shared imaging-parameter docstrings are in sync with the central
-  # registry (src/astroviper/processing_functions/imaging/_param_docs.py).
+  # Verify the shared parameter docstrings are in sync with their registries
+  # (processing_functions/{imaging,image_analysis,simulation}/_param_docs.py).
   # Runs the tool as a standalone script so only libcst is needed (no package
   # build / C++ compile); fix drift with `python -m astroviper.utils.param_docs sync`.
   - repo: local
@@ -58,4 +58,4 @@ repos:
           - libcst==1.8.5
         pass_filenames: false
         files: >-
-          ^src/astroviper/(distributed_applications|node_tasks|processing_functions)/imaging/.*\.py$|^src/astroviper/utils/param_docs\.py$
+          ^src/astroviper/(distributed_applications|node_tasks|processing_functions)/(imaging|image_analysis)/.*\.py$|^src/astroviper/utils/param_docs\.py$

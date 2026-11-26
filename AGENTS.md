@@ -208,6 +208,9 @@ kinds, uvw and beam conventions, shipped data, legacy fixtures, status) is
 documented in `SIRIUS_PORT_PLAN.md` at the repo root; keep that file current
 when the simulator changes.
 
+### Image quality metrics (port of the CASA pipeline's imaging QA metrics)
+The telescope-neutral metrics of `image_analysis` (pipeline mapping, departures, tolerances) are documented in `IMAGE_QUALITY_METRICS.md` at the repo root; keep it current when a metric changes.
+
 ### Imaging implementation notes
 The imaging primary beam (`ipower=2`, the CASA power-pattern definition) and
 the simulator's analytic and beam-polynomial antenna beams are evaluated by one

@@ -10,7 +10,6 @@ import xarray as xr
 from astroviper.processing_functions.image_analysis.make_auto_mask import (
     AUTO_MASK_DEFAULTS,
     _bounding_box,
-    _chauvenet_sample,
     _grow,
     _location_and_noise,
     _plane_thresholds,
@@ -144,22 +143,6 @@ class TestStatistics:
         )
         assert (mask, grow, negative) == pytest.approx((6.0, 2.5, -3.0))
         assert noise_sets
-
-    def test_chauvenet_z_score_matches_casacore(self):
-        # casacore's table: 185 points reach a z-score of 3, 7893 one of 4.
-        rng = np.random.default_rng(3)
-        for n_points, z_score in ((185, 3.0), (7893, 4.0)):
-            values = rng.normal(0.0, 1.0, n_points)
-            values[0] = (z_score - 0.1) * values.std(ddof=1) + values.mean()
-            assert values[0] in _chauvenet_sample(values)
-            values[0] = (z_score + 0.2) * values.std(ddof=1) + values.mean()
-            assert values[0] not in _chauvenet_sample(values)
-
-    def test_chauvenet_removes_a_source(self):
-        plane = noise_plane() + gaussian((40, 40), 300.0)
-        sample = _chauvenet_sample(plane.ravel())
-        assert sample.size < plane.size
-        assert sample.max() < 6.0
 
     def test_fast_noise_takes_every_pixel(self):
         plane = noise_plane() + gaussian((40, 40), 300.0, fwhm=14.0)

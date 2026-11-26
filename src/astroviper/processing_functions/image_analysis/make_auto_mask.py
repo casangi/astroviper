@@ -9,9 +9,11 @@ import math
 import numpy as np
 import scipy.fft
 import scipy.ndimage
-import scipy.special
 import toolviper.utils.logger as logger
 
+from astroviper.processing_functions.image_analysis.statistics.chauvenet import (
+    chauvenet_sample,
+)
 from astroviper.utils.data_group_tools import (
     create_data_groups_in_and_out,
     modify_data_groups_xds,
@@ -33,27 +35,8 @@ AUTO_MASK_DEFAULTS = {
 }
 
 MAD_TO_SIGMA = 1.4826
-CHAUVENET_MAX_ITERATIONS = 5
 # Half width of the smoothing kernel in units of its major axis FWHM.
 KERNEL_HALF_WIDTH = 3.0
-
-
-def _chauvenet_sample(values):
-    """``values`` without the outliers of Chauvenet's criterion.
-
-    As casacore's ``ChauvenetCriterionStatistics`` with five iterations: the
-    z-score of ``n`` points is the one at which ``n * erfc(z / sqrt(2)) = 0.5``.
-    """
-    for _ in range(CHAUVENET_MAX_ITERATIONS + 1):
-        if values.size < 2:
-            break
-        mean, deviation = values.mean(), values.std(ddof=1)
-        z_score = math.sqrt(2.0) * float(scipy.special.erfcinv(0.5 / values.size))
-        kept = values[np.abs(values - mean) <= z_score * deviation]
-        if kept.size == values.size:
-            break
-        values = kept
-    return values
 
 
 def _warn_when_unresolved_sources_are_pruned(sidelobe, params):
@@ -110,7 +93,7 @@ def _location_and_noise(plane, support, previous_mask, fast_noise):
         if previous_mask.any() and outside.any():
             sample = plane[outside]
         else:
-            sample = _chauvenet_sample(plane[support])
+            sample = chauvenet_sample(plane[support])
     location = float(np.median(sample, overwrite_input=True))
     sample -= location
     np.abs(sample, out=sample)

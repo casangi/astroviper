@@ -15,9 +15,15 @@ from astroviper.processing_functions.image_analysis.plane_statistics import (
     plane_statistics_from_dataframe,
     plane_statistics_to_dataframe,
 )
+from astroviper.processing_functions.image_analysis.primary_beam_annulus_statistics import (
+    calculate_primary_beam_annulus_statistics,
+    primary_beam_annulus_limits,
+    summarize_primary_beam_annulus_rms,
+)
 from astroviper.processing_functions.image_analysis.statistics import (
     DEFAULT_STATISTICS,
     STATISTIC_FUNCTIONS,
+    chauvenet_sample,
     create_statistics_state,
     finalize_statistics_state,
     merge_statistics_states,
@@ -39,6 +45,7 @@ from astroviper.processing_functions.image_analysis.statistics import (
 __all__ = [
     "DEFAULT_STATISTICS",
     "STATISTIC_FUNCTIONS",
+    "chauvenet_sample",
     "create_statistics_state",
     "finalize_statistics_state",
     "merge_statistics_states",
@@ -64,4 +71,7 @@ __all__ = [
     "concatenate_plane_statistics",
     "plane_statistics_to_dataframe",
     "plane_statistics_from_dataframe",
+    "primary_beam_annulus_limits",
+    "calculate_primary_beam_annulus_statistics",
+    "summarize_primary_beam_annulus_rms",
 ]
