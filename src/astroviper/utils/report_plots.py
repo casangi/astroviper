@@ -22,6 +22,7 @@ __all__ = [
     "plot_antenna_positions",
     "plane_maximum_detections",
     "plot_continuum_selection",
+    "plot_continuum_subtraction",
     "plot_deconvolution_summary",
     "plot_image_statistics",
     "plot_plane_deconvolution_summary",
@@ -393,6 +394,91 @@ def plot_continuum_selection(
     ax.set_ylabel("spectrum")
     ax.grid(True, **_GRID)
     ax.legend(fontsize=7)
+    if title:
+        figure.suptitle(title, fontsize=11)
+    return figure
+
+
+def plot_continuum_subtraction(
+    frequency,
+    mean_input,
+    mean_output,
+    continuum_time_fraction,
+    polarization,
+    title=None,
+):
+    """The mean spectrum before and after a continuum subtraction, per polarization.
+
+    Parameters
+    ----------
+    frequency : array_like, [n_frequency]
+        Hz, at least two channels.
+    mean_input, mean_output : array_like, [n_frequency, n_polarization]
+        The weighted mean visibilities over the times and baselines before and
+        after the subtraction; their amplitudes are drawn.
+    continuum_time_fraction : array_like, [n_frequency]
+        The fraction of the times at which a channel is a continuum channel:
+        shaded where it is 1, lighter where it is between 0 and 1.
+    polarization : list of str
+        The polarization labels of the columns.
+    title : str, optional
+        Figure title.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+    """
+    n_polarization = len(polarization)
+    mean_input = np.asarray(mean_input).reshape(len(frequency), n_polarization)
+    mean_output = np.asarray(mean_output).reshape(len(frequency), n_polarization)
+    fraction = np.asarray(continuum_time_fraction, dtype=np.float64)
+    figure, axes = _figure(n_polarization, 1, panel_size=(8.0, 2.6), sharex=True)
+    for index, (ax, label) in enumerate(zip(axes[:, 0], polarization, strict=True)):
+        x = _frequency_axis(ax, frequency)
+        edges = np.concatenate(
+            [
+                [1.5 * x[0] - 0.5 * x[1]],
+                (x[:-1] + x[1:]) / 2,
+                [1.5 * x[-1] - 0.5 * x[-2]],
+            ]
+        )
+        for level, alpha, legend in (
+            (fraction >= 1.0, 0.25, "continuum at every time"),
+            ((fraction > 0.0) & (fraction < 1.0), 0.1, "continuum at some times"),
+        ):
+            changes = np.diff(np.concatenate([[0], level.astype(int), [0]]))
+            for run, (start, stop) in enumerate(
+                zip(
+                    np.flatnonzero(changes == 1),
+                    np.flatnonzero(changes == -1),
+                    strict=True,
+                )
+            ):
+                ax.axvspan(
+                    edges[start],
+                    edges[stop],
+                    color=_COLORS[2],
+                    alpha=alpha,
+                    linewidth=0,
+                    label=legend if run == 0 and index == 0 else None,
+                )
+        ax.plot(
+            x,
+            np.abs(mean_input[:, index]),
+            color=_COLORS[0],
+            linewidth=1.0,
+            label="before" if index == 0 else None,
+        )
+        ax.plot(
+            x,
+            np.abs(mean_output[:, index]),
+            color=_COLORS[1],
+            linewidth=1.0,
+            label="after" if index == 0 else None,
+        )
+        ax.set_ylabel(f"|mean {label}| (Jy)")
+        ax.grid(True, **_GRID)
+    axes[0, 0].legend(fontsize=7)
     if title:
         figure.suptitle(title, fontsize=11)
     return figure
