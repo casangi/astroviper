@@ -157,30 +157,3 @@ CONTINUUM_MODEL_UPDATE_TIMING_PHASES = [
         ],
     ),
 ]
-
-
-def format_timing_summary(timing, total_key=IMAGING_TIMING_TOTAL_KEY):
-    """Return a phase-grouped, human-readable summary of an imaging timing dict.
-
-    Thin imaging-specific wrapper over the generic
-    :func:`astroviper.utils.timing.format_timing_summary`: it supplies the
-    imaging phase layout (:data:`IMAGING_TIMING_PHASES`) so the per-chunk
-    ``T_*`` timings are grouped into the pipeline phases (preparation,
-    residual update, stop test, model update, restore) plus node I/O.
-
-    Parameters
-    ----------
-    timing : dict or pandas.DataFrame
-        The imaging timing dict (or a one-row timing frame) produced by
-        ``image_cube_single_field``.
-    total_key : str, optional
-        Key holding the grand-total wall time (default ``"T_image_cube_task"``).
-
-    Returns
-    -------
-    str
-        The formatted multi-line summary.
-    """
-    from astroviper.utils.timing import format_timing_summary as _format_timing_summary
-
-    return _format_timing_summary(timing, IMAGING_TIMING_PHASES, total_key=total_key)

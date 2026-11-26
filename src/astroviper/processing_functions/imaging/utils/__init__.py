@@ -54,7 +54,6 @@ from astroviper.processing_functions.imaging.utils.timing import (
     IMAGING_TIMING_PHASES,
     IMAGING_TIMING_TOTAL_KEY,
     accumulate_timing,
-    format_timing_summary,
 )
 from astroviper.processing_functions.imaging.utils.visibility import (
     drop_auto_correlations,
@@ -97,7 +96,6 @@ __all__ = [
     "format_imaging_dict",
     "print_imaging_dict",
     "accumulate_timing",
-    "format_timing_summary",
     "CONTINUUM_IMAGING_TIMING_PHASES",
     "CONTINUUM_MODEL_UPDATE_TIMING_PHASES",
     "IMAGING_TIMING_PHASES",
