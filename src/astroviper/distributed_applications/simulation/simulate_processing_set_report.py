@@ -41,6 +41,7 @@ def simulate_processing_set_report(
     compute_backend="dask",
     mpi_cluster_setup=None,
     thread_info=None,
+    fft_backend="pyfftw",
 ):
     """Make the report of a ``simulate_processing_set`` run.
 
@@ -92,6 +93,8 @@ def simulate_processing_set_report(
     mpi_cluster_setup : dict, optional
         Passed to ``point_spread_function_cube_single_field``.
     thread_info : dict, optional
+        Passed to ``point_spread_function_cube_single_field``.
+    fft_backend : {"numpy", "scipy", "pyfftw"}, default "pyfftw"
         Passed to ``point_spread_function_cube_single_field``.
 
     Returns
@@ -163,6 +166,7 @@ def simulate_processing_set_report(
                 compute_backend,
                 mpi_cluster_setup,
                 thread_info,
+                fft_backend,
             )
         _add_sky_components(
             document,
@@ -388,6 +392,7 @@ def _add_point_spread_function(
     compute_backend,
     mpi_cluster_setup,
     thread_info,
+    fft_backend,
 ):
     import xarray as xr
 
@@ -429,6 +434,7 @@ def _add_point_spread_function(
             overwrite=True,
             compute_backend=compute_backend,
             mpi_cluster_setup=mpi_cluster_setup,
+            fft_backend=fft_backend,
         )
 
     document.subsection("Noise")

@@ -10,10 +10,13 @@ import xradio.image.image_xds  # noqa: F401
 from astroviper.processing_functions.imaging.add_visibility_grid_continuum_mvc import (
     add_visibility_grid_mvc_single_field,
 )
+from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
+    as_gridding_kernel,
+)
 from astroviper.processing_functions.imaging.image_continuum_single_field import (
     prepare_model_uv_continuum_single_field,
 )
-from astroviper.processing_functions.imaging.imaging_setup_continuum_single_field import (
+from astroviper.processing_functions.imaging.imaging_setup.imaging_setup import (
     _get_reference_frequency,
     _imaging_weights_are_available,
     _validate_continuum_parameters,
@@ -131,7 +134,7 @@ def mvc_grid_inputs(monkeypatch):
         normalization += 3
 
     module = importlib.import_module(
-        "astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp"
+        "astroviper.processing_functions.imaging.gridders.anti_alias.anti_alias_grid_cpp"
     )
     monkeypatch.setattr(module, "anti_alias_grid", kernel)
     return ms, image
@@ -152,7 +155,9 @@ def test_mvc_grid_rejects_invalid_execution_parameters(
     with pytest.raises(
         TypeError if keyword == "complex_dtype" else ValueError, match=message
     ):
-        add_visibility_grid_mvc_single_field(ms, np.ones(8), image, **{keyword: value})
+        add_visibility_grid_mvc_single_field(
+            ms, as_gridding_kernel(np.ones(8)), image, **{keyword: value}
+        )
     assert not image.data_vars
 
 
@@ -168,11 +173,11 @@ def test_mvc_grid_passes_nonpositive_thread_count_to_kernel(
         received.append(kwargs["processing_function_threads"])
 
     module = importlib.import_module(
-        "astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp"
+        "astroviper.processing_functions.imaging.gridders.anti_alias.anti_alias_grid_cpp"
     )
     monkeypatch.setattr(module, "anti_alias_grid", kernel)
     add_visibility_grid_mvc_single_field(
-        ms, np.ones(8), image, processing_function_threads=threads
+        ms, as_gridding_kernel(np.ones(8)), image, processing_function_threads=threads
     )
     assert received == [threads]
 
@@ -210,7 +215,7 @@ def test_mvc_grid_rejects_malformed_measurement_sets(mvc_grid_inputs, fault, mes
         ms["VISIBILITY"] = xr.DataArray([1 + 0j], dims="invalid")
         error = ValueError
     with pytest.raises(error, match=message):
-        add_visibility_grid_mvc_single_field(ms, np.ones(8), image)
+        add_visibility_grid_mvc_single_field(ms, as_gridding_kernel(np.ones(8)), image)
     assert not image.data_vars
 
 
@@ -233,14 +238,16 @@ def test_mvc_grid_rejects_malformed_image_axes(mvc_grid_inputs, fault, message):
     else:
         image = image.drop_vars(fault)
     with pytest.raises(error, match=message):
-        add_visibility_grid_mvc_single_field(ms, np.ones(8), image)
+        add_visibility_grid_mvc_single_field(ms, as_gridding_kernel(np.ones(8)), image)
 
 
 @pytest.mark.parametrize("dtype", [np.complex64, np.complex128])
 def test_mvc_grid_reuses_existing_buffers_across_children(mvc_grid_inputs, dtype):
     ms, image = mvc_grid_inputs
     for _ in range(2):
-        add_visibility_grid_mvc_single_field(ms, np.ones(8), image, complex_dtype=dtype)
+        add_visibility_grid_mvc_single_field(
+            ms, as_gridding_kernel(np.ones(8)), image, complex_dtype=dtype
+        )
         if _ == 0:
             grid = image.VISIBILITY.data
             normalization = image.VISIBILITY_NORMALIZATION.data
@@ -249,6 +256,16 @@ def test_mvc_grid_reuses_existing_buffers_across_children(mvc_grid_inputs, dtype
     assert grid.dtype == dtype
     np.testing.assert_array_equal(grid, 2 + 4j)
     np.testing.assert_array_equal(normalization, 6)
+
+
+def test_mvc_grid_gives_the_new_arrays_its_coordinates(mvc_grid_inputs):
+    """The arrays are created with the image's coordinates: its frequency as stored."""
+    ms, image = mvc_grid_inputs
+    image = image.assign_coords(frequency=np.array([1e9, 1.1e9], dtype=np.float32))
+    add_visibility_grid_mvc_single_field(ms, as_gridding_kernel(np.ones(8)), image)
+    for name in ("VISIBILITY", "VISIBILITY_NORMALIZATION"):
+        assert image[name].frequency.dtype == np.float32
+        np.testing.assert_array_equal(image[name].frequency, [1e9, 1.1e9])
 
 
 @pytest.mark.parametrize(
@@ -265,7 +282,7 @@ def test_mvc_grid_rejects_incompatible_preallocated_buffers(
     mvc_grid_inputs, fault, message
 ):
     ms, image = mvc_grid_inputs
-    add_visibility_grid_mvc_single_field(ms, np.ones(8), image)
+    add_visibility_grid_mvc_single_field(ms, as_gridding_kernel(np.ones(8)), image)
     if fault == "missing_normalization":
         image = image.drop_vars("VISIBILITY_NORMALIZATION")
     elif fault == "grid_shape":
@@ -283,7 +300,7 @@ def test_mvc_grid_rejects_incompatible_preallocated_buffers(
     with pytest.raises(
         KeyError if fault == "missing_normalization" else ValueError, match=message
     ):
-        add_visibility_grid_mvc_single_field(ms, np.ones(8), image)
+        add_visibility_grid_mvc_single_field(ms, as_gridding_kernel(np.ones(8)), image)
 
 
 @pytest.mark.parametrize(

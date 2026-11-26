@@ -21,6 +21,7 @@ from astroviper.utils.data_partitioning import (
     calculate_frequency_chunking,
     check_compute_resources,
     get_compute_resources,
+    resolve_processing_function_threads,
 )
 
 # The simulated observation of tests/component/test_point_source_flux_recovery.py
@@ -275,3 +276,186 @@ def test_compute_resources_refuse_unknown_values():
         check_compute_resources({"scheduler": "slurm"})
     with pytest.raises(ValueError, match="hosts'\\]\\['node'\\] has unknown keys"):
         check_compute_resources({"hosts": {"node": {"cores": 8}}})
+
+
+def _log_messages(monkeypatch):
+    """The (level, message) of every info and warning of the toolviper logger."""
+    messages = []
+    for level in ("info", "warning"):
+        monkeypatch.setattr(
+            f"toolviper.utils.logger.{level}",
+            lambda message, *args, level=level, **kwargs: messages.append(
+                (level, message)
+            ),
+        )
+    return messages
+
+
+def test_resolve_threads_on_the_local_host(monkeypatch):
+    """0 gives the CPUs per thread of the local scheduler, at least 1, with a
+    warning when the scheduler alone has more threads than the host CPUs. The
+    CPUs are dask.system.CPU_COUNT, not os.cpu_count()."""
+    monkeypatch.setattr("dask.system.CPU_COUNT", 12)
+    monkeypatch.setattr("os.cpu_count", lambda: 64)
+    monkeypatch.setattr("os.process_cpu_count", lambda: 64, raising=False)
+    messages = _log_messages(monkeypatch)
+    with dask.config.set(scheduler="threads", num_workers=4):
+        assert resolve_processing_function_threads(0, "dask") == 3
+    with dask.config.set(scheduler="sync"):
+        assert resolve_processing_function_threads(0, "dask") == 12
+    with dask.config.set(scheduler="processes", num_workers=5):
+        assert resolve_processing_function_threads(0, "dask") == 2
+    assert messages == [
+        (
+            "info",
+            f"processing_function_threads=0 resolved to {count}, the CPUs per "
+            "Dask worker thread of the host with the fewest.",
+        )
+        for count in (3, 12, 2)
+    ]
+    messages.clear()
+    with dask.config.set(scheduler="threads", num_workers=16):
+        assert resolve_processing_function_threads(0, "dask") == 1
+    assert [level for level, _ in messages] == ["info", "warning"]
+    assert messages[1][1] == (
+        "processing_function_threads=1 times the Dask worker threads exceeds the "
+        f"CPUs of 1 host: {socket.gethostname()} (16 worker threads, 12 CPUs)."
+    )
+
+
+def test_resolve_threads_keeps_other_counts(monkeypatch):
+    """Counts other than 0 are returned unchanged, with the warning only for an
+    oversubscribed host; values that are not integers are not looked at."""
+    monkeypatch.setattr("dask.system.CPU_COUNT", 12)
+    messages = _log_messages(monkeypatch)
+    with dask.config.set(scheduler="threads", num_workers=4):
+        assert resolve_processing_function_threads(3, "dask") == 3
+        assert resolve_processing_function_threads(np.int64(2), "dask") == 2
+        assert resolve_processing_function_threads(-1, "dask") == -1
+        assert messages == []
+        assert resolve_processing_function_threads(4, "dask") == 4
+    assert messages == [
+        (
+            "warning",
+            "processing_function_threads=4 times the Dask worker threads exceeds the "
+            f"CPUs of 1 host: {socket.gethostname()} (4 worker threads, 12 CPUs).",
+        )
+    ]
+    monkeypatch.setattr(
+        "astroviper.utils.data_partitioning.get_compute_resources",
+        lambda *args: pytest.fail("a value that is not an integer needs no query"),
+    )
+    for value in (None, 1.5, True, False):
+        assert resolve_processing_function_threads(value, "dask") is value
+
+
+def test_resolve_threads_when_the_cpus_per_thread_are_not_known(monkeypatch):
+    """MPI (not queried), an unrecognised scheduler and a pool of unknown size
+    give 1, without a warning."""
+    messages = _log_messages(monkeypatch)
+    with ThreadPoolExecutor(2) as pool, dask.config.set(scheduler="threads", pool=pool):
+        assert resolve_processing_function_threads(0, "dask") == 1
+        assert resolve_processing_function_threads(64, "dask") == 64
+
+    def scheduler(*args, **kwargs):
+        raise AssertionError("not called")
+
+    with dask.config.set(scheduler=scheduler):
+        assert resolve_processing_function_threads(0, "dask") == 1
+    monkeypatch.setattr(
+        "astroviper.utils.data_partitioning.get_compute_resources",
+        lambda *args: pytest.fail("MPI gives no CPU counts to query"),
+    )
+    assert resolve_processing_function_threads(0, "mpi") == 1
+    assert resolve_processing_function_threads(64, "mpi") == 64
+    assert (
+        messages
+        == [
+            (
+                "info",
+                "processing_function_threads=0 resolved to 1: the CPUs per Dask worker "
+                "thread are not known.",
+            )
+        ]
+        * 3
+    )
+
+
+def test_resolve_threads_over_the_hosts_of_a_distributed_client(monkeypatch):
+    """The smallest ratio over the hosts, each host's CPUs the smallest count of
+    its workers; one warning lists every oversubscribed host."""
+
+    class Client:
+        def get(self, *args, **kwargs):
+            raise AssertionError("not called")
+
+        def run(self, function):
+            return {
+                "tcp://a:1": ("node-a", 16),
+                "tcp://b:1": ("node-b", 24),
+                "tcp://b:2": ("node-b", 16),
+            }
+
+    hosts = {"node-a": {"n_worker_slots": 4}, "node-b": {"n_worker_slots": 8}}
+    monkeypatch.setattr(
+        "astroviper.utils.data_partitioning.get_compute_resources",
+        lambda *args: {"scheduler": "distributed", "hosts": hosts},
+    )
+    messages = _log_messages(monkeypatch)
+    with dask.config.set(scheduler=Client().get):
+        assert resolve_processing_function_threads(0, "dask") == 2
+        assert resolve_processing_function_threads(3, "dask") == 3
+        assert resolve_processing_function_threads(5, "dask") == 5
+    assert [level for level, _ in messages] == ["info", "warning", "warning"]
+    assert messages[1][1].endswith(
+        "CPUs of 1 host: node-b (8 worker threads, 16 CPUs)."
+    )
+    assert messages[2][1].endswith(
+        "CPUs of 2 hosts: node-a (4 worker threads, 16 CPUs), "
+        "node-b (8 worker threads, 16 CPUs)."
+    )
+
+
+def test_resolve_threads_with_a_host_not_known(monkeypatch):
+    """A host whose workers do not answer the CPU query (they left after
+    get_compute_resources counted them) gives 1."""
+
+    class Client:
+        def get(self, *args, **kwargs):
+            raise AssertionError("not called")
+
+        def run(self, function):
+            return {"tcp://a:1": ("node-a", 16)}
+
+    hosts = {"node-a": {"n_worker_slots": 4}, "node-b": {"n_worker_slots": 8}}
+    monkeypatch.setattr(
+        "astroviper.utils.data_partitioning.get_compute_resources",
+        lambda *args: {"scheduler": "distributed", "hosts": hosts},
+    )
+    messages = _log_messages(monkeypatch)
+    with dask.config.set(scheduler=Client().get):
+        assert resolve_processing_function_threads(0, "dask") == 1
+    assert messages == [
+        (
+            "info",
+            "processing_function_threads=0 resolved to 1: the CPUs per Dask worker "
+            "thread are not known.",
+        )
+    ]
+
+
+def test_resolve_threads_of_a_local_cluster(monkeypatch):
+    """The workers of a distributed client report dask.system.cpu_count(), not
+    os.cpu_count()."""
+    from distributed import Client, LocalCluster
+
+    monkeypatch.setattr("dask.system.cpu_count", lambda: 7)
+    monkeypatch.setattr("os.cpu_count", lambda: 64)
+    monkeypatch.setattr("os.process_cpu_count", lambda: 64, raising=False)
+    with (
+        LocalCluster(
+            n_workers=2, threads_per_worker=1, processes=False, dashboard_address=None
+        ) as cluster,
+        Client(cluster),
+    ):
+        assert resolve_processing_function_threads(0, "dask") == 3

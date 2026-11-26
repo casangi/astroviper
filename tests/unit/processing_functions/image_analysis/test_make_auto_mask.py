@@ -1,9 +1,11 @@
 """Unit tests for astroviper.processing_functions.image_analysis.make_auto_mask."""
 
+import importlib
 import math
 
 import numpy as np
 import pytest
+import scipy.fft
 import scipy.signal
 import xarray as xr
 
@@ -18,7 +20,7 @@ from astroviper.processing_functions.image_analysis.make_auto_mask import (
     _smooth_and_cut,
     make_auto_mask,
 )
-from astroviper.processing_functions.imaging.restore import (
+from astroviper.processing_functions.imaging.imaging_conclude.restore import (
     _elliptical_gaussian_kernel,
 )
 
@@ -680,3 +682,77 @@ def test_the_beam_may_come_in_any_dimension_order():
     transposed["BEAM"] = transposed.BEAM.transpose("beam_param", "polarization", ...)
     make_auto_mask(transposed, {})
     np.testing.assert_array_equal(transposed.MASK.values, xds.MASK.values)
+
+
+@pytest.mark.parametrize("fft_backend", ["numpy", "scipy", "pyfftw"])
+@pytest.mark.parametrize("size", [64, 182])
+def test_mask_convolution_with_three_workers_stays_within_rounding(size, fft_backend):
+    """The smoothing convolution under scipy.fft.set_workers(3) gives the bits of
+    one worker under "pyfftw" (measured at these sizes) and "numpy" (one thread),
+    and stays within 8 eps of the peak of one worker under "scipy", whose bits may
+    depend on the workers at the padded size of the box of 182 (they do on arm64
+    with scipy 1.18.1)."""
+    module = importlib.import_module(
+        "astroviper.processing_functions.image_analysis.make_auto_mask"
+    )
+    rng = np.random.default_rng(2)
+    kernel = rng.random((37, 37))
+    box = rng.random((size, size)) > 0.7
+    results = []
+    for workers in (1, 3):
+        with scipy.fft.set_workers(workers):
+            results.append(module._convolve(box, kernel, fft_backend))
+    one, three = results
+    if fft_backend != "scipy":
+        np.testing.assert_array_equal(three, one)
+        return
+    bound = 8 * np.finfo(one.dtype).eps * np.abs(one).max()
+    assert np.abs(three - one).max() <= bound
+
+
+def _fft_backends_seen(monkeypatch):
+    """(function, fft_backend) of every call of the FFT module's restore and mask
+    forms, in call order."""
+    from astroviper.processing_functions import fft
+
+    seen = []
+    for name in ("rfft2", "irfft2", "ifft", "irfft", "set_workers"):
+        real = getattr(fft, name)
+
+        def spy(*args, _real=real, _name=name, **kwargs):
+            seen.append((_name, kwargs["fft_backend"]))
+            return _real(*args, **kwargs)
+
+        monkeypatch.setattr(fft, name, spy)
+    return seen
+
+
+@pytest.mark.parametrize("fft_backend", ["numpy", "pyfftw"])
+def test_the_mask_runs_every_transform_in_its_fft_backend(fft_backend, monkeypatch):
+    """An update with a previous mask and a negative threshold smooths the new, the
+    grown and the negative masks, each in its fft_backend."""
+    plane = noise_plane() + gaussian((40, 60), 50.0) - gaussian((70, 20), 30.0)
+    previous = gaussian((40, 60), 1.0) > 0.5
+    seen = _fft_backends_seen(monkeypatch)
+    make_auto_mask(
+        image(plane, mask=previous),
+        {"negative_threshold": 4.0},
+        fft_backend=fft_backend,
+    )
+    assert [name for name, _ in seen].count("irfft2") == 3
+    assert {name for name, _ in seen} == {"set_workers", "rfft2", "irfft2"}
+    assert {value for _, value in seen} == {fft_backend}
+
+
+@pytest.mark.parametrize("fft_backend", ["SciPy", "pyFFTW"])
+def test_an_unknown_fft_backend_is_refused(fft_backend, monkeypatch):
+    """The check block refuses it before any call of the FFT module; a checked
+    call at the module's first call."""
+    plane = noise_plane() + gaussian((40, 60), 50.0)
+    seen = _fft_backends_seen(monkeypatch)
+    with pytest.raises(ValueError, match="fft_backend"):
+        make_auto_mask(image(plane), {}, fft_backend=fft_backend)
+    assert seen == []
+    with pytest.raises(ValueError, match="fft_backend"):
+        make_auto_mask(image(plane), {}, fft_backend=fft_backend, input_checked=True)
+    assert seen == [("set_workers", fft_backend)]

@@ -2,7 +2,7 @@
 
 The tangent-plane (``w = 0``) response of a unit-flux elliptical Gaussian is the
 imaging restore module's
-:func:`~astroviper.processing_functions.imaging.restore.elliptical_gaussian_uv_taper`
+:func:`~astroviper.processing_functions.imaging.imaging_conclude.restore.elliptical_gaussian_uv_taper`
 (the single source of truth for the ``[major, minor, pa]`` FWHM parametrisation).
 This module adds the **w term**.  In the frame of the component (its centre at
 the pole, coordinates ``(u, v, w)`` rotated accordingly) the measurement
@@ -60,10 +60,10 @@ def elliptical_gaussian_uv_response(u, v, major, minor, pa, w=0.0) -> np.ndarray
 
     See Also
     --------
-    astroviper.processing_functions.imaging.restore.elliptical_gaussian_uv_taper :
+    astroviper.processing_functions.imaging.imaging_conclude.restore.elliptical_gaussian_uv_taper :
         the ``w = 0`` form, reproduced exactly.
     """
-    from astroviper.processing_functions.imaging.restore import (
+    from astroviper.processing_functions.imaging.imaging_conclude.restore import (
         elliptical_gaussian_uv_taper,
     )
 

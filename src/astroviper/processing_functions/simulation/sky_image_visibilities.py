@@ -2,14 +2,14 @@
 
 The image is predicted with the imager's own prediction functions:
 ``"dft"`` with
-:func:`~astroviper.processing_functions.imaging.direct_fourier_transform.predict_dft_visibilities_single_field`
-(the exact measurement equation of the simulator, the w term included when the
-``uvw`` hold it), ``"gridded"`` with the anti-aliasing kernel of
-``gridding_kernel_params``
-(:func:`~astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder.fft_norm_img_xds`
+:func:`~astroviper.processing_functions.imaging.get_visibility_grid.get_visibility_grid_single_field`
+and the gridder ``"direct_fourier_transform"`` (the exact measurement equation
+of the simulator, the w term included when the ``uvw`` hold it), ``"gridded"``
+with the anti-aliasing kernel of ``gridding_kernel_params``
+(:func:`~astroviper.processing_functions.imaging.normalization.normalize_image.fft_norm_img_xds`
 and
-:func:`~astroviper.processing_functions.imaging.get_visibility_grid.get_visibility_grid_single_field`),
-which is two dimensional: it has no w term.
+:func:`~astroviper.processing_functions.imaging.get_visibility_grid.get_visibility_grid_single_field`
+with the gridder ``"anti_alias"``), which is two dimensional: it has no w term.
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ def sky_image_visibilities(
     gridding_kernel_params: dict | None = None,
     fft_padding: float = 1.2,
     processing_function_threads: int = 1,
+    fft_backend: str = "pyfftw",
 ) -> np.ndarray:
     """Visibilities of a Stokes sky image on the simulated baselines.
 
@@ -58,11 +59,13 @@ def sky_image_visibilities(
         degridding with ``gridding_kernel_params`` (no w term).
     gridding_kernel_params : dict, optional
         Kernel of ``predict="gridded"`` (see
-        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.resolve_gridding_kernel_params`).
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.resolve_gridding_kernel_params`).
     fft_padding : float, optional
         FFT padding of ``predict="gridded"``.
     processing_function_threads : int, optional
         Threads of the prediction kernels.
+    fft_backend : {"numpy", "scipy", "pyfftw"}, default "pyfftw"
+        FFT library of ``predict="gridded"``.
 
     Returns
     -------
@@ -166,28 +169,30 @@ def sky_image_visibilities(
     )
 
     if predict == "dft":
-        from astroviper.processing_functions.imaging.direct_fourier_transform import (
-            predict_dft_visibilities_single_field,
+        from astroviper.processing_functions.imaging.get_visibility_grid import (
+            get_visibility_grid_single_field,
         )
 
-        predict_dft_visibilities_single_field(
+        get_visibility_grid_single_field(
             ms_xds,
+            None,
             img_xds,
             ms_data_group_in_name="base",
             ms_data_group_out_name="model",
             image_data_group_in_name="model",
             chan_mode="cube",
             processing_function_threads=processing_function_threads,
+            gridder="direct_fourier_transform",
         )
     else:
-        from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
-            fft_norm_img_xds,
-        )
         from astroviper.processing_functions.imaging.get_visibility_grid import (
             get_visibility_grid_single_field,
         )
-        from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
             make_gridding_kernel,
+        )
+        from astroviper.processing_functions.imaging.normalization.normalize_image import (
+            fft_norm_img_xds,
         )
 
         kernel = make_gridding_kernel(gridding_kernel_params, fft_padding)
@@ -206,7 +211,8 @@ def sky_image_visibilities(
             image_data_variables_keep=["sky"],
             processing_function_threads=processing_function_threads,
             complex_dtype=np.complex128,
-            gridding_kernel=kernel,
+            gcf_xds=kernel,
+            fft_backend=fft_backend,
         )
         get_visibility_grid_single_field(
             ms_xds,
@@ -219,5 +225,6 @@ def sky_image_visibilities(
             chan_mode="cube",
             fft_padding=fft_padding,
             processing_function_threads=processing_function_threads,
+            gridder="anti_alias",
         )
     return np.asarray(ms_xds["VISIBILITY_MODEL"].values, dtype=np.complex128)

@@ -19,7 +19,7 @@ from astroviper.distributed_applications.imaging import image_cube_single_field
 from astroviper.distributed_applications.imaging.point_spread_function_cube_single_field import (
     point_spread_function_cube_single_field,
 )
-from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
     DEFAULT_GRIDDING_KERNEL_PARAMS,
 )
 from astroviper.processing_functions.imaging.utils.imaging_dict import Key
@@ -196,7 +196,7 @@ def test_matches_imager_setup(natural_point_spread_function, natural_dirty_image
         dirty_image.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.values[0],
         rtol=1e-6,
     )
-    records = result["deconvolution"].data
+    records = result["deconvolution"]
     imager_sidelobe = np.array(
         [
             [

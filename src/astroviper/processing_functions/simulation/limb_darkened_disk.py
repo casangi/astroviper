@@ -32,7 +32,7 @@ major axis at position angle ``pa`` -- the ellipse of diameters
 
 This is the same quadratic form and position-angle convention as the Gaussian
 source component
-(:func:`~astroviper.processing_functions.imaging.restore.elliptical_gaussian_uv_taper`):
+(:func:`~astroviper.processing_functions.imaging.imaging_conclude.restore.elliptical_gaussian_uv_taper`):
 the major axis lies along ``(sin pa, cos pa)`` in ``(l, m)``.  The unit tests
 pin :func:`limb_darkened_disk_uv_response` to the numerical Hankel transform
 of the radial profile and to the FFT of :func:`limb_darkened_disk_image`, so
@@ -134,7 +134,7 @@ def limb_darkened_disk_uv_response(
     See Also
     --------
     limb_darkened_disk_image : the image-plane form (unit total flux).
-    astroviper.processing_functions.imaging.restore.elliptical_gaussian_uv_taper :
+    astroviper.processing_functions.imaging.imaging_conclude.restore.elliptical_gaussian_uv_taper :
         the Gaussian analogue sharing the ``[major, minor, pa]`` convention.
     """
     from scipy.special import gamma, jv

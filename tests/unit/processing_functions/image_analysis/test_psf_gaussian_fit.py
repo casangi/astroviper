@@ -344,15 +344,37 @@ def test_psf_gaussian_fit_core_threaded_matches_serial():
     threaded = psf_gaussian_fit_core(
         data.copy(), blc, trc, sampling, cutoff, delta, processing_function_threads=4
     )
-    auto = psf_gaussian_fit_core(
+    below_one = psf_gaussian_fit_core(
         data.copy(), blc, trc, sampling, cutoff, delta, processing_function_threads=0
     )
 
     assert serial.shape == (2, 3, 2, 3)
     np.testing.assert_allclose(threaded, serial, rtol=0, atol=0)
-    np.testing.assert_allclose(auto, serial, rtol=0, atol=0)
+    np.testing.assert_allclose(below_one, serial, rtol=0, atol=0)
     # Every slice should have produced positive widths.
     assert np.all(serial[..., :2] > 0)
+
+
+def test_psf_gaussian_fit_core_below_one_runs_on_the_calling_thread(monkeypatch):
+    """A count below 1 fits every slice on the calling thread, without a pool."""
+    data, x, y = _make_multi_slice_cube(shape=(1, 2, 1, 61, 61))
+    delta = np.array([np.abs(x[1] - x[0]), np.abs(y[1] - y[0])])
+    monkeypatch.setattr(
+        "astroviper.processing_functions.image_analysis."
+        "point_spread_function_gaussian_fit.ThreadPoolExecutor",
+        lambda *args, **kwargs: pytest.fail("a count below 1 started a thread pool"),
+    )
+    for count in (0, -1):
+        result = psf_gaussian_fit_core(
+            data.copy(),
+            np.array([10, 10]),
+            np.array([50, 50]),
+            np.array([31, 31]),
+            0.1,
+            delta,
+            processing_function_threads=count,
+        )
+        assert np.all(result[..., :2] > 0)
 
 
 def test_psf_gaussian_fit_core_processing_function_threads_exceeds_tasks():

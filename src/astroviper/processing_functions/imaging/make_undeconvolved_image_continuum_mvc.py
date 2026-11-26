@@ -10,7 +10,7 @@ def make_undeconvolved_image_mvc_single_field(
     ps_xdt,
     img_xds,
     image_params,
-    cgk_1D,
+    gcf_xds,
     ms_data_group_in_name="corrected",
     image_data_group_out_name="residual",
     processing_function_threads=1,
@@ -52,17 +52,31 @@ def make_undeconvolved_image_mvc_single_field(
         ``primary_beam_ipower`` is the exponent applied to the voltage pattern
         (default 2, the power beam). These primary-beam keys override the inferred
         beam prescription.
-    cgk_1D : GriddingKernel or numpy.ndarray
-        The gridding kernel
-        (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`),
-        or a bare table of CASA's prolate spheroidal kernel of support 7.
+    gcf_xds : xarray.Dataset
+        The ``gcf_xds`` of the gridding kernel, from
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.make_gridding_kernel`,
+        or from
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.as_gridding_kernel`
+        for a bare table of CASA's prolate spheroidal kernel of support 7.
     ms_data_group_in_name : str, optional
         Measurement Set data group registering residual visibilities and weights.
     image_data_group_out_name : str, optional
         Output image data-group name.
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
-        kernels.
+        kernels. A distributed application resolves ``0`` (auto) once, before
+        its checks, to the CPUs per Dask worker thread of the host with the
+        fewest, at least 1 (1 where these are not known, as under MPI), and
+        warns when a host's worker threads times the count exceed its CPUs
+        (see
+        :func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).
+        Node tasks and processing functions do not resolve ``0``; those that
+        check the count refuse it. Given a count below 1, a C++ kernel and the
+        PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
+        and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
+        ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
+        numpy.fft takes no count: under ``"numpy"`` the Python FFTs run one
+        thread.
     complex_dtype : numpy.dtype or None, optional
         Complex dtype of the channelized residual UV grids.
 
@@ -94,6 +108,9 @@ def make_undeconvolved_image_mvc_single_field(
     from astroviper.processing_functions.imaging.add_visibility_grid_continuum_mvc import (
         add_visibility_grid_mvc_single_field,
     )
+    from astroviper.processing_functions.imaging.gridders.anti_alias.gridder_anti_alias import (
+        GridderAntiAlias,
+    )
     from astroviper.processing_functions.imaging.utils import drop_auto_correlations
 
     if complex_dtype is None:
@@ -110,15 +127,12 @@ def make_undeconvolved_image_mvc_single_field(
         start = time.time()
         add_visibility_grid_mvc_single_field(
             ms_xdt,
-            cgk_1D,
+            gcf_xds,
             img_xds,
             ms_data_group_in_name=ms_data_group_in_name,
             image_data_group_in_name=image_data_group_out_name,
             image_data_group_out_name=image_data_group_out_name,
-            image_data_group_out_modified={
-                "visibility": "VISIBILITY",
-                "visibility_normalization": ("VISIBILITY_NORMALIZATION"),
-            },
+            image_data_group_out_modified=dict(GridderAntiAlias.grid_roles),
             overwrite=True,
             fft_padding=image_params["fft_padding"],
             processing_function_threads=(processing_function_threads),

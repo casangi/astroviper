@@ -41,6 +41,16 @@ See [README.md](README.md) for instructions.
   single-kernel build, and the **`-ffp-contract=off`** reproducibility flag —
   see [the memory contract](#6-the-python--c-memory-contract); do not remove
   it). To change a flag for every kernel, edit that file — and only that file.
+- **Shared C++ code**: headers that several kernels use live in
+  `src/astroviper/processing_functions/include/`, which every module has on
+  its include path; `fft.hpp` there is the FFT wrapper of the deconvolvers,
+  and `cos_sin_of_turns.hpp` the phase function of the direct Fourier
+  transform and the simulator's visibility kernel.
+  The divergence test shared by the deconvolvers stays in
+  `deconvolvers/include/plane_stop_test.hpp`. pocketfft has one configuration
+  for every kernel, set in `cmake/AstroviperPybind.cmake` (the one-definition
+  rule): `fft.hpp` refuses a build without threads or with another cache
+  size, and no source defines a pocketfft macro.
 - **Build type (Release / Debug / …)**: set solely via `build-type` in
   `[tool.scikit-build.cmake]` of [`pyproject.toml`](pyproject.toml). The
   comment block above that key is the authoritative documentation: the flags
@@ -127,7 +137,9 @@ Each of layers 1–3 is further split by **subdomain**, mirrored across the
 layers where implemented (not every subdomain exists in every layer yet):
 `imaging`, `image_analysis`, `flagging`, `visibility_manipulation`,
 `calibration`, `model`, `simulation`. Additional **subdomains** can be added in
-the future.
+the future. `processing_functions/fft.py` sits beside the subdomains, as `include/`
+does: it holds Python FFTs in the library that `fft_backend` names (`"numpy"`,
+`"scipy"` or `"pyfftw"`).
 
 ### Layer responsibilities & boundaries
 1. **`distributed_applications/`** — Constructs `parallel_coords`, maps a `node_task`
@@ -154,9 +166,9 @@ the future.
    images one frequency channel at a time so every channel runs its own
    imaging cycle loop); never write a processing function that assumes a
    single time, channel or polarization plane.
-   > **Open question:** should temporary/cache data (e.g. a cfcache) be allowed
-   > to be written to disk from this layer? Undecided — raise it before relying
-   > on either answer.
+   Temporary and cache data on disk (for example a cache of gridding
+   convolution functions) are read and written by node tasks, never from
+   this layer.
 4. **`utils/`** — Cross-cutting helpers. Most important:
    `utils/data_group_tools.py` (data-group bookkeeping — read it before touching
    data groups) and `utils/io.py` (Zarr variable definitions + chunk writers).
@@ -171,6 +183,20 @@ even though they understand graph configuration and structure. This exception
 permits validation only: graph construction, scheduling, and execution remain
 in `distributed_applications/`; input/output data I/O remains outside the
 validation module. Other processing functions retain the normal layer rules.
+
+**`parked/` package:**
+`src/astroviper/parked/` keeps old code for reference instead of deleting it;
+its README lists each parked module and where it came from (path and commit).
+The package is outside the four layers and is not tested or maintained:
+nothing outside it may import from it, and coverage leaves it out
+(`[tool.coverage.run]` in [`pyproject.toml`](pyproject.toml)).
+
+**Layer-rule test:**
+`tests/unit/test_layer_rule.py` checks every import statement of
+`src/astroviper`, parsed with `ast` without importing the package, and fails
+on an import from a higher layer and on an import from `parked/` by a module
+outside it. The only upward imports it accepts are four existing ones inside
+functions of `utils/`, which it lists; do not add another.
 
 ### Public API surface
 Each layer/subdomain re-exports its entry points via `__init__.py`. The imaging
@@ -216,10 +242,11 @@ function, `processing_functions/simulation/antenna_beams.py::symmetric_beam_resp
 `processing_functions/imaging/primary_beam/airy_disk.py` (textbook by default,
 CASA's `PBMath1DAiry` with `func="casa_airy"`) and the EVLA beam polynomial,
 zero beyond `max_rad_1GHz` when the model has one. The Adaptive Scale Pixel
-deconvolver (`processing_functions/imaging/deconvolvers/aspclean/`, a port of
-CASA's `AspMatrixCleaner`) does its FFTs with the vendored
-`include/pocketfft_hdronly.h` (the BSD-3 header-only FFT behind NumPy/SciPy,
-kept verbatim with its licence block); its per-Aspen L-BFGS
+deconvolver (`processing_functions/imaging/model_update/deconvolvers/aspclean/`, a port of
+CASA's `AspMatrixCleaner`) does its FFTs through
+`processing_functions/include/fft.hpp`, as MTMFS does, over the vendored
+pocketfft (`pocketfft_hdronly.h` beside it, the BSD-3 header-only FFT behind
+NumPy/SciPy, kept verbatim with its licence block); its per-Aspen L-BFGS
 (`include/asp_lbfgs.hpp`) reproduces ALGLIB's `minlbfgs` as CASA and LibRA
 call it (unpreconditioned, the scale only in the stopping tests, More-Thuente
 line search; written independently, as ALGLIB is GPL) and is exposed for
@@ -250,6 +277,19 @@ PSF beam fit is switchable
 `StokesImageUtil::FitGaussianPSF` (CAS-13022,
 `processing_functions/image_analysis/psf_gaussian_fit_cpp/`) that reproduces
 `tclean`'s restoring beam exactly on the same PSF.
+
+**FFTs in Python.** Every FFT done in Python (the gridder normalization, the
+restore, the automatic mask, the MT-MFS spatial-Hessian check, the Zernike beams
+and the fringe fit) goes through `processing_functions/fft.py`, in the library
+`fft_backend` names: `"numpy"`, `"scipy"` or `"pyfftw"`; the three round
+differently. The shifts (and their fold into sign checkerboards on even axes),
+the frequencies and `next_fast_len`, which also sizes the gridders' grids
+(`processing_functions/imaging/utils/fft_sizing.py`), do not depend on it. No
+other module imports `numpy.fft`, `scipy.fft`, `scipy.fftpack` or pyFFTW, or a
+scipy.signal or astropy function that transforms inside (the list is in
+`tests/unit/test_fft_module_rule.py`); `check_fft_backend` imports the library
+by name to check that it is installed. The deconvolvers' C++ kernels transform
+with pocketfft through `processing_functions/include/fft.hpp`.
 
 **PSF of twice the image size.** The PSF that `exact_psf_subtraction`
 subtracts (cube Hogbom only; Asp and continuum imaging refuse the option)
@@ -495,8 +535,9 @@ match them in any new kernel:
    silently allocating a converted temporary. **Never add `forcecast` to a
    large array.**
 2. **Explicit checks before compute**: verify `ndim`/shape, require
-   C-contiguity (`require_c_contiguous(...)` — tells the caller to use
-   `np.ascontiguousarray()` if needed), and for outputs require writeability
+   C-contiguity (`require_c_contiguous(...)` of
+   `processing_functions/include/array_contiguity.hpp` — tells the caller to
+   use `np.ascontiguousarray()` if needed), and for outputs require writeability
    (raise if `info.readonly` / `!arr.writeable()` — message: "modified in
    place"). The MT-MFS residual is the documented exception: its spatial
    planes must be contiguous, but its outer Taylor-term stride may exceed one
@@ -509,7 +550,36 @@ match them in any new kernel:
    array copy. Imaging-weight kernels retain their separately dispatched aligned
    fast path. Concurrent gridding retains aligned atomics and uses striped locks
    for unaligned destinations. FFT inputs that require aligned storage use at
-   most one row of scratch, never an image-sized realignment buffer.
+   most one row of scratch, never an image-sized realignment buffer. The gridder
+   normalization's FFTs go through `processing_functions/fft.py`. On even axes it
+   transforms an aligned plane in place under `"numpy"` and `"scipy"`; under
+   `"pyfftw"` pyFFTW's interface copies the plane twice and allocates the result
+   when it plans (3 planes, then 1; a cached plan keeps its arrays 0.1-0.2 s). On
+   even axes an unaligned plane goes through one aligned row under `"numpy"` and
+   `"pyfftw"`; scipy copies it (1 plane). Under `"scipy"` the forward transform
+   of an aligned plane is stored back into the plane through a plane-sized
+   temporary, as scipy returns another array over the plane's memory. On an odd
+   axis the shifts are rolls, a copy of the plane each, and the transform writes
+   one new plane under `"numpy"` and `"scipy"` (2 planes with the roll) and takes
+   the interface's under `"pyfftw"` (4 planes with the roll when it plans, then
+   3). numpy computes single-precision forward transforms in double precision and
+   copies the lines of each call to double and back: 32 rows of a plane for a
+   block of 8 lines of an aligned plane, 4 per line of an unaligned one. The
+   restore's forward transforms write a new half spectrum, and its inverse works
+   in place along the first axis and writes the output plane: its convolution
+   keeps the spectrum and the output (2 planes) besides the plane under every
+   option, pyFFTW's through direct `pyfftw.FFTW` plans, numpy's with its
+   double-precision copies of a block of 8 lines in single precision. Under
+   `"scipy"` an unaligned plane is copied whole before its forward transform (1
+   plane, as at the gridder normalization; 3 planes in a restore to a target
+   beam, which sums the model and residual spectra before one inverse); numpy
+   and pyFFTW read it through one aligned row. The automatic mask's padded
+   transforms take three padded planes under every option, pyFFTW's through
+   direct plans. Under `"pyfftw"` the Zernike beams and the fringe search go
+   through pyFFTW's interface: 4 and 3 output planes when it plans, 3 and 2
+   after, against 2 under `"numpy"` and `"scipy"`. The MT-MFS spatial-Hessian
+   check takes scipy's peak under every option, plus numpy's double-precision
+   copies of a block of 8 lines in single precision.
 3. **In-place output.** Accumulators (`grid`, `normalization`) and CLEAN buffers
    (residual/model cubes) are written through `mutable_data()` pointers; they
    are *not* returned. Repeated calls accumulate (e.g. summing over MSes).
@@ -526,9 +596,32 @@ match them in any new kernel:
    `complex64`/`complex128` grid and writes `complex64`/`complex128`
    visibilities in place — all four combinations are explicitly instantiated.
 6. **Threading inside the kernel** is via a `processing_function_threads` argument →
-   `std::thread` workers; `processing_function_threads <= 0` falls back to
-   `std::thread::hardware_concurrency()`, `1` runs serial. Concurrent writes to
-   shared grid cells use lock-free `std::atomic_ref<double>` adds (C++20) —
+   `std::thread` workers; a count below 1 runs one thread, as `1` does (serial),
+   never `std::thread::hardware_concurrency()`. The kernels run their parallel loops
+   with `processing_functions/include/parallel_for.hpp` (`thread_count`, `run_threads`,
+   `parallel_for`), except the many-threads Hogbom, whose persistent `RowThreadPool`
+   keeps its threads across the iterations of a model update and takes its count from
+   `thread_count`. A task's `processing_function_threads`
+   is the most threads its processing functions compute with at once: a kernel that
+   runs FFTs inside a parallel loop shares the count between them and never
+   multiplies it (Asp gives each running plane `max(1, count / active)` FFT threads,
+   `FftThreads` in `aspclean/src/asp_clean.cpp`). The results do not depend on the
+   count, except the anti-alias gridders', whose atomic adds into shared cells sum in
+   the threads' order, and those of the Python FFTs, whose libraries may round
+   differently with another count at some sizes. The Python FFTs (`normalize_image`,
+   the restore, `primary_beam_correction`, feather, `make_auto_mask`) pass the count to
+   scipy.fft and pyfftw as it is: their scipy interfaces refuse `0` and read a
+   negative `n` (down to `-os.cpu_count()`) as `os.cpu_count() + 1 + n`, and
+   `pyfftw.FFTW`, which `processing_functions/fft.py` uses for unaligned buffers under
+   `"pyfftw"`, takes it as an unsigned int (a negative count raises `OverflowError`);
+   the direct `pyfftw.FFTW` plans of the restore and the automatic mask read it as
+   scipy.fft does; numpy.fft takes no count: under `"numpy"` the Python FFTs run one
+   thread. The MT-MFS spatial-Hessian check, the Zernike beams and the fringe fit,
+   which have no count, run one thread. Outside the count are the
+   BLAS and OpenMP threads of NumPy and SciPy, and the I/O threads of the chunk
+   reads, which read up to the count of arrays at once, each with its own pool of up
+   to `_READ_CONCURRENCY` threads (`utils/chunk_io/zarr_chunks.py`). Concurrent
+   writes to shared grid cells use lock-free `std::atomic_ref<double>` adds (C++20) —
    `complex<double>` is added as two `double` lanes.
 
 ---
@@ -561,7 +654,20 @@ When applicable multiple instances of map-reduce can be done in a single distrib
 - **GraphVIPER Map-Reduce**: Distributed parallelism using Dask or MPI
 - **Within a task**: `processing_function_threads`, passed down unchanged from
   distributed_applications to the C++ kernels (the same parameter name at every layer of the
-  stack).
+  stack). A distributed application first resolves `0` (auto), once, with
+  `utils/data_partitioning.py::resolve_processing_function_threads`: the CPUs per Dask worker
+  thread of the host with the fewest (`dask.system.cpu_count()` where the tasks run, over the
+  host's worker threads), at least 1, and 1 where these are not known (MPI, a scheduler not
+  recognised). When a host's worker threads times the count exceed its CPUs, it logs one warning
+  that lists every such host; it never refuses a count.
+  `tests/unit/distributed_applications/test_processing_function_threads.py` runs each
+  application that takes the count and tests that the count reaches each C++ kernel and
+  Python FFT that takes one and that its runs call (every C++ kernel with a count but
+  Asp's plane `clean`, which no application calls), and that `0` is resolved; it tests the
+  warning with one application. List a new extension module there, and a new binding that
+  takes the count, with a run that reaches it.
+  `tests/unit/processing_functions/test_kernel_thread_counts.py` fails on a kernel source,
+  other than the vendored pocketfft, that names `hardware_concurrency`.
 
 ### Why this design (do not regress it)
 GraphVIPER deliberately **loads data inside compute nodes** rather than as
@@ -589,7 +695,7 @@ per-variable nodes.
     `SKY_MODEL`).
   - **Functions / variables**: `snake_case`, **descriptive** (`image_size`, not
     `imsize`).
-  - **Classes**: `CamelCase` (`CycleController`, `ReturnDict`).
+  - **Classes**: `CamelCase` (`Interface`).
   - **Consistency**: Parameter names should be consistent throughout the stack.
     One name per parameter and one spelling per value: no aliases, no case
     folding. An unsupported value or combination is refused, never coerced or
@@ -602,13 +708,32 @@ per-variable nodes.
     parameters. Never call anything a major or minor cycle (major/minor axis
     of a Gaussian beam is fine). CASA parameter names may be cited in brackets
     for orientation, e.g. `max_cycles` [CASA `nmajor`]. **Cycle control** is
-    the stop test between the residual update and the model update
-    (`CycleController`); **iteration control** is the stop test inside the
-    model update (the deconvolver kernels). A quantity keeps one name from the
-    cycle controller down to the kernel arguments.
+    the stop test between the residual update and the model update (the
+    functions of `processing_functions/imaging/utils/cycle_control.py`,
+    which work on the dictionary
+    `cycle_control_state`); **iteration control** is the stop test inside the
+    model update (the deconvolver kernels). A quantity keeps one name from
+    cycle control down to the kernel arguments.
+- **Interface classes**: a class exists only where several implementations
+  share an interface (imagers, gridders, deconvolvers, solvers). It has the
+  metaclass `astroviper.utils.interface.Interface`, which enforces the first
+  two rules:
+  - static methods only: no `__init__`, instances, class methods or
+    properties;
+  - class attributes are constants that declare the implementation (its
+    `name`, what it supports) and are never reassigned;
+  - a base class defines the interface and the shared helpers, and a subclass
+    calls a helper through the base-class name (no dispatch through `cls` or
+    `self`);
+  - a registry (`make_registry`) maps the user's string to a class; every
+    public function takes the registry name (a `str` such as `"anti_alias"`),
+    and the class is looked up in the registry where its methods are called;
+    drivers never name an implementation;
+  - a method receives all its inputs as arguments, and state lives in the
+    datasets it is given (`ps_xdt`, `img_xds`, `gcf_xds`), never in the class.
 - **Formatting**: **Ruff** (enforced by CI + pre-commit). Don't hand-format.
 - **Imports**: prefer **absolute** imports (`from
-  astroviper.processing_functions.imaging.residual_update import ...`). Relative
+  astroviper.processing_functions.imaging.residual_update.residual_update import ...`). Relative
   imports appear only as short re-exports in `__init__.py` files. Heavy/optional
   deps (dask, zarr, matplotlib, the C++ ext, even numpy in some hot node-task
   paths) are frequently imported **inside functions** to keep worker import time
@@ -646,8 +771,8 @@ per-variable nodes.
   ```
   The log level in node_tasks and processing_functions should always be debug or higher because there will be many instances of these functions.
 - **Performance**: vectorize with NumPy; if not feasible, use C++; verify with timing.
-  Large arrays are timed via `T_*` keys collected into per-chunk `DataFrame`s /
-  `ReturnDict`s — keep that bookkeeping when adding stages.
+  Large arrays are timed via `T_*` keys collected into per-chunk `DataFrame`s —
+  keep that bookkeeping when adding stages.
 - **Parameter validation**: the user-facing distributed-graph entry points use
   **toolviper's schema validation** — decorate the function with
   `@toolviper.utils.parameter.validate(config_dir=...)`. **Rule: the
@@ -658,6 +783,9 @@ per-variable nodes.
   key is the function name. JSON schemas check basic structure, types, and
   allowed strings; numerical bounds and conditional relationships belong in
   Python.
+  A schema runs only at the distributed application it decorates; the validators
+  of `processing_functions/imaging/config_check/` can also run below it (next
+  bullet), so an allowed-value list may be in both: change both together.
   - **Validate at every callable layer:** distributed applications, node tasks,
     and processing functions validate direct calls by default. Imaging entry
     points use keyword-only `input_checked=False`. Import and call the applicable
@@ -684,7 +812,7 @@ per-variable nodes.
     Metadata preflight must stay cheap: inspect coordinates, attributes, shapes,
     and dtypes without reading bulk sample arrays or doing imaging work.
   - **Design for all imaging modes:** each imaging validator distinguishes cube
-    and continuum, and single-field and multifield layouts. Multifield execution
+    and continuum, and single-field and mosaic layouts. Mosaic execution
     is currently unsupported, but its rules belong in the same validation
     architecture. Keep checks in clear logical blocks, with a description of
     each check and motivation for numerical acceptance criteria.
@@ -694,13 +822,17 @@ per-variable nodes.
 ## 9. Do / Don't (gotchas)
 
 **Do**
+- Look for an existing implementation before writing a new one, in AstroVIPER
+  (for C++, `processing_functions/include/`), XRADIO, ToolVIPER and GraphVIPER,
+  and use it instead of writing another.
 - Mirror existing patterns in `processing_functions/imaging/` for any new
   science function (data-group in/out resolution → compute in place → register
   group → return stats/timings).
 - Keep new C++ kernels consistent with the §6 memory contract and with the
   binding patterns of the existing kernels.
-- Pass `processing_function_threads` through unchanged from distributed applications to processing function kernels —
-  the same parameter name is used at every layer.
+- Pass `processing_function_threads` through unchanged from distributed applications (after
+  they resolve `0`) to processing function kernels — the same parameter name is used at every
+  layer.
 - Keep the layering: graph code in `distributed_applications/`, I/O in `node_tasks/`,
   science in `processing_functions/`.
 - Write processing functions for the full dimensionality of the XRADIO data

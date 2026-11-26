@@ -21,10 +21,13 @@ from astroviper.processing_functions.imaging.add_visibility_grid import (
 from astroviper.processing_functions.imaging.get_visibility_grid import (
     get_visibility_grid_single_field,
 )
+from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
+    as_gridding_kernel,
+)
 from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
     create_prolate_spheroidal_kernel_1D,
 )
-from astroviper.processing_functions.imaging.make_point_spread_function import (
+from astroviper.processing_functions.imaging.imaging_setup.make_point_spread_function import (
     add_uv_sampling_grid_single_field,
 )
 from astroviper.processing_functions.imaging.utils.frequency_mapping import (
@@ -161,7 +164,9 @@ class TestCubePathsShareFrequencyMap(unittest.TestCase):
         )
         # add_visibility_grid / add_uv_sampling_grid read the "residual" group.
         img_xds.attrs["data_groups"]["residual"] = {}
-        cgk = create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT)
+        cgk = as_gridding_kernel(
+            create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT)
+        )
 
         model_plane_values = np.array([1.0, 2.0, 3.0, 4.0])
         for channel, value in enumerate(model_plane_values):
@@ -200,7 +205,9 @@ class TestCubePathsShareFrequencyMap(unittest.TestCase):
             sky_value=0.0 + 0.0j,
         )
         img_xds.attrs["data_groups"]["residual"] = {}
-        cgk = create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT)
+        cgk = as_gridding_kernel(
+            create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT)
+        )
 
         for channel in range(3):
             img_xds["SKY_MODEL"].values[:, channel] = channel + 1.0
@@ -321,7 +328,7 @@ def test_single_plane_gridding_and_prediction_preserve_original_boundaries(
         )
     image = image.isel(frequency=slice(1, 2))
     image.attrs["data_groups"]["residual"] = {}
-    cgk = create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT)
+    cgk = as_gridding_kernel(create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT))
     get_visibility_grid_single_field(ms, cgk, image)
     np.testing.assert_allclose(ms.VISIBILITY_MODEL.values, 2.0, atol=1e-5)
     ms.VISIBILITY.values[:] = 1.0

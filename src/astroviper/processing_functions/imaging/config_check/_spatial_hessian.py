@@ -3,6 +3,9 @@
 import numpy as np
 import toolviper.utils.logger as logger
 
+from astroviper.processing_functions import fft
+from astroviper.utils.param_docs import shares_param_docs
+
 
 def check_spatial_hessian_blocks(
     transfer,
@@ -328,8 +331,8 @@ def check_gaussian_spatial_hessian(
     # Sample the image's half-Fourier grid, at most 33 coordinates per axis.
     # This is a cheap spatial approximation, not an exhaustive certification;
     # actual PSFs below are assessed on every stored Fourier mode.
-    first_axis = np.fft.fftfreq(int(size[0]), d=cells[0])
-    second_axis = np.fft.rfftfreq(int(size[1]), d=cells[1])
+    first_axis = fft.fftfreq(int(size[0]), d=cells[0])
+    second_axis = fft.rfftfreq(int(size[1]), d=cells[1])
     first = first_axis[
         np.unique(
             np.linspace(0, first_axis.size - 1, min(33, first_axis.size))
@@ -392,7 +395,10 @@ def check_gaussian_spatial_hessian(
     return result
 
 
-def check_psf_spatial_hessian(psf, *, precision, cell_size=None, context=None):
+@shares_param_docs
+def check_psf_spatial_hessian(
+    psf, *, precision, cell_size=None, context=None, fft_backend="numpy"
+):
     """Assess every half-Fourier mode of an actual Taylor PSF stack.
 
     Parameters
@@ -407,6 +413,10 @@ def check_psf_spatial_hessian(psf, *, precision, cell_size=None, context=None):
         Angular pixel sizes in radians. Without these, report cycles per pixel.
     context : mapping, optional
         Time/polarization identifiers.
+    fft_backend : {"numpy", "scipy", "pyfftw"}, default "numpy"
+        FFT library: ``"numpy"`` (``numpy.fft``), ``"scipy"`` (``scipy.fft``) or
+        ``"pyfftw"`` (FFTW through pyFFTW). The three round differently; the C++
+        kernels' FFTs do not use it.
 
     Returns
     -------
@@ -466,11 +476,15 @@ def check_psf_spatial_hessian(psf, *, precision, cell_size=None, context=None):
         # Reduce one plane at a time, avoiding another full Taylor stack.
         absolute_scale = np.sum(np.abs(psf[order]), dtype=np.float64)
         hermitian_tolerance[order] = fft_relative_tolerance * absolute_scale
-        transfer[order] = np.fft.rfft2(np.fft.ifftshift(psf[order]))
+        transfer[order] = fft.rfft2(
+            fft.ifftshift(psf[order]),
+            processing_function_threads=1,
+            fft_backend=fft_backend,
+        )
     result = check_spatial_hessian_blocks(
         transfer,
-        np.fft.fftfreq(psf.shape[1], d=cells[0]),
-        np.fft.rfftfreq(psf.shape[2], d=cells[1]),
+        fft.fftfreq(psf.shape[1], d=cells[0]),
+        fft.rfftfreq(psf.shape[2], d=cells[1]),
         precision=precision,
         frequency_units="cycles_per_pixel"
         if cell_size is None

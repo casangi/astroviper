@@ -3,7 +3,7 @@
 Coverage:
   * Numerical agreement with the pure-Python reference (`anti_alias_grid_reference`)
   * Serial vs multi-threaded equivalence
-  * `processing_function_threads <= 0` auto-detects hardware concurrency
+  * `processing_function_threads` below 1 gives the result of one thread
   * Accumulation semantics (two calls == one combined call)
   * NaN UV / NaN weight / zero weight are skipped
   * Samples whose support falls outside the grid are skipped
@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 from reference_gridders import anti_alias_grid_reference
 
-from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
+from astroviper.processing_functions.imaging.gridders.anti_alias.anti_alias_grid_cpp import (
     anti_alias_grid,
 )
 from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
@@ -205,13 +205,15 @@ class TestAntiAliasGridCpp(unittest.TestCase):
                 np.testing.assert_allclose(grid_t, grid_serial, rtol=1e-10, atol=1e-10)
                 np.testing.assert_allclose(norm_t, norm_serial, rtol=1e-10, atol=1e-10)
 
-    def test_processing_function_threads_auto_detect(self):
-        """processing_function_threads <= 0 falls back to hardware_concurrency()."""
+    def test_processing_function_threads_below_one_matches_one_thread(self):
+        """A count below 1 gives the bits of one thread."""
         inputs = _make_random_inputs(seed=6)
         grid_serial, norm_serial = _run_cpp(inputs, processing_function_threads=1)
-        grid_auto, norm_auto = _run_cpp(inputs, processing_function_threads=0)
-        np.testing.assert_allclose(grid_auto, grid_serial, rtol=1e-10, atol=1e-10)
-        np.testing.assert_allclose(norm_auto, norm_serial, rtol=1e-10, atol=1e-10)
+        for nt in (0, -1):
+            with self.subTest(processing_function_threads=nt):
+                grid, norm = _run_cpp(inputs, processing_function_threads=nt)
+                np.testing.assert_array_equal(grid, grid_serial)
+                np.testing.assert_array_equal(norm, norm_serial)
 
     def test_threaded_matches_reference(self):
         """Threaded C++ output matches the pure-Python reference within tolerance."""
@@ -542,7 +544,7 @@ class TestSinglePrecisionDegrid(unittest.TestCase):
     """Single-precision (complex64) model grid degridded to double visibilities."""
 
     def test_complex64_grid_degrid_to_complex128_vis(self):
-        from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
+        from astroviper.processing_functions.imaging.gridders.anti_alias.anti_alias_grid_cpp import (
             anti_alias_degrid,
         )
 
@@ -674,7 +676,7 @@ def test_anti_grid_native_alignment_contract(unaligned_array):
     """Use external unaligned buffers in place and retain equivalent dtype support."""
     import numpy as np
 
-    from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
+    from astroviper.processing_functions.imaging.gridders.anti_alias.anti_alias_grid_cpp import (
         anti_alias_grid,
     )
 
@@ -733,7 +735,9 @@ def test_anti_grid_native_alignment_contract(unaligned_array):
 def test_anti_alias_entry_points_reject_delta_lm_shape_before_writes(
     kernel_name, grid_dtype, shape, unaligned_array
 ):
-    from astroviper.processing_functions.imaging.gridders import anti_alias_grid_cpp
+    from astroviper.processing_functions.imaging.gridders.anti_alias import (
+        anti_alias_grid_cpp,
+    )
 
     kwargs = dict(
         grid=np.full((1, 1, 1, 16, 16), 1.0 + 2.0j, dtype=grid_dtype),

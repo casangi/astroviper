@@ -495,7 +495,7 @@ def _check_imaging_dict(
     loose_fields=frozenset(),
     loose_rtol=0.15,
 ):
-    """Assert every key and field of a deconvolve ImagingDict matches ``expected``.
+    """Assert every key and field of a deconvolve imaging_dict matches ``expected``.
 
     ``expected`` is keyed by ``(time, pol, chan)`` tuples, with ``stop_code``
     given as an ``(imaging, model_update)`` tuple. Integer fields (max_iter, iter_done,
@@ -516,7 +516,7 @@ def _check_imaging_dict(
     exact_int_fields = {"max_iter", "iter_done", "masksum", "model_update_stop_code"}
     string_fields = {"stokes", "stop_description"}
 
-    actual = {tuple(k): v for k, v in imaging_dict.data.items()}
+    actual = {tuple(k): v for k, v in imaging_dict.items()}
     assert set(actual) == set(expected), (
         f"imaging_dict planes {sorted(actual)} != expected {sorted(expected)}"
     )
@@ -676,9 +676,9 @@ def _run_image_cube(
 def _check_deep_clean_history(deconvolve_dict):
     """Check the deep fixture's stopping contract without pinning its path."""
     expected = EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE
-    assert set(deconvolve_dict.data) == set(expected)
+    assert set(deconvolve_dict) == set(expected)
     controls = _CONFIGS["multi_cycle"]["cycle_control_params"]
-    for plane, fields in deconvolve_dict.data.items():
+    for plane, fields in deconvolve_dict.items():
         counts = np.asarray(fields["iter_done"])
         # One entry per residual update: one per imaging cycle the plane's
         # channel ran, then the stop test that ended it, which iterates
@@ -1305,7 +1305,7 @@ def test_single_field_imaging_max_cycles0(plot_saver, processing_function_thread
         * img_av_xds.sizes["frequency"]
         * img_av_xds.sizes["polarization"]
     )
-    assert len(deconv.data) == n_planes
+    assert len(deconv) == n_planes
     # No MASK exists (the model update makes it and never ran): the stop test
     # counts the pixels of the mask the first model update would have made.
     primary_beam = (
@@ -1319,7 +1319,7 @@ def test_single_field_imaging_max_cycles0(plot_saver, processing_function_thread
     masksums = (primary_beam >= primary_beam_limit * np.nanmax(primary_beam)).sum(
         axis=(-2, -1)
     )
-    for key, fields in deconv.data.items():
+    for key, fields in deconv.items():
         expected_masksum = int(masksums[tuple(key)])
         assert fields["iter_done"] == [0], (
             f"plane {key}: iter_done {fields['iter_done']} != [0] -- a "
@@ -1373,7 +1373,7 @@ def test_single_field_imaging_multi_cycle(
         single_precision_image=single_precision_image,
     )
     multi_cycle_params = _CONFIGS["multi_cycle"]["cycle_control_params"]
-    for fields in imaging_dict["deconvolution"].data.values():
+    for fields in imaging_dict["deconvolution"].values():
         psf_fraction = (
             fields["max_psf_sidelobe"] * multi_cycle_params["psf_sidelobe_factor"]
         )
@@ -1919,7 +1919,7 @@ def _regenerate_truth_images():
 
 
 # ---------------------------------------------------------------------------
-# Expected per-plane deconvolution ImagingDicts.
+# Expected per-plane deconvolution imaging_dicts.
 #
 # Keyed by ``(time, pol, chan)``; iter_done, peakres, peakres_nomask and
 # masksum hold one entry per imaging cycle and a last one for the stop test

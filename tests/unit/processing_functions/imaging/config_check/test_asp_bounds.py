@@ -10,7 +10,7 @@ from astroviper.processing_functions.imaging.config_check import (
     CUBE_SINGLE_FIELD,
     check_model_update,
 )
-from astroviper.processing_functions.imaging.deconvolution import asp_clean
+from astroviper.processing_functions.imaging.model_update.deconvolve import asp_clean
 
 
 @pytest.mark.parametrize("mode", [CUBE_SINGLE_FIELD, CONTINUUM_SINGLE_FIELD])

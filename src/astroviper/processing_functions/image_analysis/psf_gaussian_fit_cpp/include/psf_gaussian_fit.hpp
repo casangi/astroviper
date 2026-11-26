@@ -23,10 +23,10 @@ int fit_plane(const double* psf, std::size_t nx, std::size_t ny, double delta_x,
               double delta_y, double psfcutoff, double beam[3]);
 
 // Fit n_plane PSF planes [n_plane, nx, ny] into beams [n_plane, 3], with
-// planes partitioned over n_threads std::threads. Returns the number of
-// planes that used the fallback beam.
+// planes partitioned over processing_function_threads std::threads. Returns
+// the number of planes that used the fallback beam.
 int fit_planes(const double* psf, std::size_t n_plane, std::size_t nx,
                std::size_t ny, double delta_x, double delta_y, double psfcutoff,
-               double* beams, int n_threads);
+               double* beams, int processing_function_threads);
 
 }  // namespace astroviper::psf_gaussian_fit

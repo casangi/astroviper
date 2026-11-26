@@ -10,6 +10,7 @@ from astroviper.processing_functions.imaging.config_check import (
     CUBE_SINGLE_FIELD,
     check_residual_update,
 )
+from astroviper.processing_functions.imaging.gridders.gridder_registry import GRIDDERS
 
 
 @pytest.mark.parametrize("mode", [CONTINUUM_SINGLE_FIELD, CUBE_SINGLE_FIELD])
@@ -25,6 +26,38 @@ from astroviper.processing_functions.imaging.config_check import (
 def test_shared_residual_options_fail_before_gridding(mode, options, message):
     with pytest.raises((ValueError, TypeError), match=message):
         check_residual_update(options, mode=mode)
+
+
+@pytest.mark.parametrize("mode", [CONTINUUM_SINGLE_FIELD, CUBE_SINGLE_FIELD])
+@pytest.mark.parametrize("gridder", ["anti_alias", "direct_fourier_transform"])
+def test_every_registry_name_is_a_gridder(mode, gridder):
+    check_residual_update({"gridder": gridder}, mode=mode)
+
+
+@pytest.mark.parametrize("mode", [CONTINUUM_SINGLE_FIELD, CUBE_SINGLE_FIELD])
+@pytest.mark.parametrize(
+    "gridder",
+    ["dft", "Anti_Alias", None, ["anti_alias"], GRIDDERS["direct_fourier_transform"]],
+    ids=["dft", "case", "none", "list", "class"],
+)
+def test_a_gridder_that_is_not_a_registry_name_is_refused(mode, gridder):
+    """The registry's names select a gridder; its classes do not."""
+    with pytest.raises(
+        ValueError,
+        match=r"gridder must be one of \('anti_alias', 'direct_fourier_transform'\)",
+    ):
+        check_residual_update({"gridder": gridder}, mode=mode)
+
+
+def test_mvc_with_a_gridder_without_uv_grids_is_refused():
+    """The continuum stage functions run only this check; MVC is made of uv grids."""
+    with pytest.raises(
+        ValueError, match=r"DFT continuum imaging requires continuum_mode='mfs'\."
+    ):
+        check_residual_update(
+            {"gridder": "direct_fourier_transform", "continuum_mode": "mvc"},
+            mode=CONTINUUM_SINGLE_FIELD,
+        )
 
 
 def test_missing_optional_fft_backend_fails_early(monkeypatch):

@@ -105,9 +105,21 @@ def feather(
         automatically when ``None``.
     processing_function_threads : int, default 1
         Number of threads handed to the per-processing-function (C++ / FFT)
-        kernels.
-    fft_backend : {"scipy", "pyfftw"}, default "scipy"
-        FFT backend used by the feather combination (``"scipy"`` or ``"pyfftw"``).
+        kernels. A distributed application resolves ``0`` (auto) once, before
+        its checks, to the CPUs per Dask worker thread of the host with the
+        fewest, at least 1 (1 where these are not known, as under MPI), and
+        warns when a host's worker threads times the count exceed its CPUs
+        (see
+        :func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).
+        Node tasks and processing functions do not resolve ``0``; those that
+        check the count refuse it. Given a count below 1, a C++ kernel and the
+        PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
+        and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
+        ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
+        numpy.fft takes no count: under ``"numpy"`` the Python FFTs run one
+        thread.
+    fft_backend : {"numpy", "scipy", "pyfftw"}, default "scipy"
+        FFT backend used by the feather combination (``"numpy"``, ``"scipy"`` or ``"pyfftw"``).
     compressor : numcodecs compressor
         Compressor applied to each on-disk ``SKY`` chunk.
     io_engine : {"chunk", "xradio"}, optional
@@ -131,6 +143,12 @@ def feather(
     Supplied configuration is checked before opening images. Shape and dtype
     checks use the opened image metadata and always run before output creation.
     """
+    from astroviper.utils.data_partitioning import resolve_processing_function_threads
+
+    processing_function_threads = resolve_processing_function_threads(
+        processing_function_threads, "dask"
+    )
+
     from astroviper.utils.node_task_io import check_io_engine
 
     check_io_engine(io_engine)

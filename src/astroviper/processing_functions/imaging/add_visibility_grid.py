@@ -1,5 +1,4 @@
 import copy
-from typing import TYPE_CHECKING
 
 import numpy as np
 import xarray as xr
@@ -9,11 +8,6 @@ from astroviper.utils.data_group_tools import (
     create_data_groups_in_and_out,
     modify_data_groups_xds,
 )
-
-if TYPE_CHECKING:
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-        GriddingKernel,
-    )
 
 
 def add_visibility_grid_mosaic(
@@ -198,7 +192,7 @@ def add_visibility_grid_mosaic(
 
 def add_visibility_grid_single_field(
     ms_xds: xr.Dataset,
-    cgk_1D: "GriddingKernel | np.ndarray",
+    gcf_xds: xr.Dataset,
     img_xds: xr.Dataset,
     ms_data_group_in_name: str = "base",
     image_data_group_in_name: str = "residual",
@@ -209,21 +203,22 @@ def add_visibility_grid_single_field(
     fft_padding: float = 1.2,
     processing_function_threads: int = 1,
     complex_dtype=None,
+    gridder: str = "anti_alias",
 ):
     """Grid correlated visibilities for a single-field observation into an image dataset.
 
     Reads correlated visibility data and imaging weights from ``ms_xds``, grids
     them onto the UV plane using a separable 1-D convolutional gridding kernel
-    (``cgk_1D``), and accumulates the result into ``img_xds``.  The gridded
+    (``gcf_xds``), and accumulates the result into ``img_xds``.  The gridded
     visibilities and their normalization (sum of weights) are stored as new
     data variables in ``img_xds``, and a corresponding output data group is
     registered via
     :func:`~astroviper.utils.data_group_tools.modify_data_groups_xds`.
 
     This function is the non-mosaic counterpart of
-    :func:`add_visibility_grid_mosaic`.  It uses the separable anti-aliasing gridder (the C++ ``anti_alias_grid`` kernel, the
+    :func:`add_visibility_grid_mosaic`.  By default it uses the separable anti-aliasing gridder (the C++ ``anti_alias_grid`` kernel, the
     standard gridder in CASA) rather than the direction-dependent mosaic
-    gridder, so no GCF dataset is required.
+    gridder, so ``gcf_xds`` needs only the anti-alias term.
 
     Parameters
     ----------
@@ -231,12 +226,14 @@ def add_visibility_grid_single_field(
         Measurement set dataset.  Must contain the data variables referenced
         by ``ms_data_group_in_name`` (``correlated_data``, ``uvw``,
         ``weight_imaging``) and a ``frequency`` coordinate.
-    cgk_1D : GriddingKernel or np.ndarray
-        The gridding kernel
-        (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`,
-        whose table, support and oversampling go to the C++
-        ``anti_alias_grid`` kernel), or a bare table of CASA's
-        prolate spheroidal kernel of support 7.
+    gcf_xds : xr.Dataset
+        The ``gcf_xds`` of the gridding kernel, from
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.make_gridding_kernel`,
+        or from
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.as_gridding_kernel`
+        for a bare table of CASA's prolate spheroidal kernel of support 7;
+        its table, support and oversampling go to the C++
+        ``anti_alias_grid`` kernel.
     img_xds : xr.Dataset
         Image dataset that accumulates the gridded visibilities.  The arrays
         named by ``image_data_group_out_modified`` are created on the first call
@@ -254,11 +251,12 @@ def add_visibility_grid_single_field(
     image_data_group_out_name : str, default ``"single_field"``
         Key under which the output data group is registered in
         ``img_xds.attrs["data_groups"]``.
-    image_data_group_out_modified : dict, default ``{"visibility": "VISIBILITY", "visibility_normalization": "VISIBILITY_NORMALIZATION"}``
+    image_data_group_out_modified : dict, default the ``grid_roles`` of the gridder
         Mapping of role keys to the data-variable names written into
         ``img_xds``.  ``"visibility"`` stores the complex gridded visibilities
         and ``"visibility_normalization"`` stores the per-channel,
-        per-polarization sum of imaging weights.
+        per-polarization sum of imaging weights (``"direct_fourier_transform"``
+        accumulates into the role ``"sky"`` in place of ``"visibility"``).
     overwrite : bool, default ``True``
         If ``True``, an existing output data group or output data variables
         are silently overwritten.  Defaults to ``True`` because this function
@@ -273,6 +271,17 @@ def add_visibility_grid_single_field(
         Padding factor applied to the image size when computing the UV-grid
         dimensions: ``n_uv = fft_padding * [img_xds.sizes["l"], img_xds.sizes["m"]]``.
         Values greater than ``1.0`` reduce aliasing from the FFT.
+    processing_function_threads : int, default ``1``
+        Threads handed to the C++ gridding kernel.
+    complex_dtype : numpy.dtype, optional
+        Complex precision of the gridded visibilities (``complex64`` for a
+        single-precision image, ``complex128`` otherwise).  Defaults to
+        ``numpy.complex128``.
+    gridder : str, default ``"anti_alias"``
+        Registry name of the gridder (a key of
+        :data:`~astroviper.processing_functions.imaging.gridders.gridder_registry.GRIDDERS`):
+        ``"anti_alias"`` or ``"direct_fourier_transform"``, which uses neither
+        ``gcf_xds`` nor ``fft_padding``.
 
     Returns
     -------
@@ -280,17 +289,98 @@ def add_visibility_grid_single_field(
         Modifies ``img_xds`` in place (data variables and ``data_groups``
         attribute); no return value.
 
+    Raises
+    ------
+    ValueError
+        With ``gridder="direct_fourier_transform"``, if the image and the
+        measurement set have different numbers of polarizations.
+    RuntimeError
+        With ``gridder="direct_fourier_transform"``, from the kernel, if an
+        image pixel lies beyond ``l**2 + m**2 < 1``.
+
     See Also
     --------
     add_visibility_grid_mosaic : Mosaic (direction-dependent GCF) variant.
-    astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp.anti_alias_grid :
+    astroviper.processing_functions.imaging.gridders.anti_alias.anti_alias_grid_cpp.anti_alias_grid :
         C++ separable anti-aliasing gridder.
     """
+    _add_grid_single_field(
+        ms_xds,
+        gcf_xds,
+        img_xds,
+        ms_data_group_in_name=ms_data_group_in_name,
+        image_data_group_in_name=image_data_group_in_name,
+        image_data_group_out_name=image_data_group_out_name,
+        image_data_group_out_modified=image_data_group_out_modified,
+        overwrite=overwrite,
+        chan_mode=chan_mode,
+        fft_padding=fft_padding,
+        processing_function_threads=processing_function_threads,
+        complex_dtype=complex_dtype,
+        gridder=gridder,
+        uv_sampling=False,
+        description="Added gridded visibilities to img_xds with add_visibility_grid_single_field.",
+    )
+
+
+def _add_grid_single_field(
+    ms_xds,
+    gcf_xds,
+    img_xds,
+    *,
+    ms_data_group_in_name,
+    image_data_group_in_name,
+    image_data_group_out_name,
+    image_data_group_out_modified,
+    overwrite,
+    chan_mode,
+    fft_padding,
+    processing_function_threads,
+    complex_dtype,
+    gridder,
+    uv_sampling,
+    description,
+    coords=None,
+    n_frequency_planes=None,
+):
+    """Grid the visibilities, or the weights, of one measurement set into ``img_xds``.
+
+    The body of :func:`add_visibility_grid_single_field` and of
+    :func:`~astroviper.processing_functions.imaging.imaging_setup.make_point_spread_function.add_uv_sampling_grid_single_field`,
+    whose other parameters it takes, and the gridding of
+    :func:`~astroviper.processing_functions.imaging.add_visibility_grid_continuum_mvc.add_visibility_grid_mvc_single_field`.
+
+    Parameters
+    ----------
+    uv_sampling : bool
+        ``True`` grids the weights with the gridder's ``grid_uv_sampling``
+        into the roles of its ``grid_uv_sampling_roles``, ``False`` the
+        visibilities with its ``grid`` into those of its ``grid_roles``.
+    description : str
+        Description of the output data group, registered when the arrays
+        are created.
+    coords : dict, optional
+        Coordinates of the created grid, of which the normalization takes
+        ``time``, ``frequency`` and ``polarization``; none by default.
+    n_frequency_planes : int, optional
+        Number of frequency planes of the created arrays in cube mode;
+        ``img_xds.sizes["frequency"]`` by default.
+
+    Returns
+    -------
+    None
+    """
+    from astroviper.processing_functions.imaging.gridders.gridder_registry import (
+        GRIDDERS,
+    )
+
+    roles = (
+        GRIDDERS[gridder].grid_uv_sampling_roles
+        if uv_sampling
+        else GRIDDERS[gridder].grid_roles
+    )
     if image_data_group_out_modified is None:
-        image_data_group_out_modified = {
-            "visibility": "VISIBILITY",
-            "visibility_normalization": "VISIBILITY_NORMALIZATION",
-        }
+        image_data_group_out_modified = dict(roles)
     _image_data_group_out_modified = copy.deepcopy(image_data_group_out_modified)
 
     # Read the MS input data group directly; the MS is read-only here.
@@ -315,7 +405,11 @@ def add_visibility_grid_single_field(
             map_visibility_frequencies_to_image,
         )
 
-        n_imag_chan = img_xds.sizes["frequency"]
+        n_imag_chan = (
+            img_xds.sizes["frequency"]
+            if n_frequency_planes is None
+            else n_frequency_planes
+        )
         frequency_map = map_visibility_frequencies_to_image(
             ms_xds.frequency.values,
             img_xds.frequency.values,
@@ -330,74 +424,62 @@ def add_visibility_grid_single_field(
 
     # Time Map #Currently not implemented.
     n_imag_time = 1
-    n_time = ms_xds.sizes["time"]
-    time_map = (np.zeros(n_time)).astype(int)
 
     n_imag_pol = weight_imaging.shape[3]
-    pol_map = (np.arange(0, n_imag_pol)).astype(int)
-
-    from astroviper.processing_functions.imaging.utils.fft_sizing import (
-        padded_grid_size,
-    )
-
-    n_uv = padded_grid_size([img_xds.sizes["l"], img_xds.sizes["m"]], fft_padding)
-    delta_lm = img_xds.xr_img.get_lm_cell_size()
 
     if complex_dtype is None:
         complex_dtype = np.complex128
 
+    grid_role, normalization_role = roles
+
     # Initialise output arrays on the first call; subsequent calls accumulate.
-    if image_data_group_out["visibility"] not in img_xds:
-        img_xds[image_data_group_out["visibility"]] = xr.DataArray(
-            np.zeros(
-                (n_imag_time, n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]),
-                dtype=complex_dtype,
-            ),
-            dims=["time", "frequency", "polarization", "u", "v"],
+    if image_data_group_out[grid_role] not in img_xds:
+        grid_values, grid_dims, grid_type = GRIDDERS[gridder].new_grid(
+            img_xds,
+            (n_imag_time, n_imag_chan, n_imag_pol),
+            uv_sampling=uv_sampling,
+            fft_padding=fft_padding,
+            complex_dtype=complex_dtype,
         )
-        img_xds[image_data_group_out["visibility_normalization"]] = xr.DataArray(
+        img_xds[image_data_group_out[grid_role]] = xr.DataArray(
+            grid_values,
+            dims=["time", "frequency", "polarization", *grid_dims],
+            coords=coords,
+        )
+        if grid_type is not None:
+            img_xds[image_data_group_out[grid_role]].attrs["type"] = grid_type
+        img_xds[image_data_group_out[normalization_role]] = xr.DataArray(
             np.zeros((n_imag_time, n_imag_chan, n_imag_pol), dtype=np.double),
             dims=["time", "frequency", "polarization"],
+            coords=(
+                None
+                if coords is None
+                else {dim: coords[dim] for dim in ("time", "frequency", "polarization")}
+            ),
         )
 
         modify_data_groups_xds(
             img_xds,
             image_data_group_out_name,
             image_data_group_out,
-            description="Added gridded visibilities to img_xds with add_visibility_grid_single_field.",
+            description=description,
         )
 
-    grid = img_xds[image_data_group_out["visibility"]].values
-    normalization = img_xds[image_data_group_out["visibility_normalization"]].values
+    grid = img_xds[image_data_group_out[grid_role]].values
+    normalization = img_xds[image_data_group_out[normalization_role]].values
 
-    vis_data = ms_xds[ms_data_group_in["correlated_data"]].values
-    uvw = ms_xds[ms_data_group_in["uvw"]].values
-    frequency_coord = ms_xds.frequency.values
-    imaging_weight = ms_xds[ms_data_group_in["weight_imaging"]].values
-
-    from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
-        anti_alias_grid,
+    grid_method = (
+        GRIDDERS[gridder].grid_uv_sampling if uv_sampling else GRIDDERS[gridder].grid
     )
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-        as_gridding_kernel,
-    )
-
-    kernel = as_gridding_kernel(cgk_1D)
-    anti_alias_grid(
-        grid,
-        normalization,
-        vis_data,
-        uvw,
-        frequency_coord,
-        frequency_map,
-        time_map,
-        pol_map,
-        imaging_weight,
-        kernel.table,
-        n_uv,
-        delta_lm,
-        support=kernel.support,
-        oversampling=kernel.oversampling,
-        interpolation=kernel.interpolation_code,
+    grid_method(
+        ms_xds,
+        img_xds,
+        gcf_xds,
+        weights=weight_imaging,
+        frequency_map=frequency_map,
+        grid=grid,
+        normalization=normalization,
+        ms_data_group_in_name=ms_data_group_in_name,
+        fft_padding=fft_padding,
         processing_function_threads=processing_function_threads,
     )

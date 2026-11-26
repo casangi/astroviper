@@ -46,7 +46,7 @@ def test_public_driver_rejects_numerics_before_opening_or_writing(
 @pytest.mark.parametrize("kind", ["cube", "continuum"])
 def test_direct_residual_entries_validate_before_reading_data(layer, kind):
     if kind == "cube" and layer == "processing_functions":
-        path = "astroviper.processing_functions.imaging.residual_update"
+        path = "astroviper.processing_functions.imaging.residual_update.residual_update"
         name = "residual_update_cube_single_field"
     else:
         path = f"astroviper.{layer}.imaging.image_{kind}_single_field"
@@ -178,7 +178,7 @@ def test_continuum_nodes_reject_acceleration_before_reading_data(
 @pytest.mark.parametrize("checked", [False, True])
 def test_processing_function_skips_only_config_checks(monkeypatch, checked):
     module = importlib.import_module(
-        "astroviper.processing_functions.imaging.model_update"
+        "astroviper.processing_functions.imaging.model_update.model_update"
     )
     check = Mock(wraps=config_check.check_model_update)
     monkeypatch.setattr(config_check, "check_model_update", check)

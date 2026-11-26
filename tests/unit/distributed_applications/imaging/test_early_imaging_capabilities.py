@@ -185,11 +185,13 @@ def test_automatic_limits_resolve_and_are_partition_invariant(
             threshold=threshold,
             chunks=chunks,
         )
-        controller = result["controller"]
-        assert isinstance(controller.max_cycles, int)
-        assert controller.max_cycles > 0
-        assert any(limit is not None for limit in controller.max_cycles_auto.values())
-        limits.append(controller.max_cycles_auto)
+        controller = result["cycle_control_state"]
+        assert isinstance(controller["max_cycles"], int)
+        assert controller["max_cycles"] > 0
+        assert any(
+            limit is not None for limit in controller["max_cycles_auto"].values()
+        )
+        limits.append(controller["max_cycles_auto"])
         assert np.isfinite(image.SKY_RESIDUAL).all()
     assert limits[0] == limits[1]
     assert len(calls) == (3 if threshold == 0 else 0)

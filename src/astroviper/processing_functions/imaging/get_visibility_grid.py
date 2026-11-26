@@ -1,17 +1,10 @@
-from typing import TYPE_CHECKING
-
 import numpy as np
 import xarray as xr
-
-if TYPE_CHECKING:
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-        GriddingKernel,
-    )
 
 
 def get_visibility_grid_single_field(
     ms_xds: xr.Dataset,
-    cgk_1D: "GriddingKernel | np.ndarray",
+    gcf_xds: xr.Dataset,
     img_xds: xr.Dataset,
     ms_data_group_in_name: str = "base",
     ms_data_group_out_name: str = "model",
@@ -21,12 +14,13 @@ def get_visibility_grid_single_field(
     chan_mode: str = "cube",
     fft_padding: float = 1.2,
     processing_function_threads: int = 1,
+    gridder: str = "anti_alias",
 ):
     """Degrid a UV-domain model onto measurement-set visibility coordinates.
 
     Samples a model UV grid stored in ``img_xds`` at each visibility's
     ``(u, v)`` coordinate using a separable 1-D convolutional gridding kernel
-    (``cgk_1D``), and writes the resulting predicted visibilities into
+    (``gcf_xds``), and writes the resulting predicted visibilities into
     ``ms_xds`` under the data variable named by
     ``ms_data_group_out_modified["correlated_data"]`` (default
     ``"VISIBILITY_MODEL"``).  A corresponding output data group is registered
@@ -36,8 +30,8 @@ def get_visibility_grid_single_field(
     This function is the inverse of
     :func:`~astroviper.processing_functions.imaging.add_visibility_grid.add_visibility_grid_single_field`:
     it predicts visibilities *from* a UV-plane model rather than gridding
-    observed visibilities onto a UV plane.  It uses the separable C++ anti-aliasing degridder (the standard gridder in CASA) and therefore does not
-    require a GCF dataset. Cube and continuum callers share that numerical
+    observed visibilities onto a UV plane.  It uses the separable C++ anti-aliasing degridder (the standard gridder in CASA), so its ``gcf_xds``
+    needs only the anti-alias term. Cube and continuum callers share that numerical
     primitive without sharing their spectral-model preparation APIs.
 
     Parameters
@@ -48,16 +42,20 @@ def get_visibility_grid_single_field(
         ``frequency`` coordinate.  On the first call the output visibility
         data variable is created on ``ms_xds`` as a ``complex128`` array shaped
         like the input ``correlated_data``.
-    cgk_1D : GriddingKernel or np.ndarray
-        The gridding kernel
-        (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`),
-        or a bare table of CASA's prolate spheroidal kernel of support 7.
+    gcf_xds : xr.Dataset
+        The ``gcf_xds`` of the gridding kernel, from
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.make_gridding_kernel`,
+        or from
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.as_gridding_kernel`
+        for a bare table of CASA's prolate spheroidal kernel of support 7.
     img_xds : xr.Dataset
         Image dataset holding the model UV grid.  Must expose an image data
         group under ``image_data_group_in_name`` whose ``"visibility"`` role
         names a data variable shaped ``(time, frequency, polarization, u, v)``,
         the same ``(u, v)`` axis order used by the C++
-        ``anti_alias_grid`` kernel.
+        ``anti_alias_grid`` kernel (the role is the ``degrid_role`` of the
+        gridder: ``"sky"``, a model image ``(time, frequency, polarization,
+        l, m)``, for ``"direct_fourier_transform"``).
         Cell size and image dimensions are read directly from ``img_xds`` via
         ``img_xds.xr_img.get_lm_cell_size()`` and ``img_xds.sizes``.
     ms_data_group_in_name : str, default ``"base"``
@@ -88,6 +86,11 @@ def get_visibility_grid_single_field(
     processing_function_threads : int, default ``1``
         Number of threads handed to the per-processing-function (C++ / FFT)
         kernels.
+    gridder : str, default ``"anti_alias"``
+        Registry name of the gridder (a key of
+        :data:`~astroviper.processing_functions.imaging.gridders.gridder_registry.GRIDDERS`):
+        ``"anti_alias"`` or ``"direct_fourier_transform"``, which uses neither
+        ``gcf_xds`` nor ``fft_padding``.
 
     Returns
     -------
@@ -112,8 +115,8 @@ def get_visibility_grid_single_field(
       grid will receive a prediction.
     - Time mapping is not currently implemented: every visibility time index
       is mapped to image time index 0.
-    - ``processing_function_threads <= 0`` lets the C++ degridder fall back
-      to the hardware concurrency; ``1`` runs serially.
+    - The C++ degridder runs one thread for a ``processing_function_threads``
+      below 1, as for ``1`` (serial).
 
     See Also
     --------
@@ -122,11 +125,21 @@ def get_visibility_grid_single_field(
     degrid_visibility_grid_single_field :
         Shared anti-aliasing gridder numerical primitive.
     """
+    from astroviper.processing_functions.imaging.gridders.gridder_registry import (
+        GRIDDERS,
+    )
+
     if ms_data_group_out_modified is None:
         ms_data_group_out_modified = {
             "correlated_data": "VISIBILITY_MODEL",
         }
-    model_name = img_xds.attrs["data_groups"][image_data_group_in_name]["visibility"]
+    model_name = img_xds.attrs["data_groups"][image_data_group_in_name][
+        GRIDDERS[gridder].degrid_role
+    ]
+    model = img_xds[model_name]
+    if GRIDDERS[gridder].degrid_role == "sky":
+        # A model image may be stored in any dimension order.
+        model = model.transpose("time", "frequency", "polarization", "l", "m")
 
     n_chan = ms_xds.sizes["frequency"]
     if chan_mode == "cube":
@@ -146,15 +159,11 @@ def get_visibility_grid_single_field(
     else:  # continuum
         frequency_map = (np.zeros(n_chan)).astype(int)
 
-    from astroviper.processing_functions.imaging.degrid_visibility_grid import (
-        degrid_visibility_grid_single_field,
-    )
-
-    degrid_visibility_grid_single_field(
+    GRIDDERS[gridder].degrid(
         ms_xds,
-        cgk_1D,
         img_xds,
-        img_xds[model_name].values,
+        gcf_xds,
+        model.values,
         frequency_map,
         ms_data_group_in_name=ms_data_group_in_name,
         ms_data_group_out_name=ms_data_group_out_name,

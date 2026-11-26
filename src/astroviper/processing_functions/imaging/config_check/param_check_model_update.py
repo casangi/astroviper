@@ -46,14 +46,14 @@ def check_model_update(config, *, mode, require_complete=False):
     ValueError
         If the deconvolver, Taylor order, or thresholds are invalid.
     NotImplementedError
-        If multifield imaging is requested.
+        If mosaic imaging is requested.
     """
     # ========================================================================
     # 1. Validation context
     # ========================================================================
 
     # --- Supported imaging mode ---
-    # Reject multifield requests until their model-update path is implemented.
+    # Reject mosaic requests until their model-update path is implemented.
     mode.require_supported()
     require_mapping("config", config)
 
@@ -137,7 +137,14 @@ def check_model_update(config, *, mode, require_complete=False):
 
         # --- Single-term deconvolver compatibility ---
         # Högbom and Asp update only the constant term of a continuum model.
-        if deconvolver in ("hogbom", "asp") and n_taylor_terms != 1:
+        model_basis = None
+        if deconvolver is not None:
+            from astroviper.processing_functions.imaging.model_update.deconvolvers.deconvolver_registry import (
+                DECONVOLVERS,
+            )
+
+            model_basis = DECONVOLVERS[deconvolver].model_basis
+        if model_basis == "pixels" and n_taylor_terms != 1:
             raise ValueError(
                 f"Continuum {deconvolver} requires n_taylor_terms=1. "
                 "Use deconvolver='mtmfs' for 2 to 4 Taylor terms."
@@ -145,7 +152,7 @@ def check_model_update(config, *, mode, require_complete=False):
 
         # --- MT-MFS compatibility ---
         # The current continuum MT-MFS path supports two to four terms.
-        if deconvolver == "mtmfs" and not 2 <= n_taylor_terms <= 4:
+        if model_basis == "taylor_terms" and not 2 <= n_taylor_terms <= 4:
             raise ValueError("Continuum mtmfs requires n_taylor_terms between 2 and 4.")
 
     # ========================================================================
@@ -810,7 +817,9 @@ def check_model_products(
     img_xds : xarray.Dataset
         Image products; validation never changes their arrays or configuration.
     config : mapping
-        Deconvolver, image parameters, and cycle/deconvolution controls.
+        Deconvolver, image parameters, cycle/deconvolution controls and the FFT
+        library of the spatial Hessian diagnostics (``fft_backend``, ``"numpy"``
+        without one).
     mode : ImagingMode
         Imaging kind and field layout.
     image_data_group_in_name, image_data_group_out_name : str
@@ -819,8 +828,9 @@ def check_model_products(
     hessian_cache : mutable mapping or None, optional
         Workflow-owned mutable cache for content-verified PSF/Hessian diagnostics.
         Reuse requires matching PSF contents, coordinates, precision, Taylor basis,
-        geometry, scales, scale bias, and cell sampling. Changing-product checks
-        always run. None disables reuse; input_checked does not control this cache.
+        geometry, scales, scale bias, cell sampling and FFT library (fft_backend).
+        Changing-product checks always run. None disables reuse; input_checked does
+        not control this cache.
 
     Returns
     -------
@@ -1113,9 +1123,10 @@ def check_model_products(
     from astroviper.processing_functions.imaging.config_check._spatial_hessian import (
         check_psf_spatial_hessian,
     )
-    from astroviper.processing_functions.imaging.deconvolvers import mtmfs
+    from astroviper.processing_functions.imaging.model_update.deconvolvers import mtmfs
 
     psf_values = psf.transpose(*psf_dims).values
+    fft_backend = config.get("fft_backend", "numpy")
     hessian_fields = (
         "taylor_hessian_condition_number",
         "taylor_hessian_order_zero_noise_amplification",
@@ -1138,6 +1149,7 @@ def check_model_products(
             diagnostics,
             small_scale_bias=controls.get("small_scale_bias", 0.0),
             cell_size=config.get("image_params", {}).get("cell_size"),
+            fft_backend=fft_backend,
         )
         if hessian_cache.get("key") == cache_key:
             # Only static diagnostics are reused. All changing-product checks
@@ -1276,6 +1288,7 @@ def check_model_products(
                     "time_index": time_index,
                     "polarization_index": polarization_index,
                 },
+                fft_backend=fft_backend,
             )
             diagnostics["taylor_hessian_spatial_blocks"].append(
                 {
@@ -1427,15 +1440,16 @@ def check_deconvolver(deconvolver, *, mode):
     Restoration needs the algorithm name without the iteration controls and
     Taylor configuration required when actually updating a model.
     """
+    from astroviper.processing_functions.imaging.model_update.deconvolvers.deconvolver_registry import (
+        DECONVOLVERS,
+    )
+
     mode.require_supported()
-    if mode.imaging_kind == "continuum":
-        allowed_deconvolvers = ("hogbom", "asp", "mtmfs")
-    else:
-        allowed_deconvolvers = (
-            "hogbom",
-            "hogbom_many_threads",
-            "asp",
-        )
+    allowed_deconvolvers = tuple(
+        name
+        for name, deconvolver_class in DECONVOLVERS.items()
+        if mode.imaging_kind in deconvolver_class.imaging_kinds
+    )
 
     if deconvolver not in allowed_deconvolvers:
         raise ValueError(

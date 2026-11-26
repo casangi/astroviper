@@ -93,25 +93,25 @@ def _case(kind):
 
 def _run(kind, kwargs):
     if kind.startswith("degrid"):
-        from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
+        from astroviper.processing_functions.imaging.gridders.anti_alias.anti_alias_grid_cpp import (
             anti_alias_degrid,
         )
 
         anti_alias_degrid(**kwargs)
     elif kind.startswith("grid"):
-        from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
+        from astroviper.processing_functions.imaging.gridders.anti_alias.anti_alias_grid_cpp import (
             anti_alias_grid,
         )
 
         anti_alias_grid(**kwargs)
     elif kind.startswith("dft"):
-        from astroviper.processing_functions.imaging.gridders.direct_fourier_transform_cpp import (
+        from astroviper.processing_functions.imaging.gridders.direct_fourier_transform.direct_fourier_transform_cpp import (
             dft_predict,
         )
 
         dft_predict(**kwargs)
     elif kind.startswith("mtmfs"):
-        from astroviper.processing_functions.imaging.deconvolvers.mtmfs._mtmfs_ext import (
+        from astroviper.processing_functions.imaging.model_update.deconvolvers.mtmfs._mtmfs_ext import (
             clean,
         )
 
@@ -428,7 +428,10 @@ def test_in_place_outputs_reject_conversion_instead_of_updating_temporaries():
 @pytest.mark.parametrize("kernel", ["hogbom", "aspclean"])
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
 def test_cube_deconvolvers_consume_unaligned_storage(kernel, dtype, unaligned_array):
-    from astroviper.processing_functions.imaging.deconvolvers import aspclean, hogbom
+    from astroviper.processing_functions.imaging.model_update.deconvolvers import (
+        aspclean,
+        hogbom,
+    )
 
     clean = (hogbom if kernel == "hogbom" else aspclean).clean_cube
     residual = np.zeros((1, 2, 1, 32, 32), dtype=dtype)

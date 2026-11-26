@@ -1,4 +1,4 @@
-"""The gridding kernel object, its parameters and the table layout the
+"""The gridding kernel's gcf_xds, its parameters and the table layout the
 gridders read."""
 
 import hashlib
@@ -6,25 +6,28 @@ import pathlib
 
 import numpy as np
 import pytest
+import xarray as xr
 
+from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
+    CASA_GRIDDING_KERNEL_PARAMS,
+    CORRECTION_FLOOR,
+    DEFAULT_GRIDDING_KERNEL_PARAMS,
+    KERNEL_TYPES,
+    _gcf_xds_from_table,
+    anti_alias_kernel_arguments,
+    as_gridding_kernel,
+    correction,
+    correction_1D,
+    kept_half_width,
+    make_gridding_kernel,
+    map_error,
+    resolve_gridding_kernel_params,
+)
 from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
     coordinates,
     create_prolate_spheroidal_correcting_image_1D,
     create_prolate_spheroidal_kernel_1D,
     prolate_spheroidal_function,
-)
-from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-    CASA_GRIDDING_KERNEL_PARAMS,
-    CORRECTION_FLOOR,
-    DEFAULT_GRIDDING_KERNEL_PARAMS,
-    DIRECT_FOURIER_TRANSFORM,
-    KERNEL_TYPES,
-    GriddingKernel,
-    as_gridding_kernel,
-    is_direct_fourier_transform,
-    kept_half_width,
-    make_gridding_kernel,
-    resolve_gridding_kernel_params,
 )
 from astroviper.processing_functions.imaging.gridding_convolution_functions.kernel_lookup import (
     stencil_lookup,
@@ -43,6 +46,17 @@ def _shipped_default_table():
     path = pathlib.Path(gcf_least_misfit.__file__).with_name(name)
     assert hashlib.sha256(path.read_bytes()).hexdigest() == sha256
     return np.load(path)
+
+
+def _params(gcf_xds):
+    """The gridding_kernel_params of a kernel's gcf_xds."""
+    attrs = gcf_xds["ANTI_ALIAS"].attrs
+    return {
+        "type": attrs["kernel_type"],
+        "support": attrs["support"],
+        "oversampling": attrs["oversampling"],
+        "interpolation": attrs["interpolation"],
+    }
 
 
 class TestParams:
@@ -99,7 +113,7 @@ class TestParams:
         # the kernel of the full dict, Schwab's analytic correction included
         kernel = make_gridding_kernel(casa)
         assert kernel is make_gridding_kernel(CASA_GRIDDING_KERNEL_PARAMS)
-        assert kernel.params == CASA_GRIDDING_KERNEL_PARAMS
+        assert _params(kernel) == CASA_GRIDDING_KERNEL_PARAMS
         assert resolve_gridding_kernel_params({"type": "prolate_spheroidal"}) == {
             **DEFAULT_GRIDDING_KERNEL_PARAMS,
             "type": "prolate_spheroidal",
@@ -108,23 +122,19 @@ class TestParams:
         resolve_gridding_kernel_params(casa)["oversampling"] = 5
         assert CASA_GRIDDING_KERNEL_PARAMS["oversampling"] == 100
 
-    def test_direct_fourier_transform(self):
-        assert DIRECT_FOURIER_TRANSFORM == "dft"
-        assert resolve_gridding_kernel_params({"type": "dft"}) == {"type": "dft"}
-        assert is_direct_fourier_transform({"type": "dft"})
-        assert not is_direct_fourier_transform(None)
-        assert not is_direct_fourier_transform({"type": "prolate_spheroidal"})
-        # the kernel keys do not apply: refused, as is a kernel for it
+    def test_the_type_dft_is_refused(self):
+        """The direct Fourier transform is the gridder "direct_fourier_transform",
+        not a kernel type."""
+        type_refused = r"gridding_kernel_params\['type'\] must be one of"
         for extra in (
+            {},
             {"support": 7},
             {"oversampling": 100},
             {"interpolation": "nearest"},
         ):
-            with pytest.raises(ValueError, match="DFT accepts only"):
+            with pytest.raises(ValueError, match=type_refused):
                 resolve_gridding_kernel_params({"type": "dft", **extra})
-            with pytest.raises(ValueError, match="DFT accepts only"):
-                is_direct_fourier_transform({"type": "dft", **extra})
-        with pytest.raises(ValueError, match="has no gridding kernel"):
+        with pytest.raises(ValueError, match=type_refused):
             make_gridding_kernel({"type": "dft"})
         with pytest.raises(ValueError, match="must be one of"):
             resolve_gridding_kernel_params({"type": "boxcar"})
@@ -133,13 +143,39 @@ class TestParams:
 class TestKernel:
     def test_casa_kernel_is_the_prolate_spheroidal_table(self):
         kernel = make_gridding_kernel(CASA_GRIDDING_KERNEL_PARAMS)
-        assert kernel.support == 7 and kernel.oversampling == 100
+        attrs = kernel["ANTI_ALIAS"].attrs
+        table = kernel["ANTI_ALIAS"].values
+        assert attrs["support"] == 7 and attrs["oversampling"] == 100
         np.testing.assert_array_equal(
-            kernel.table, create_prolate_spheroidal_kernel_1D(100, 7)
+            table, create_prolate_spheroidal_kernel_1D(100, 7)
         )
-        assert kernel.table.size == 100 * 4
-        assert kernel.params == CASA_GRIDDING_KERNEL_PARAMS
-        assert kernel.kernel_type == "prolate_spheroidal_casa"
+        assert table.size == 100 * 4
+        assert _params(kernel) == CASA_GRIDDING_KERNEL_PARAMS
+        assert attrs["kernel_type"] == "prolate_spheroidal_casa"
+
+    def test_gcf_xds_layout(self):
+        """One variable, ANTI_ALIAS on anti_alias_sample (k / oversampling),
+        holding the builder's read-only float64 table, with the attributes of
+        the kernel."""
+        kernel = make_gridding_kernel(CASA_GRIDDING_KERNEL_PARAMS)
+        term = kernel["ANTI_ALIAS"]
+        assert list(kernel.data_vars) == ["ANTI_ALIAS"]
+        assert term.dims == ("anti_alias_sample",)
+        np.testing.assert_array_equal(kernel["anti_alias_sample"], np.arange(400) / 100)
+        assert term.dtype == np.float64 and term.values.flags.c_contiguous
+        assert not term.values.flags.writeable
+        assert term.attrs == {
+            "kernel_type": "prolate_spheroidal_casa",
+            "support": 7,
+            "oversampling": 100,
+            "interpolation": "nearest",
+            "correction": "analytic",
+            "shape": {},
+        }
+        finer = make_gridding_kernel(
+            {**CASA_GRIDDING_KERNEL_PARAMS, "oversampling": 200}
+        )
+        assert finer["ANTI_ALIAS"].attrs["correction"] == "table_transform"
 
     def test_default_kernel_is_the_shipped_least_misfit_table(self):
         """Least misfit 9/300/linear; designed for the padding, so it needs one."""
@@ -150,13 +186,16 @@ class TestKernel:
             "interpolation": "linear",
         }
         kernel = make_gridding_kernel(None, 1.2)
-        assert kernel.params == DEFAULT_GRIDDING_KERNEL_PARAMS
-        np.testing.assert_array_equal(kernel.table, _shipped_default_table())
-        assert kernel.shape["fft_padding"] == 1.2
+        shape = kernel["ANTI_ALIAS"].attrs["shape"]
+        assert _params(kernel) == DEFAULT_GRIDDING_KERNEL_PARAMS
+        np.testing.assert_array_equal(
+            kernel["ANTI_ALIAS"].values, _shipped_default_table()
+        )
+        assert shape["fft_padding"] == 1.2
         # read from the package, not solved (a solve here gives the same table)
-        assert kernel.shape["shipped_table"] == "gcf_least_misfit_9_300_linear_p1.2.npy"
+        assert shape["shipped_table"] == "gcf_least_misfit_9_300_linear_p1.2.npy"
         solved = make_gridding_kernel({"oversampling": 100}, 1.2)
-        assert "shipped_table" not in solved.shape
+        assert "shipped_table" not in solved["ANTI_ALIAS"].attrs["shape"]
         with pytest.raises(ValueError, match="fft_padding >= 1.05"):
             make_gridding_kernel()
 
@@ -166,56 +205,81 @@ class TestKernel:
         kernel = make_gridding_kernel(
             {**CASA_GRIDDING_KERNEL_PARAMS, "oversampling": 50}
         )
-        assert kernel.table.size == 50 * 4
+        table = kernel["ANTI_ALIAS"].values
+        assert table.size == 50 * 4
         distance = np.arange(50 * 3) / 50  # cells
         _, expected = prolate_spheroidal_function(distance / 3)
-        np.testing.assert_allclose(kernel.table[: 50 * 3], expected, rtol=1e-12)
-        assert np.all(kernel.table[50 * 3 :] == 0.0)
-        assert kernel.table[0] == kernel.table.max()
+        np.testing.assert_allclose(table[: 50 * 3], expected, rtol=1e-12)
+        assert np.all(table[50 * 3 :] == 0.0)
+        assert table[0] == table.max()
 
     def test_correction_is_the_spheroidal_transform(self):
         kernel = make_gridding_kernel(CASA_GRIDDING_KERNEL_PARAMS)
         n = 64
         expected_l, expected_m = create_prolate_spheroidal_correcting_image_1D([n, 48])
-        np.testing.assert_array_equal(kernel.correction_1D(n), expected_l)
-        np.testing.assert_array_equal(kernel.correction_1D(48), expected_m)
+        np.testing.assert_array_equal(correction_1D(kernel, n), expected_l)
+        np.testing.assert_array_equal(correction_1D(kernel, 48), expected_m)
         np.testing.assert_array_equal(
-            kernel.correction_1D(n),
+            correction_1D(kernel, n),
             prolate_spheroidal_function(np.abs(2.0 * coordinates(n)))[0],
         )
 
     def test_bare_table_is_wrapped(self):
         table = create_prolate_spheroidal_kernel_1D(25, 7)
         kernel = as_gridding_kernel(table)
-        assert isinstance(kernel, GriddingKernel)
-        assert (kernel.support, kernel.oversampling) == (7, 25)
-        assert kernel.kernel_type == "prolate_spheroidal_casa"
-        assert as_gridding_kernel(kernel) is kernel
+        assert isinstance(kernel, xr.Dataset)
+        attrs = kernel["ANTI_ALIAS"].attrs
+        assert (attrs["support"], attrs["oversampling"]) == (7, 25)
+        assert attrs["kernel_type"] == "prolate_spheroidal_casa"
+        # nearest lookup and the analytic correction, whatever the oversampling
+        assert (attrs["interpolation"], attrs["correction"], attrs["shape"]) == (
+            "nearest",
+            "analytic",
+            {},
+        )
+        assert np.shares_memory(kernel["ANTI_ALIAS"].values, table)
         with pytest.raises(ValueError, match="bare kernel table"):
             as_gridding_kernel(np.zeros(10))
 
     def test_table_size_is_checked(self):
         with pytest.raises(ValueError, match="entries"):
-            GriddingKernel(np.zeros(399), 7, 100)
+            _gcf_xds_from_table(np.zeros(399), 7, 100)
+        # a gcf_xds made by hand is checked before its table reaches C++
+        attrs = make_gridding_kernel(CASA_GRIDDING_KERNEL_PARAMS)["ANTI_ALIAS"].attrs
+        short = xr.Dataset(
+            {"ANTI_ALIAS": (("anti_alias_sample",), np.zeros(399), attrs)}
+        )
+        with pytest.raises(ValueError, match="entries"):
+            anti_alias_kernel_arguments(short)
+
+    def test_cpp_kernel_arguments(self):
+        """The table itself, the support, the oversampling and the lookup code."""
+        kernel = make_gridding_kernel(CASA_GRIDDING_KERNEL_PARAMS)
+        table, support, oversampling, interpolation = anti_alias_kernel_arguments(
+            kernel
+        )
+        assert table is kernel["ANTI_ALIAS"].values
+        assert (support, oversampling, interpolation) == (7, 100, 0)
 
 
 class TestInterpolation:
     def test_casa_is_nearest_and_linear_is_selectable(self):
         casa = make_gridding_kernel(CASA_GRIDDING_KERNEL_PARAMS)
-        assert casa.interpolation == "nearest" and casa.interpolation_code == 0
+        assert casa["ANTI_ALIAS"].attrs["interpolation"] == "nearest"
+        assert anti_alias_kernel_arguments(casa)[3] == 0
         assert DEFAULT_GRIDDING_KERNEL_PARAMS["interpolation"] == "linear"
         kernel = make_gridding_kernel(
             {**CASA_GRIDDING_KERNEL_PARAMS, "interpolation": "linear"}
         )
-        assert kernel.interpolation == "linear" and kernel.interpolation_code == 1
-        assert kernel.params["interpolation"] == "linear"
-        assert "linear" in repr(kernel)
+        assert anti_alias_kernel_arguments(kernel)[3] == 1
+        assert _params(kernel)["interpolation"] == "linear"
+        assert kernel["ANTI_ALIAS"].attrs["interpolation"] == "linear"
 
     def test_unknown_interpolation_is_refused(self):
         with pytest.raises(ValueError, match="interpolation"):
             resolve_gridding_kernel_params({"interpolation": "cubic"})
         with pytest.raises(ValueError, match="interpolation"):
-            GriddingKernel(np.zeros(400), 7, 100, interpolation="cubic")
+            _gcf_xds_from_table(np.zeros(400), 7, 100, interpolation="cubic")
 
 
 def test_prolate_spheroidal_table_exists_for_support_7_only():
@@ -320,15 +384,17 @@ class TestExponentialSemicircle:
             },
             fft_padding=2.0,
         )
-        assert kernel.table.size == 20 * 5
-        assert kernel.table[0] == 1.0 == kernel.table.max()
-        distance = np.arange(kernel.table.size) / 20
+        table = kernel["ANTI_ALIAS"].values
+        shape = kernel["ANTI_ALIAS"].attrs["shape"]
+        assert table.size == 20 * 5
+        assert table[0] == 1.0 == table.max()
+        distance = np.arange(table.size) / 20
         # zero beyond the half width of 4.5 cells, positive and falling within
-        assert np.all(kernel.table[distance > 4.5] == 0.0)
-        inside = kernel.table[distance <= 4.5]
+        assert np.all(table[distance > 4.5] == 0.0)
+        inside = table[distance <= 4.5]
         assert np.all(inside > 0.0) and np.all(np.diff(inside) < 0.0)
-        assert kernel.shape["fft_padding"] == 2.0
-        assert 0.4 < kernel.shape["mu"] < 0.7 and 1.0 < kernel.shape["beta"] < 3.0
+        assert shape["fft_padding"] == 2.0
+        assert 0.4 < shape["mu"] < 0.7 and 1.0 < shape["beta"] < 3.0
 
     def test_shape_table_matches_the_published_optimum(self):
         """Arras et al. (2021, appendix A) give beta 2.1278, mu 0.5186 and an
@@ -388,13 +454,16 @@ class TestLeastMisfit:
                 {"type": "exponential_semicircle", **params}, fft_padding=1.5
             )
             x0 = kept_half_width(1.5)
-            own = misfit(least.table, 7, oversampling, interpolation, x0)
-            other = misfit(semicircle.table, 7, oversampling, interpolation, x0)
-            assert own <= other * 1.001
-            assert least.shape["misfit"] == pytest.approx(own, rel=1e-6)
-            assert np.all(
-                least.table[np.arange(least.table.size) / oversampling > 3.5] == 0.0
+            table = least["ANTI_ALIAS"].values
+            own = misfit(table, 7, oversampling, interpolation, x0)
+            other = misfit(
+                semicircle["ANTI_ALIAS"].values, 7, oversampling, interpolation, x0
             )
+            assert own <= other * 1.001
+            assert least["ANTI_ALIAS"].attrs["shape"]["misfit"] == pytest.approx(
+                own, rel=1e-6
+            )
+            assert np.all(table[np.arange(table.size) / oversampling > 3.5] == 0.0)
         # with linear lookup the design is aliasing limited and clearly better
         assert own < 0.7 * other or interpolation == "nearest"
 
@@ -410,8 +479,8 @@ class TestLeastMisfit:
         semicircle = make_gridding_kernel(
             {"type": "exponential_semicircle", **params}, fft_padding=2.0
         )
-        assert least.shape["misfit"] < 0.7 * misfit(
-            semicircle.table, 7, 300, "linear", 0.25
+        assert least["ANTI_ALIAS"].attrs["shape"]["misfit"] < 0.7 * misfit(
+            semicircle["ANTI_ALIAS"].values, 7, 300, "linear", 0.25
         )
 
     def test_fine_tables_are_resampled(self):
@@ -498,13 +567,35 @@ class TestCorrection:
         )
         n = 96
         x = coordinates(n)
-        expected = table_transform(kernel.table, 50, "linear", x)
-        expected /= table_transform(kernel.table, 50, "linear", 0.0)
-        np.testing.assert_allclose(kernel.correction_1D(n), expected)
-        assert kernel.correction_1D(n)[n // 2] == 1.0
+        table = kernel["ANTI_ALIAS"].values
+        expected = table_transform(table, 50, "linear", x)
+        expected /= table_transform(table, 50, "linear", 0.0)
+        np.testing.assert_allclose(correction_1D(kernel, n), expected)
+        assert correction_1D(kernel, n)[n // 2] == 1.0
         # positive everywhere, far above the floor over the image kept
-        assert np.all(kernel.correction_1D(n) > CORRECTION_FLOOR)
-        assert np.all(kernel.correction(x[np.abs(x) <= 0.25]) > 0.1)
+        assert np.all(correction_1D(kernel, n) > CORRECTION_FLOOR)
+        assert np.all(correction(kernel, x[np.abs(x) <= 0.25]) > 0.1)
+
+    def test_correction_1D_is_kept_per_table_and_axis(self):
+        """Computed once per table, correction and axis length, read only, and
+        equal to the correction at the pixel positions; a table with the same
+        attributes gets its own."""
+        table = np.linspace(1.0, 0.0, 200)
+        first = _gcf_xds_from_table(table, 7, 50, correction="table_transform")
+        values = correction_1D(first, 48)
+        assert not values.flags.writeable
+        assert correction_1D(first, 48) is values
+        np.testing.assert_array_equal(values, correction(first, coordinates(48)))
+        other = _gcf_xds_from_table(table**2, 7, 50, correction="table_transform")
+        np.testing.assert_array_equal(
+            correction_1D(other, 48), correction(other, coordinates(48))
+        )
+        assert not np.array_equal(correction_1D(other, 48), values)
+
+    def test_unknown_correction_is_refused(self):
+        gcf_xds = _gcf_xds_from_table(np.ones(200), 7, 50, correction="tabulated")
+        with pytest.raises(ValueError, match="unknown kernel correction 'tabulated'"):
+            correction(gcf_xds, 0.0)
 
     def test_map_error_of_the_prolate_kernel_is_its_lookup_error(self):
         """Nearest lookup at 100 samples per cell: the rms position error of a
@@ -513,19 +604,19 @@ class TestCorrection:
         kernel = make_gridding_kernel(CASA_GRIDDING_KERNEL_PARAMS)
         x = np.array([0.05, 0.1, 0.2])
         np.testing.assert_allclose(
-            kernel.map_error(x), 2.0 * np.pi * x / (100 * np.sqrt(12.0)), rtol=0.05
+            map_error(kernel, x), 2.0 * np.pi * x / (100 * np.sqrt(12.0)), rtol=0.05
         )
 
     def test_map_error_falls_with_oversampling_and_interpolation(self):
         x = np.array([0.1, 0.25])
         semicircle = {**CASA_GRIDDING_KERNEL_PARAMS, "type": "exponential_semicircle"}
-        nearest = make_gridding_kernel(semicircle, 2.0).map_error(x)
-        finer = make_gridding_kernel(
-            {**semicircle, "oversampling": 1000}, 2.0
-        ).map_error(x)
-        linear = make_gridding_kernel(
-            {**semicircle, "interpolation": "linear"}, 2.0
-        ).map_error(x)
+        nearest = map_error(make_gridding_kernel(semicircle, 2.0), x)
+        finer = map_error(
+            make_gridding_kernel({**semicircle, "oversampling": 1000}, 2.0), x
+        )
+        linear = map_error(
+            make_gridding_kernel({**semicircle, "interpolation": "linear"}, 2.0), x
+        )
         np.testing.assert_allclose(nearest / finer, 10.0, rtol=0.05)
         assert np.all(linear < nearest / 200)
         # the prolate spheroidal kernel does not profit from the padding: its
@@ -537,7 +628,7 @@ class TestCorrection:
                 "oversampling": 1000,
             }
         )
-        assert np.all(prolate.map_error(x) > 10 * linear)
+        assert np.all(map_error(prolate, x) > 10 * linear)
 
 
 class TestCasaAndTableCorrections:
@@ -548,19 +639,21 @@ class TestCasaAndTableCorrections:
         n = 3750
         casa = make_gridding_kernel(CASA_GRIDDING_KERNEL_PARAMS)
         np.testing.assert_array_equal(
-            casa.correction_1D(n),
+            correction_1D(casa, n),
             create_prolate_spheroidal_correcting_image_1D([n, n])[0],
         )
         for params in ({"oversampling": 1000}, {"interpolation": "linear"}):
             kernel = make_gridding_kernel({**CASA_GRIDDING_KERNEL_PARAMS, **params})
             x = coordinates(n)
-            expected = table_transform(
-                kernel.table, kernel.oversampling, kernel.interpolation, x
-            ) / table_transform(
-                kernel.table, kernel.oversampling, kernel.interpolation, 0.0
+            term = kernel["ANTI_ALIAS"]
+            arguments = (
+                term.values,
+                term.attrs["oversampling"],
+                term.attrs["interpolation"],
             )
+            expected = table_transform(*arguments, x) / table_transform(*arguments, 0.0)
             np.testing.assert_allclose(
-                kernel.correction_1D(n), np.maximum(expected, CORRECTION_FLOOR)
+                correction_1D(kernel, n), np.maximum(expected, CORRECTION_FLOOR)
             )
 
     def test_analytic_correction_of_the_sampled_table_is_biased(self):
@@ -569,10 +662,11 @@ class TestCasaAndTableCorrections:
         -(pi x / M)^2 / 6 for the analytic correction, 2.9e-5 at x = 0.42."""
         kernel = make_gridding_kernel(CASA_GRIDDING_KERNEL_PARAMS)
         x = np.linspace(0.0, 0.42, 43)
-        ratio = table_transform(kernel.table, 100, "nearest", x) / table_transform(
-            kernel.table, 100, "nearest", 0.0
+        table = kernel["ANTI_ALIAS"].values
+        ratio = table_transform(table, 100, "nearest", x) / table_transform(
+            table, 100, "nearest", 0.0
         )
-        ratio /= kernel.correction(x)
+        ratio /= correction(kernel, x)
         np.testing.assert_allclose(ratio, np.sinc(x / 100), rtol=0, atol=1e-6)
         assert 1.0 - ratio[-1] == pytest.approx((np.pi * 0.42 / 100) ** 2 / 6, rel=0.05)
 
@@ -631,7 +725,13 @@ class TestCasaAndTableCorrections:
                 fft_padding,
             )
             x0 = kept_half_width(fft_padding)
-            edge = kernel.transform(x0) / kernel.transform(0.0)
+            term = kernel["ANTI_ALIAS"]
+            arguments = (
+                term.values,
+                term.attrs["oversampling"],
+                term.attrs["interpolation"],
+            )
+            edge = table_transform(*arguments, x0) / table_transform(*arguments, 0.0)
             assert edge > 10 * CORRECTION_FLOOR, (support, fft_padding)
 
     def test_casa_kernel_is_not_checked(self):
@@ -642,10 +742,10 @@ class TestCasaAndTableCorrections:
         casa = make_gridding_kernel(CASA_GRIDDING_KERNEL_PARAMS)
         assert make_gridding_kernel(CASA_GRIDDING_KERNEL_PARAMS, 1.05) is casa
         np.testing.assert_array_equal(
-            casa.table, create_prolate_spheroidal_kernel_1D(100, 7)
+            casa["ANTI_ALIAS"].values, create_prolate_spheroidal_kernel_1D(100, 7)
         )
         np.testing.assert_array_equal(
-            casa.correction_1D(n),
+            correction_1D(casa, n),
             create_prolate_spheroidal_correcting_image_1D([n, n])[0],
         )
 
@@ -657,10 +757,10 @@ def test_least_misfit_table_is_the_same_in_another_process():
 
     code = (
         "from astroviper.processing_functions.imaging.gridding_convolution_functions."
-        "gridding_kernel import make_gridding_kernel; import hashlib; "
+        "anti_alias_term import make_gridding_kernel; import hashlib; "
         "k = make_gridding_kernel({'type': 'least_misfit', 'support': 7, "
         "'oversampling': 100, 'interpolation': 'linear'}, 1.2); "
-        "print(hashlib.sha256(k.table.tobytes()).hexdigest())"
+        "print(hashlib.sha256(k['ANTI_ALIAS'].values.tobytes()).hexdigest())"
     )
     digests = {
         subprocess.run(

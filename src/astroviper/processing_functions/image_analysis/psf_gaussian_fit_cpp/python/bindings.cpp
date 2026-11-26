@@ -25,7 +25,7 @@ int fit_psf_beam_impl(
     double delta_y,
     double psfcutoff,
     py::array beams,
-    int n_threads) {
+    int processing_function_threads) {
     if (!beams.dtype().equal(py::dtype::of<double>()))
         throw std::invalid_argument(astroviper::dtype_error(beams, "beams", "float64"));
     if (!(beams.flags() & py::array::c_style))
@@ -51,7 +51,7 @@ int fit_psf_beam_impl(
         if constexpr (std::is_same_v<T, double>) {
             n_fallback = astroviper::psf_gaussian_fit::fit_planes(
                 psf_ptr, n_plane, nx, ny, delta_x, delta_y, psfcutoff,
-                beams_ptr, n_threads);
+                beams_ptr, processing_function_threads);
         } else {
             // float32 planes: promote once (the fit works in double, as CASA
             // promotes its Float lattice to Double for the fitter).
@@ -60,7 +60,7 @@ int fit_psf_beam_impl(
                 promoted[k] = static_cast<double>(astroviper::scalar_load(psf_ptr, k));
             n_fallback = astroviper::psf_gaussian_fit::fit_planes(
                 promoted.data(), n_plane, nx, ny, delta_x, delta_y, psfcutoff,
-                beams_ptr, n_threads);
+                beams_ptr, processing_function_threads);
         }
     }
     return n_fallback;
@@ -74,12 +74,12 @@ PYBIND11_MODULE(_psf_gaussian_fit_ext, m) {
         "port, CAS-13022).";
     m.def("fit_psf_beam", &fit_psf_beam_impl<double>, py::arg("psf"),
           py::arg("delta_x"), py::arg("delta_y"), py::arg("psfcutoff"),
-          py::arg("beams"), py::arg("n_threads") = 1,
+          py::arg("beams"), py::arg("processing_function_threads") = 1,
           "Fit [n_plane, nx, ny] float64 PSF planes into the in-place "
           "[n_plane, 3] float64 beams array ([major, minor, pa] radians); "
           "returns the number of planes that used the fallback beam.");
     m.def("fit_psf_beam", &fit_psf_beam_impl<float>, py::arg("psf"),
           py::arg("delta_x"), py::arg("delta_y"), py::arg("psfcutoff"),
-          py::arg("beams"), py::arg("n_threads") = 1,
+          py::arg("beams"), py::arg("processing_function_threads") = 1,
           "float32 overload of fit_psf_beam.");
 }

@@ -2,12 +2,13 @@
 
 import pytest
 
-from astroviper.processing_functions.imaging.deconvolution import (
+from astroviper.processing_functions.imaging.model_update.deconvolve import (
     _validate_deconvolve_params,
     validate_exact_psf_subtraction,
 )
 from astroviper.processing_functions.imaging.utils.cycle_control import (
-    CycleController,
+    get_state,
+    make_cycle_control_state,
     validate_entropy_params,
     validate_max_cycles,
     validate_threshold_tolerance,
@@ -205,7 +206,7 @@ def test_noisy_controls_pass_the_imager_checks():
     validate_exact_psf_subtraction("hogbom", params["exact_psf_subtraction"])
     for row in params["threshold"]:
         _validate_deconvolve_params({**params, "threshold": row})
-        controller = CycleController(
+        controller = make_cycle_control_state(
             max_iter=params["max_iter"],
             max_cycles=params["max_cycles"],
             threshold=row,
@@ -217,7 +218,7 @@ def test_noisy_controls_pass_the_imager_checks():
             entropy_stop=params["entropy_stop"],
             threshold_tolerance=params["threshold_tolerance"],
         )
-        state = controller.get_state()
+        state = get_state(controller)
         assert state["threshold"] == row
         assert state["threshold_tolerance"] == THRESHOLD_TOLERANCE
         for key in ("max_cycles", "gain", "psf_sidelobe_factor", "max_iter_per_cycle"):

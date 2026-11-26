@@ -115,7 +115,7 @@ void calculate_visibilities_py(py::array visibility, py::array uvw, py::array an
                                py::array frequency, py::array polarization_index, py::array flux,
                                py::array k_vector, py::array inverse_n, py::array source_ra_dec,
                                py::array pointing_ra_dec, py::array beam_model_map, py::list beam_models,
-                               py::array parallactic_angle, py::array mueller_selection, int n_threads) {
+                               py::array parallactic_angle, py::array mueller_selection, int processing_function_threads) {
     auto vis_info = checked_buffer<std::complex<double>>(visibility, "visibility", 4, true);
     auto uvw_info = checked_buffer<double>(uvw, "uvw", 3, false);
     auto a1_info = checked_buffer<std::int64_t>(antenna1, "antenna1", 1, false);
@@ -191,7 +191,7 @@ void calculate_visibilities_py(py::array visibility, py::array uvw, py::array an
             ptr_of<double>(k_info), ptr_of<double>(n_info), ptr_of<double>(src_info), ptr_of<double>(pt_info),
             ptr_of<std::int64_t>(map_info), models, ptr_of<double>(pa_info), ptr_of<std::int64_t>(mu_info), n_time,
             n_baseline, n_frequency, n_polarization, n_source, flux_info.shape[1], flux_info.shape[2],
-            src_info.shape[0], pt_info.shape[0], pt_info.shape[1], n_antenna, mu_info.shape[0], n_threads);
+            src_info.shape[0], pt_info.shape[0], pt_info.shape[1], n_antenna, mu_info.shape[0], processing_function_threads);
     }
 }
 

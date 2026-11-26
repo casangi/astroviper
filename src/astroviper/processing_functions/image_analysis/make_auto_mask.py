@@ -7,11 +7,11 @@ before every model update.
 import math
 
 import numpy as np
-import scipy.fft
 import scipy.ndimage
 import scipy.special
 import toolviper.utils.logger as logger
 
+from astroviper.processing_functions import fft
 from astroviper.utils.data_group_tools import (
     create_data_groups_in_and_out,
     modify_data_groups_xds,
@@ -150,18 +150,17 @@ def _prune(mask, min_pixels):
     return pruned
 
 
-def _convolve(box, kernel):
+def _convolve(box, kernel, fft_backend="scipy"):
     """Convolution of a bool ``box``, padded to the FFT size, two spectra at most."""
     shape = [
-        scipy.fft.next_fast_len(size + kernel.shape[0] - 1, real=True)
-        for size in box.shape
+        fft.next_fast_len(size + kernel.shape[0] - 1, real=True) for size in box.shape
     ]
-    spectrum = scipy.fft.rfft2(box.astype(np.float64), shape)
-    spectrum *= scipy.fft.rfft2(kernel, shape)
-    return scipy.fft.irfft2(spectrum, shape)
+    spectrum = fft.rfft2(box.astype(np.float64), shape, fft_backend=fft_backend)
+    spectrum *= fft.rfft2(kernel, shape, fft_backend=fft_backend)
+    return fft.irfft2(spectrum, shape, fft_backend=fft_backend)
 
 
-def _smooth_and_cut(mask, kernel, cut_threshold):
+def _smooth_and_cut(mask, kernel, cut_threshold, fft_backend="scipy"):
     """``mask`` smoothed with ``kernel`` and cut at a fraction of its peak."""
     if not mask.any():
         return mask
@@ -170,7 +169,7 @@ def _smooth_and_cut(mask, kernel, cut_threshold):
     half_width = kernel.shape[0] // 2
     box = _bounding_box(mask)
     reach = _bounding_box(mask, half_width)
-    smoothed = _convolve(mask[box], kernel)[
+    smoothed = _convolve(mask[box], kernel, fft_backend)[
         tuple(
             slice(
                 wide.start - narrow.start + half_width,
@@ -197,7 +196,15 @@ def _grow(mask, constraint, iterations):
 
 
 def _update_plane_mask(
-    plane, support, previous_mask, sidelobe, beam, delta, threshold_reached, params
+    plane,
+    support,
+    previous_mask,
+    sidelobe,
+    beam,
+    delta,
+    threshold_reached,
+    params,
+    fft_backend="scipy",
 ):
     """The mask of one plane after one residual update.
 
@@ -220,6 +227,8 @@ def _update_plane_mask(
         ``threshold``; only then does ``min_percent_change`` stop its mask.
     params : dict
         Complete ``auto_mask_params``.
+    fft_backend : {"numpy", "scipy", "pyfftw"}, default "scipy"
+        FFT library of the smoothing.
 
     Returns
     -------
@@ -228,7 +237,7 @@ def _update_plane_mask(
     stop : bool
         Do not update the mask of this plane again.
     """
-    from astroviper.processing_functions.imaging.restore import (
+    from astroviper.processing_functions.imaging.imaging_conclude.restore import (
         _elliptical_gaussian_kernel,
     )
 
@@ -277,18 +286,18 @@ def _update_plane_mask(
     mask = plane > mask_threshold
     if params["min_beam_fraction"] > 0:
         mask = _prune(mask & support, prune_pixels)
-    mask = _smooth_and_cut(mask, kernel, params["cut_threshold"])
+    mask = _smooth_and_cut(mask, kernel, params["cut_threshold"], fft_backend)
     mask |= previous_mask
 
     if params["grow_iterations"] > 0 and previous_mask.any():
         grown = _grow(previous_mask, plane > grow_threshold, params["grow_iterations"])
         if params["min_beam_fraction"] > 0 and params["grow_prune"]:
             grown = _prune(grown, prune_pixels)
-        mask |= _smooth_and_cut(grown, kernel, params["cut_threshold"])
+        mask |= _smooth_and_cut(grown, kernel, params["cut_threshold"], fft_backend)
 
     if params["negative_threshold"] > 0:
         mask |= _smooth_and_cut(
-            plane < negative_threshold, kernel, params["cut_threshold"]
+            plane < negative_threshold, kernel, params["cut_threshold"], fft_backend
         )
 
     mask &= support
@@ -318,6 +327,7 @@ def make_auto_mask(
     image_data_group_in_name="residual",
     image_data_group_out_name="residual",
     image_data_group_out_modified=None,
+    fft_backend="scipy",
     *,
     input_checked: bool = False,
 ):
@@ -356,7 +366,19 @@ def make_auto_mask(
         ``min_percent_change`` stop a mask.
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
-        kernels.
+        kernels. A distributed application resolves ``0`` (auto) once, before
+        its checks, to the CPUs per Dask worker thread of the host with the
+        fewest, at least 1 (1 where these are not known, as under MPI), and
+        warns when a host's worker threads times the count exceed its CPUs
+        (see
+        :func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).
+        Node tasks and processing functions do not resolve ``0``; those that
+        check the count refuse it. Given a count below 1, a C++ kernel and the
+        PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
+        and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
+        ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
+        numpy.fft takes no count: under ``"numpy"`` the Python FFTs run one
+        thread.
     image_data_group_in_name : str, optional
         Data group of the residual. Default ``"residual"``.
     image_data_group_out_name : str, optional
@@ -364,6 +386,10 @@ def make_auto_mask(
     image_data_group_out_modified : dict, optional
         Role to data-variable name of the output group. Default
         ``{"mask": "MASK"}``.
+    fft_backend : {"numpy", "scipy", "pyfftw"}, default "scipy"
+        FFT library: ``"numpy"`` (``numpy.fft``), ``"scipy"`` (``scipy.fft``) or
+        ``"pyfftw"`` (FFTW through pyFFTW). The three round differently; the C++
+        kernels' FFTs do not use it.
     input_checked : bool, optional
         Skip configuration checks already performed by the calling layer.
         Runtime checks on newly created data always remain active. For graph nodes
@@ -379,6 +405,9 @@ def make_auto_mask(
         did not change or changed by less than that percentage.
     """
     if not input_checked:
+        from astroviper.processing_functions.imaging.config_check._common import (
+            check_fft_backend,
+        )
         from astroviper.processing_functions.imaging.config_check._predicates import (
             check_auto_mask_params,
             check_primary_beam_limit,
@@ -386,6 +415,7 @@ def make_auto_mask(
 
         check_auto_mask_params(auto_mask_params)
         check_primary_beam_limit(primary_beam_limit)
+        check_fft_backend(fft_backend)
 
     params = {**AUTO_MASK_DEFAULTS, **auto_mask_params}
     if image_data_group_out_modified is None:
@@ -432,7 +462,7 @@ def make_auto_mask(
     if threshold_reached is None:
         threshold_reached = np.zeros(planes_shape, dtype=bool)
 
-    with scipy.fft.set_workers(processing_function_threads):
+    with fft.set_workers(processing_function_threads, fft_backend=fft_backend):
         for index in np.ndindex(planes_shape):
             if planes_stopped[index]:
                 continue
@@ -449,6 +479,7 @@ def make_auto_mask(
                 delta,
                 bool(threshold_reached[index]),
                 params,
+                fft_backend,
             )
 
     img_xds[image_data_group_out["mask"]] = (

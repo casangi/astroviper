@@ -7,6 +7,89 @@ from astroviper.processing_functions.imaging.config_check._common import (
 )
 
 
+def check_gridder(gridder):
+    """Require a name of the gridder registry.
+
+    Parameters
+    ----------
+    gridder : str
+        A key of
+        :data:`~astroviper.processing_functions.imaging.gridders.gridder_registry.GRIDDERS`.
+
+    Returns
+    -------
+    type
+        The gridder's class.
+
+    Raises
+    ------
+    ValueError
+        For any other value, a gridder class included.
+    """
+    from astroviper.processing_functions.imaging.gridders.gridder_registry import (
+        GRIDDERS,
+    )
+
+    if not isinstance(gridder, str) or gridder not in GRIDDERS:
+        raise ValueError(f"gridder must be one of {tuple(GRIDDERS)}.")
+    return GRIDDERS[gridder]
+
+
+def check_gridder_kernel(gridder, params):
+    """Require no kernel recipe for a gridder without the anti-alias term.
+
+    Parameters
+    ----------
+    gridder : str
+        A key of
+        :data:`~astroviper.processing_functions.imaging.gridders.gridder_registry.GRIDDERS`.
+    params : mapping or None
+        Kernel recipe.
+
+    Returns
+    -------
+    type
+        The gridder's class.
+
+    Raises
+    ------
+    ValueError
+        For a gridder :func:`check_gridder` refuses, or a recipe other than
+        ``None`` for a gridder that uses no kernel.
+    """
+    gridder_class = check_gridder(gridder)
+    if "anti_alias" not in gridder_class.gcf_terms and params is not None:
+        raise ValueError(
+            f"gridder={gridder!r} has no gridding kernel: "
+            "gridding_kernel_params must be None."
+        )
+    return gridder_class
+
+
+def check_gridder_continuum_mode(gridder, continuum_mode):
+    """Require MFS for a gridder that makes no visibility grid.
+
+    Parameters
+    ----------
+    gridder : str
+        A key of
+        :data:`~astroviper.processing_functions.imaging.gridders.gridder_registry.GRIDDERS`.
+    continuum_mode : str
+        Continuum construction.
+
+    Raises
+    ------
+    ValueError
+        For a gridder :func:`check_gridder` refuses, or MVC, which is made of
+        uv grids, with a gridder without the ``"visibility"`` role.
+    """
+    if (
+        "visibility" not in check_gridder(gridder).grid_roles
+        and continuum_mode != "mfs"
+    ):
+        raise ValueError("DFT continuum imaging requires continuum_mode='mfs'.")
+
+
 def check_gridding_kernel_parameters(params):
     """Check the recipe schema without constructing a numerical kernel.
 
@@ -25,13 +108,8 @@ def check_gridding_kernel_parameters(params):
     if params is None:
         return
     require_mapping("gridding_kernel_params", params)
-    # DFT selects no kernel table; support/sampling overrides have no meaning.
-    if params.get("type") == "dft":
-        if set(params) != {"type"}:
-            raise ValueError("DFT accepts only gridding_kernel_params={'type': 'dft'}.")
-        return
 
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
         CASA_GRIDDING_KERNEL_PARAMS,
         DEFAULT_GRIDDING_KERNEL_PARAMS,
     )
@@ -70,7 +148,7 @@ def check_kernel_padding(fft_padding):
     fft_padding : float
         Finite scalar padding factor of at least 1.05.
     """
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
         MIN_DESIGN_PADDING,
     )
 
@@ -93,11 +171,8 @@ def check_gridding_kernel(params, *, fft_padding=None):
     """
     if params is not None:
         require_mapping("gridding_kernel_params", params)
-        if params.get("type") == "dft":
-            check_gridding_kernel_parameters(params)
-            return
 
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
         make_gridding_kernel,
     )
 
@@ -116,7 +191,7 @@ def check_kernel_options(kernel_type, interpolation):
     interpolation : {'nearest', 'linear'}
         Lookup interpolation used for the kernel table.
     """
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
         KERNEL_TYPES,
     )
 

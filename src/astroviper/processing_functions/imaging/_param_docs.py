@@ -158,6 +158,13 @@ _FIELD_NAME_DOC = (
     "not currently filter fields; prepare a single-field input Processing Set."
 )
 
+_UNDECONVOLVED_IMAGE_GRIDDER_DOC = (
+    "Registry name of the gridder (a key of\n"
+    ":data:`~astroviper.processing_functions.imaging.gridders.gridder_registry.GRIDDERS`):\n"
+    '``"anti_alias"`` (the default) or ``"direct_fourier_transform"``,\n'
+    'which uses neither ``gcf_xds`` nor ``image_params["fft_padding"]``.'
+)
+
 # The parameters of find_continuum.
 _FIND_CONTINUUM_PARAM_DOCS = {
     "input_image_store": "xradio image store of the dirty cube (Stokes I is used).",
@@ -557,8 +564,9 @@ IMAGING_PARAM_DOCS = {
     "hessian_cache": (
         "Workflow-owned mutable cache for content-verified PSF/Hessian diagnostics.\n"
         "Reuse requires matching PSF contents, coordinates, precision, Taylor basis,\n"
-        "geometry, scales, scale bias, and cell sampling. Changing-product checks\n"
-        "always run. None disables reuse; input_checked does not control this cache."
+        "geometry, scales, scale bias, cell sampling and FFT library (fft_backend).\n"
+        "Changing-product checks always run. None disables reuse; input_checked does\n"
+        "not control this cache."
     ),
     "image_cube_single_field.field_name": _FIELD_NAME_DOC,
     "image_continuum_single_field.field_name": _FIELD_NAME_DOC,
@@ -566,7 +574,7 @@ IMAGING_PARAM_DOCS = {
     "feather.selection": """``xarray`` ``isel`` selection applied to both input images (e.g. a
 frequency channel range or an ``l``/``m`` sub-window). Chunking is determined
 from the selected images.""",
-    "feather.fft_backend": """FFT backend used by the feather combination (``"scipy"`` or ``"pyfftw"``).""",
+    "feather.fft_backend": """FFT backend used by the feather combination (``"numpy"``, ``"scipy"`` or ``"pyfftw"``).""",
     "require_complete": """Require all coordinates and cycle controls needed by a distributed driver.
 Lower-level entry points check only the configuration they receive.""",
     "input_checked": """Skip configuration checks already performed by the calling layer.
@@ -663,6 +671,31 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
     ),
     "continuum_mode": _CONTINUUM_MODE_DOC,
     "resolve_continuum_primary_beam.continuum_mode": (_CONTINUUM_PRIMARY_BEAM_MODE_DOC),
+    "gridder": (
+        "Registry name of the gridder (a key of\n"
+        ":data:`~astroviper.processing_functions.imaging.gridders.gridder_registry.GRIDDERS`):\n"
+        '``"anti_alias"`` (the default), convolutional gridding with the\n'
+        "anti-aliasing kernel of ``gridding_kernel_params`` (by default the\n"
+        "``least_misfit`` kernel of support 9, oversampling 300 and linear\n"
+        'lookup), or ``"direct_fourier_transform"``, which replaces the gridding\n'
+        "and the FFTs by the exact direct Fourier transform over the unpadded\n"
+        "image, w term included: with the phase\n"
+        "``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the\n"
+        "model visibilities are ``sum M exp(+i phase) / n`` over the model pixels\n"
+        "and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,\n"
+        "the measurement equation of ``simulate_processing_set``. It uses no\n"
+        "kernel and no ``fft_padding``. Its cost is proportional to the samples\n"
+        "times the image pixels (30 to 40 s per residual update of 451,500\n"
+        "samples, four correlations and 160 x 160 pixels on one core), so give\n"
+        "it several ``processing_function_threads``; its results do not depend\n"
+        "on their number. Its ``VISIBILITY_NORMALIZATION`` and\n"
+        "``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the\n"
+        "anti-alias gridder's that sum times the kernel's stencil sums."
+    ),
+    "make_undeconvolved_image_single_field.gridder": _UNDECONVOLVED_IMAGE_GRIDDER_DOC,
+    "make_undeconvolved_image_continuum_single_field.gridder": (
+        _UNDECONVOLVED_IMAGE_GRIDDER_DOC
+    ),
     "gridding_kernel_params": (
         "The gridding convolution kernel the gridder and degridder use:\n"
         '``type`` (``"prolate_spheroidal_casa"``, Schwab\'s rational\n'
@@ -698,25 +731,15 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
         "the image kept (a support too large for the ``fft_padding``, e.g. 17\n"
         "at 1.05) is refused. The kernel of the\n"
         'former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,\n'
-        'not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces\n'
-        "the gridding and the FFTs by the exact direct Fourier transform over the\n"
-        "unpadded image, w term included: with the phase\n"
-        "``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the\n"
-        "model visibilities are ``sum M exp(+i phase) / n`` over the model pixels\n"
-        "and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,\n"
-        "the measurement equation of ``simulate_processing_set``. Its cost is\n"
-        "proportional to the samples times the image pixels (30 to 40 s per\n"
-        "residual update of 451,500 samples, four correlations and 160 x 160\n"
-        "pixels on one core), so give it several\n"
-        "``processing_function_threads``; its results do not depend on their\n"
-        "number. Its ``VISIBILITY_NORMALIZATION`` and\n"
-        "``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the\n"
-        "gridders' that sum times the kernel's stencil sums."
+        'not ``"prolate_spheroidal"``. The gridder ``"direct_fourier_transform"``\n'
+        "uses no kernel: ``gridding_kernel_params`` must then be ``None``."
     ),
-    "cgk_1D": (
-        "The gridding kernel\n"
-        "(:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`),\n"
-        "or a bare table of CASA's prolate spheroidal kernel of support 7."
+    "gcf_xds": (
+        "The ``gcf_xds`` of the gridding kernel, from\n"
+        ":func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.make_gridding_kernel`,\n"
+        "or from\n"
+        ":func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.as_gridding_kernel`\n"
+        "for a bare table of CASA's prolate spheroidal kernel of support 7."
     ),
     "primary_beam_params": (
         "The primary beam of the imager, the power pattern that gives the clean\n"
@@ -958,7 +981,7 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
         "  leaves on resolved emission in far fewer iterations, and take no\n"
         "  residual below ``threshold_per_cycle``. Further keys\n"
         "  (``asp_residual_component_*``) are described in\n"
-        "  :func:`~astroviper.processing_functions.imaging.deconvolution.asp_clean`.\n"
+        "  :func:`~astroviper.processing_functions.imaging.model_update.deconvolve.asp_clean`.\n"
         "  Asp only. Default ``True``. No CASA equivalent.\n"
         "- ``asp_scale_significance`` : If ``True``, Asp measures the noise of\n"
         "  the residual smoothed with each of its initial scales and, once the\n"
@@ -1079,16 +1102,46 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
         '``"chunk"``.'
     ),
     "processing_function_threads": (
-        "Number of threads handed to the per-processing-function (C++ / FFT)\nkernels."
+        "Number of threads handed to the per-processing-function (C++ / FFT)\n"
+        "kernels. A distributed application resolves ``0`` (auto) once, before\n"
+        "its checks, to the CPUs per Dask worker thread of the host with the\n"
+        "fewest, at least 1 (1 where these are not known, as under MPI), and\n"
+        "warns when a host's worker threads times the count exceed its CPUs\n"
+        "(see\n"
+        ":func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).\n"
+        "Node tasks and processing functions do not resolve ``0``; those that\n"
+        "check the count refuse it. Given a count below 1, a C++ kernel and the\n"
+        "PSF fit run one thread, and the Python FFTs pass the count to scipy.fft\n"
+        "and pyfftw, whose scipy interfaces refuse ``0`` and read a negative\n"
+        "``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.\n"
+        'numpy.fft takes no count: under ``"numpy"`` the Python FFTs run one\n'
+        "thread."
     ),
     "fft_backend": (
-        'FFT backend used by the gridder normalization (``"pyfftw"`` or\n``"scipy"``).'
+        'FFT library: ``"numpy"`` (``numpy.fft``), ``"scipy"`` (``scipy.fft``) or\n'
+        '``"pyfftw"`` (FFTW through pyFFTW). The three round differently; the C++\n'
+        "kernels' FFTs do not use it."
     ),
     "image_data_variables_keep": (
         'Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,\n'
         '``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).\n'
         "The distributed cube writer does not publish UV grids; standalone\n"
         "processing functions may retain their working grids in memory."
+    ),
+    "uv_to_image.image_data_group_in_name": (
+        "Image data group of the accumulated arrays; not read by a gridder\n"
+        "that accumulates into the images."
+    ),
+    "image_to_uv.image_data_group_in_name": "Image data group of the model images.",
+    "uv_to_image.image_data_variables_keep": (
+        "Roles of the uv grids kept in ``img_xds`` after the transform\n"
+        '(``"visibility"``, ``"uv_sampling"``); the other grids transformed\n'
+        "in this call are deleted from it. ``None`` keeps none."
+    ),
+    "image_to_uv.image_data_variables_keep": (
+        "Roles of the images kept in ``img_xds`` after the transform\n"
+        '(``"sky"``); the other images transformed in this call are deleted\n'
+        "from it. ``None`` keeps none."
     ),
     "restore_continuum_image.continuum_mode": (
         "Continuum construction convention. When omitted, infer it from the\n"

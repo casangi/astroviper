@@ -6,7 +6,7 @@ import numpy as np
 
 
 def model_hessian_cache_key(
-    psf, psf_values, diagnostics, *, small_scale_bias, cell_size
+    psf, psf_values, diagnostics, *, small_scale_bias, cell_size, fft_backend
 ):
     """Fingerprint actual PSF contents and every input to its diagnostics.
 
@@ -22,6 +22,8 @@ def model_hessian_cache_key(
         Native per-scale Hessian bias.
     cell_size : array-like or None
         Angular sampling used by spatial diagnostics.
+    fft_backend : {"numpy", "scipy", "pyfftw"}
+        FFT library of the spatial diagnostics.
 
     Returns
     -------
@@ -57,4 +59,5 @@ def model_hessian_cache_key(
         diagnostics["reference_frequency"],
         float(small_scale_bias),
         None if cell_size is None else tuple(np.asarray(cell_size).tolist()),
+        fft_backend,
     )

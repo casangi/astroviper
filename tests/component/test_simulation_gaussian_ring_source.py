@@ -26,7 +26,7 @@ except (ImportError, OSError):
     )
 
 import astroviper.distributed_applications as distributed_applications  # noqa: E402
-from astroviper.processing_functions.imaging.restore import (  # noqa: E402
+from astroviper.processing_functions.imaging.imaging_conclude.restore import (  # noqa: E402
     _elliptical_gaussian_kernel,
 )
 from astroviper.processing_functions.simulation import (  # noqa: E402

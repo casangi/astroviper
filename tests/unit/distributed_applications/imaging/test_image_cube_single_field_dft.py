@@ -1,13 +1,13 @@
 """Full-stack tests of the direct Fourier transform option of the cube imager.
 
-``gridding_kernel_params={"type": "dft"}`` reaches the residual updates and the
+``gridder="direct_fourier_transform"`` reaches the residual updates and the
 point spread function of every node task: on a small simulated processing set
 (two polarized point sources on pixel centres, four correlations, two channels in
 two node tasks, the w term on) the clean recovers the apparent fluxes to 1
 percent of the brightest (the criterion of the component test of flux recovery)
-and writes the outputs of the gridder path. Kernel keys that do not apply to
-the DFT, and kept uv grids, which it does not make, are refused before the image
-store is created.
+and writes the outputs of the gridder path. A kernel recipe, which does not apply
+to the DFT, the former kernel type ``"dft"`` and kept uv grids, which the DFT does
+not make, are refused before the image store is created.
 """
 
 import numpy as np
@@ -101,7 +101,7 @@ def point_sources_ps(tmp_path_factory):
     )["ps_store"]
 
 
-def _image_cube(ps_store, image_store, gridding_kernel_params, keep=None):
+def _image_cube(ps_store, image_store, gridder, gridding_kernel_params=None, keep=None):
     frequency_coords = open_processing_set(ps_store).xr_ps.get_freq_axis().values
     return distributed_applications.imaging.image_cube_single_field(
         ps_store=ps_store,
@@ -122,14 +122,15 @@ def _image_cube(ps_store, image_store, gridding_kernel_params, keep=None):
         processing_set_data_group_name="base",
         single_precision_image=False,
         n_mapping_parallelism={"frequency": 2},
+        gridder=gridder,
         gridding_kernel_params=gridding_kernel_params,
         processing_function_threads=2,
     )
 
 
 def test_the_dft_cube_cleans_the_point_sources(tmp_path, point_sources_ps):
-    _image_cube(point_sources_ps, tmp_path / "dft.img.zarr", {"type": "dft"})
-    _image_cube(point_sources_ps, tmp_path / "grid.img.zarr", None)
+    _image_cube(point_sources_ps, tmp_path / "dft.img.zarr", "direct_fourier_transform")
+    _image_cube(point_sources_ps, tmp_path / "grid.img.zarr", "anti_alias")
     dft = load_image(str(tmp_path / "dft.img.zarr"))
     grid = load_image(str(tmp_path / "grid.img.zarr"))
     primary_beam = dft["PRIMARY_BEAM"].values[0, :, 0]
@@ -155,29 +156,58 @@ def test_the_dft_cube_cleans_the_point_sources(tmp_path, point_sources_ps):
 
 
 @pytest.mark.parametrize(
-    ("gridding_kernel_params", "keep", "match"),
+    ("gridder", "gridding_kernel_params", "keep", "match"),
     [
         (
-            {"type": "dft", "support": 7},
+            "direct_fourier_transform",
+            {"support": 7},
             None,
-            "DFT accepts only gridding_kernel_params=",
+            "gridder='direct_fourier_transform' has no gridding kernel",
         ),
         (
-            {"type": "dft", "oversampling": 100, "interpolation": "nearest"},
+            "direct_fourier_transform",
+            {"oversampling": 100, "interpolation": "nearest"},
             None,
-            "DFT accepts only gridding_kernel_params=",
+            "gridder='direct_fourier_transform' has no gridding kernel",
         ),
-        ({"type": "fft"}, None, r"gridding_kernel_params\['type'\] must be one of"),
-        ({"type": "dft"}, ["sky_residual", "visibility"], "uv grids"),
-        ({"type": "dft"}, ["uv_sampling", "sky_model"], "uv grids"),
+        (
+            "anti_alias",
+            {"type": "fft"},
+            None,
+            r"gridding_kernel_params\['type'\] must be one of",
+        ),
+        (
+            "anti_alias",
+            {"type": "dft"},
+            None,
+            r"gridding_kernel_params\['type'\] must be one of",
+        ),
+        (
+            "direct_fourier_transform",
+            None,
+            ["sky_residual", "visibility"],
+            "uv grids",
+        ),
+        ("direct_fourier_transform", None, ["uv_sampling", "sky_model"], "uv grids"),
     ],
-    ids=["support", "oversampling_interpolation", "unknown_type", "visibility", "uv"],
+    ids=[
+        "support",
+        "oversampling_interpolation",
+        "unknown_type",
+        "dft_type",
+        "visibility",
+        "uv",
+    ],
 )
 def test_refused_before_the_image_store_is_created(
-    tmp_path, point_sources_ps, gridding_kernel_params, keep, match
+    tmp_path, point_sources_ps, gridder, gridding_kernel_params, keep, match
 ):
     with pytest.raises(ValueError, match=match):
         _image_cube(
-            point_sources_ps, tmp_path / "cube.img.zarr", gridding_kernel_params, keep
+            point_sources_ps,
+            tmp_path / "cube.img.zarr",
+            gridder,
+            gridding_kernel_params,
+            keep,
         )
     assert list(tmp_path.iterdir()) == []

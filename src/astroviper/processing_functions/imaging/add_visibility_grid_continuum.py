@@ -1,20 +1,14 @@
 """Taylor-weighted visibility gridding for MT-MFS continuum imaging."""
 
 import copy
-from typing import TYPE_CHECKING
 
 import numpy as np
 import xarray as xr
 
-if TYPE_CHECKING:
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-        GriddingKernel,
-    )
-
 
 def add_visibility_grid_continuum_single_field(
     ms_xds: xr.Dataset,
-    cgk_1D: "GriddingKernel | np.ndarray",
+    gcf_xds: xr.Dataset,
     img_xds: xr.Dataset,
     n_taylor_terms: int,
     reference_frequency: float,
@@ -28,6 +22,7 @@ def add_visibility_grid_continuum_single_field(
     complex_dtype=None,
     *,
     input_checked: bool = False,
+    gridder: str = "anti_alias",
 ):
     """Grid visibilities into MT-MFS residual Taylor uv grids.
 
@@ -56,12 +51,14 @@ def add_visibility_grid_continuum_single_field(
     ms_xds : xr.Dataset
         Measurement-set dataset containing correlated data, UVW coordinates,
         imaging weights, and a frequency coordinate.
-    cgk_1D : GriddingKernel or np.ndarray
-        The gridding kernel
-        (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`,
-        whose table, support and oversampling go to the C++
-        ``anti_alias_grid`` kernel), or a bare table of CASA's
-        prolate spheroidal kernel of support 7.
+    gcf_xds : xr.Dataset
+        The ``gcf_xds`` of the gridding kernel, from
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.make_gridding_kernel`,
+        or from
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.as_gridding_kernel`
+        for a bare table of CASA's prolate spheroidal kernel of support 7;
+        its table, support and oversampling go to the C++
+        ``anti_alias_grid`` kernel.
     img_xds : xr.Dataset
         Image dataset that receives the Taylor uv grids.
     n_taylor_terms : int
@@ -75,7 +72,8 @@ def add_visibility_grid_continuum_single_field(
     image_data_group_out_name : str, optional
         Image data group under which the Taylor grids are registered.
     image_data_group_out_modified : dict, optional
-        Output role-to-variable mapping.
+        Output role-to-variable mapping. Default the ``grid_roles`` of the
+        gridder.
     overwrite : bool, optional
         Passed to the data-group helper.
     fft_padding : float, optional
@@ -88,11 +86,24 @@ def add_visibility_grid_continuum_single_field(
     input_checked : bool, optional
         Skip shared configuration checks after validation by an upper layer.
         Existing data/product checks always run.
+    gridder : str, optional
+        Registry name of the gridder (a key of
+        :data:`~astroviper.processing_functions.imaging.gridders.gridder_registry.GRIDDERS`):
+        ``"anti_alias"`` (the default) or ``"direct_fourier_transform"``,
+        which accumulates into the residual Taylor images themselves and uses
+        neither ``gcf_xds`` nor ``fft_padding``.
 
     Returns
     -------
     None
         ``img_xds`` is modified in place.
+
+    Raises
+    ------
+    ValueError
+        As :func:`~astroviper.processing_functions.imaging.add_visibility_grid.add_visibility_grid_single_field`.
+    RuntimeError
+        As :func:`~astroviper.processing_functions.imaging.add_visibility_grid.add_visibility_grid_single_field`.
     """
 
     if not input_checked:
@@ -103,11 +114,8 @@ def add_visibility_grid_continuum_single_field(
 
         check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
 
-    from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
-        anti_alias_grid,
-    )
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-        as_gridding_kernel,
+    from astroviper.processing_functions.imaging.gridders.gridder_registry import (
+        GRIDDERS,
     )
     from astroviper.processing_functions.imaging.utils.fft_sizing import (
         padded_grid_size,
@@ -126,10 +134,7 @@ def add_visibility_grid_continuum_single_field(
 
     # Prepare image data group
     if image_data_group_out_modified is None:
-        image_data_group_out_modified = {
-            "visibility": "VISIBILITY",
-            "visibility_normalization": "VISIBILITY_NORMALIZATION",
-        }
+        image_data_group_out_modified = dict(GRIDDERS[gridder].grid_roles)
     image_data_group_out_modified = copy.deepcopy(image_data_group_out_modified)
 
     ms_data_group_in = ms_xds.attrs["data_groups"][ms_data_group_in_name]
@@ -154,20 +159,20 @@ def add_visibility_grid_continuum_single_field(
 
     n_chan = weight_imaging.shape[2]
     n_imag_time = 1
-    n_time = ms_xds.sizes["time"]
     n_imag_pol = weight_imaging.shape[3]
-
-    time_map = np.zeros(n_time, dtype=int)
-    pol_map = np.arange(n_imag_pol, dtype=int)
 
     # Each gridder invocation writes all input channels into one output plane.
     frequency_map = np.zeros(n_chan, dtype=int)
 
-    n_uv = padded_grid_size(
-        [img_xds.sizes["l"], img_xds.sizes["m"]],
-        fft_padding,
-    )
-    delta_lm = img_xds.xr_img.get_lm_cell_size()
+    grid_role, normalization_role = GRIDDERS[gridder].grid_roles
+    # The gridder accumulates into a uv grid or into the residual image.
+    into_image = grid_role == "sky"
+
+    if not into_image:
+        n_uv = padded_grid_size(
+            [img_xds.sizes["l"], img_xds.sizes["m"]],
+            fft_padding,
+        )
 
     # sanity check on naming of axes
     if "taylor_term" not in img_xds.coords:
@@ -176,21 +181,20 @@ def add_visibility_grid_continuum_single_field(
             dtype=np.int32,
         )
     elif img_xds.sizes["taylor_term"] != n_taylor_terms:
+        if into_image:
+            raise ValueError(
+                "Existing taylor_term coordinate has length "
+                f"{img_xds.sizes['taylor_term']}, but {n_taylor_terms} planes "
+                "were requested."
+            )
         raise ValueError(
             "Existing taylor_term coordinate has length "
             f"{img_xds.sizes['taylor_term']}, but n_taylor_terms={n_taylor_terms}."
         )
 
-    visibility_name = image_data_group_out["visibility"]
-    normalization_name = image_data_group_out["visibility_normalization"]
+    visibility_name = image_data_group_out[grid_role]
+    normalization_name = image_data_group_out[normalization_role]
 
-    expected_grid_shape = (
-        n_imag_time,
-        n_taylor_terms,
-        n_imag_pol,
-        n_uv[0],
-        n_uv[1],
-    )
     expected_normalization_shape = (
         n_imag_time,
         n_taylor_terms,
@@ -204,17 +208,25 @@ def add_visibility_grid_continuum_single_field(
             for dim in ("time", "taylor_term", "polarization", "u", "v")
             if dim in img_xds.coords
         }
+        grid_values, grid_dims, grid_type = GRIDDERS[gridder].new_grid(
+            img_xds,
+            (n_imag_time, n_taylor_terms, n_imag_pol),
+            uv_sampling=False,
+            fft_padding=fft_padding,
+            complex_dtype=complex_dtype,
+        )
         img_xds[visibility_name] = xr.DataArray(
-            np.zeros(expected_grid_shape, dtype=complex_dtype),
+            grid_values,
             dims=[
                 "time",
                 "taylor_term",
                 "polarization",
-                "u",
-                "v",
+                *grid_dims,
             ],
             coords=coords,
         )
+        if grid_type is not None:
+            img_xds[visibility_name].attrs["type"] = grid_type
 
         normalization_coords = {
             dim: img_xds.coords[dim]
@@ -236,7 +248,31 @@ def add_visibility_grid_continuum_single_field(
                 "with add_visibility_grid_continuum_single_field."
             ),
         )
+    elif into_image:
+        image_dims = ("time", "taylor_term", "polarization", "l", "m")
+        image_shape = tuple(
+            n_taylor_terms if dim == "taylor_term" else img_xds.sizes[dim]
+            for dim in image_dims
+        )
+        if (
+            img_xds[visibility_name].dims != image_dims
+            or img_xds[visibility_name].shape != image_shape
+            or img_xds[normalization_name].shape != image_shape[:3]
+        ):
+            raise ValueError(
+                f"Existing {visibility_name} has dimensions "
+                f"{img_xds[visibility_name].dims} and shape "
+                f"{img_xds[visibility_name].shape}; expected {image_dims} and "
+                f"{image_shape}."
+            )
     else:
+        expected_grid_shape = (
+            n_imag_time,
+            n_taylor_terms,
+            n_imag_pol,
+            n_uv[0],
+            n_uv[1],
+        )
         if img_xds[visibility_name].shape != expected_grid_shape:
             raise ValueError(
                 f"Existing {visibility_name} has shape "
@@ -250,12 +286,10 @@ def add_visibility_grid_continuum_single_field(
                 f"{expected_normalization_shape}."
             )
 
-    # extract grid, correlated data, uvw and frequencies
+    # extract grid and frequencies
     grid = img_xds[visibility_name].values
     normalization = img_xds[normalization_name].values
 
-    vis_data = ms_xds[ms_data_group_in["correlated_data"]].values
-    uvw = ms_xds[ms_data_group_in["uvw"]].values
     frequency_coord = np.asarray(ms_xds.frequency.values)
 
     if frequency_coord.shape[0] != n_chan:
@@ -268,8 +302,6 @@ def add_visibility_grid_continuum_single_field(
     x = (
         frequency_coord.astype(np.float64, copy=False) - reference_frequency
     ) / reference_frequency
-
-    kernel = as_gridding_kernel(cgk_1D)
 
     # Common zeroth-order normalization.
     zeroth_normalization = np.zeros(
@@ -295,22 +327,16 @@ def add_visibility_grid_continuum_single_field(
         )
 
         # gridding functionality
-        anti_alias_grid(
-            grid_view,
-            temporary_normalization,
-            vis_data,
-            uvw,
-            frequency_coord,
-            frequency_map,
-            time_map,
-            pol_map,
-            taylor_imaging_weight,
-            kernel.table,
-            n_uv,
-            delta_lm,
-            support=kernel.support,
-            oversampling=kernel.oversampling,
-            interpolation=kernel.interpolation_code,
+        GRIDDERS[gridder].grid(
+            ms_xds,
+            img_xds,
+            gcf_xds,
+            weights=taylor_imaging_weight,
+            frequency_map=frequency_map,
+            grid=grid_view,
+            normalization=temporary_normalization,
+            ms_data_group_in_name=ms_data_group_in_name,
+            fft_padding=fft_padding,
             processing_function_threads=processing_function_threads,
         )
 
@@ -329,19 +355,20 @@ def add_visibility_grid_continuum_single_field(
     normalization[...] += zeroth_normalization
 
     # Format output
-    img_xds[visibility_name].attrs.update(
-        {
-            "description": "MT-MFS Taylor-weighted visibility uv grids.",
-            "n_taylor_terms": n_taylor_terms,
-            "reference_frequency": reference_frequency,
-        }
-    )
-    img_xds[normalization_name].attrs.update(
-        {
-            "description": (
-                "Normalization sums for MT-MFS Taylor-weighted visibility uv grids."
-            ),
-            "n_taylor_terms": n_taylor_terms,
-            "reference_frequency": reference_frequency,
-        }
-    )
+    if not into_image:
+        img_xds[visibility_name].attrs.update(
+            {
+                "description": "MT-MFS Taylor-weighted visibility uv grids.",
+                "n_taylor_terms": n_taylor_terms,
+                "reference_frequency": reference_frequency,
+            }
+        )
+        img_xds[normalization_name].attrs.update(
+            {
+                "description": (
+                    "Normalization sums for MT-MFS Taylor-weighted visibility uv grids."
+                ),
+                "n_taylor_terms": n_taylor_terms,
+                "reference_frequency": reference_frequency,
+            }
+        )

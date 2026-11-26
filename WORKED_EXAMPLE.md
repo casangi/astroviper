@@ -94,19 +94,22 @@ task_coords, data_selection, image_store, input_data_store, ..., graph_mode=True
 ### 12.3 Science — `processing_functions/imaging/image_cube_single_field.py`
 The **cycle control and bookkeeping helpers** (not science kernels) live in
 the `processing_functions/imaging/utils/` subpackage: `cycle_control.py`
-(`CycleController`, stop codes, `merge_imaging_dicts`,
+(the cycle control functions, stop codes, `merge_imaging_dicts`,
 `get_per_cycle_limits`, the `get_*_from_imaging_dict` extractors,
-`format_/print_imaging_dict`), `imaging_dict.py` (`ImagingDict`, `Key`),
+`format_/print_imaging_dict`), `imaging_dict.py` (`Key`,
+`add_to_imaging_dict`, `select_from_imaging_dict`),
 `timing.py` (`accumulate_timing`), and `visibility.py`
 (`drop_auto_correlations` — the shared cross-correlation filter used by the PSF
 and undeconvolved-image gridders; do not re-inline it). Import them from
 `astroviper.processing_functions.imaging.utils` (the package re-exports the
-public symbols).
+public symbols, except `calculate_per_cycle_limits`,
+`per_plane_threshold_per_cycle`, `reset`, `reset_stopcode`, `get_state` and
+`update_parameters`, which are imported from `utils.cycle_control`).
 
 Runs the CLEAN loop of **imaging cycles**, each one **residual update**
 followed by one **model update** (the CASA names in brackets are for
 orientation only: `max_cycles` [CASA `nmajor`], `max_iter` [CASA `niter`]),
-via `CycleController`:
+via the cycle control functions on `cycle_control_state`:
 - **Residual update** — `residual_update_cube_single_field(...)`: degrid
   model → compute residual visibilities → grid → FFT-normalize → form residual
   image (+ PSF on the first iteration), primary beam, and imaging weights
@@ -117,10 +120,10 @@ via `CycleController`:
 - After every residual update, the first included, the stop test (cycle
   control) checks the residual that update has just made; a plane that
   continues gets another model update. Per-plane stats accumulate into an
-  `ImagingDict`. The loop ends only at the stop test, so the last residual
+  `imaging_dict`. The loop ends only at the stop test, so the last residual
   update produces the written residual image.
 - When `restore=True` (off by default), a final `restore_image(...)` step
-  (`processing_functions/imaging/restore.py`) convolves the model with the clean
+  (`processing_functions/imaging/imaging_conclude/restore.py`) convolves the model with the clean
   beam (the per-frequency Gaussian fit to the PSF, in the `residual` data group)
   and adds the residual, writing `SKY_RESTORED`. The distributed application auto-adds
   `"sky_restored"` to `image_data_variables_keep` so it is created/written.
@@ -131,31 +134,31 @@ via `CycleController`:
 > `make_primary_beam_single_field`, `make_undeconvolved_image_single_field`,
 > `imaging_setup_single_field`, …).
 
-- Weighting: `calculate_imaging_weights.py` (`"natural"`, `"briggs"`/robust).
+- Weighting: `imaging_setup/imaging_weighting/calculate_imaging_weights.py` (`"natural"`, `"briggs"`/robust).
 - Gridding (vis → uv grid): `add_visibility_grid.py`
   (`add_visibility_grid_single_field`).
-- PSF / UV-sampling grid: `make_point_spread_function.py`
+- PSF / UV-sampling grid: `imaging_setup/make_point_spread_function.py`
   (`make_point_spread_function_single_field`, plus the
   `add_uv_sampling_grid_single_field` / `add_uv_sampling_grid_mosaic` gridders
   that build the PSF numerator — gridding the imaging weights *is* the first
   step of forming the PSF).
-- Undeconvolved (dirty/residual) image gridding: `make_undeconvolved_image.py`
+- Undeconvolved (dirty/residual) image gridding: `residual_update/make_undeconvolved_image.py`
   (`make_undeconvolved_image_single_field`).
 - Degridding (model uv grid → vis): `get_visibility_grid.py`.
-- FFT + normalization: `fft_normalize_anti_alias_gridder.py`.
+- FFT + normalization: `normalization/normalize_image.py`.
 - Primary beam: `primary_beam/make_primary_beam.py`
   (`make_primary_beam_single_field`, evaluated with
   `simulation/antenna_beams.py::symmetric_beam_response`).
 - Polarization: `image_analysis/transform_polarization_basis.py`
   (stokes ↔ linear).
 - PSF fit: `image_analysis/point_spread_function_gaussian_fit.py`.
-- Restore: `restore.py` (`restore_image`) — clean-beam-convolved model plus
+- Restore: `imaging_conclude/restore.py` (`restore_image`) — clean-beam-convolved model plus
   residual (FFT convolution, clean beam built from the residual group's
   `beam_fit_params_point_spread_function`).
-- Deconvolvers: `deconvolution.py` dispatch → `deconvolvers/hogbom` (C++),
-  `deconvolvers/aspclean` (C++).
+- Deconvolvers: `model_update/deconvolve.py` dispatch → `model_update/deconvolvers/hogbom` (C++),
+  `model_update/deconvolvers/aspclean` (C++).
 - The anti-aliasing gridder is implemented in C++
-  (`gridders/anti_alias_grid_cpp`); `gridding_kernel_params` selects its
+  (`gridders/anti_alias/anti_alias_grid_cpp`); `gridding_kernel_params` selects its
   kernel. The default is the `least_misfit` kernel of support 9,
   oversampling 300 and linear lookup (RADPS Memo 13a);
   `prolate_spheroidal_casa` is the kernel of CASA's standard gridder, and that

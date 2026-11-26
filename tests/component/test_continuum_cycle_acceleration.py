@@ -180,7 +180,7 @@ def run(simulated_store, tmp_path_factory):
         residual = image.SKY_RESIDUAL.isel(time=0, taylor_term=0, polarization=0)
         results[key] = {
             "cycles": result["n_cycles"],
-            "stop_codes": result["controller"].stop_code_imaging.ravel(),
+            "stop_codes": result["cycle_control_state"]["stop_code_imaging"].ravel(),
             "rms": float(
                 np.sqrt(np.mean(residual.values[primary_beam.values >= 0.2] ** 2))
             ),
@@ -326,7 +326,7 @@ def test_driver_warns_once_when_momentum_switches_off_on_a_plane(run, monkeypatc
     driver warns once, for that plane only."""
     import toolviper.utils.logger as logger
 
-    import astroviper.processing_functions.imaging.cycle_acceleration as acceleration
+    import astroviper.processing_functions.imaging.model_update.cycle_acceleration as acceleration
 
     step_function = acceleration.nesterov_momentum_model_step
     calls = []

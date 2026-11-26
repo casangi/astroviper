@@ -20,7 +20,7 @@ def test_cube_rejects_noncanonical_deconvolver_names(algorithm):
 @pytest.mark.parametrize("algorithm", ["hogbom", "hogbom_many_threads", "asp", "mtmfs"])
 def test_history_wrapper_accepts_implemented_algorithms(algorithm):
     module = importlib.import_module(
-        "astroviper.processing_functions.imaging.deconvolution"
+        "astroviper.processing_functions.imaging.model_update.deconvolve"
     )
     module.validate_record_iteration_history(algorithm, True)
 
@@ -35,7 +35,7 @@ def test_history_wrapper_accepts_implemented_algorithms(algorithm):
 )
 def test_capability_wrappers_reject_unsupported_names(wrapper, algorithm):
     module = importlib.import_module(
-        "astroviper.processing_functions.imaging.deconvolution"
+        "astroviper.processing_functions.imaging.model_update.deconvolve"
     )
     with pytest.raises(ValueError, match="supported only"):
         getattr(module, wrapper)(algorithm, True)
@@ -44,7 +44,7 @@ def test_capability_wrappers_reject_unsupported_names(wrapper, algorithm):
 @pytest.mark.parametrize("algorithm", ["ASP"])
 def test_deconvolve_rejects_invalid_algorithm_before_accessing_image(algorithm):
     module = importlib.import_module(
-        "astroviper.processing_functions.imaging.deconvolution"
+        "astroviper.processing_functions.imaging.model_update.deconvolve"
     )
     with pytest.raises(ValueError, match="Deconvolution algorithm"):
         module.deconvolve(None, algorithm=algorithm)
@@ -53,7 +53,7 @@ def test_deconvolve_rejects_invalid_algorithm_before_accessing_image(algorithm):
 @pytest.mark.parametrize("checked", [False, True])
 def test_deconvolve_skips_only_configuration_validation(monkeypatch, checked):
     module = importlib.import_module(
-        "astroviper.processing_functions.imaging.deconvolution"
+        "astroviper.processing_functions.imaging.model_update.deconvolve"
     )
     from astroviper.processing_functions.imaging import config_check
 

@@ -15,13 +15,14 @@
 //      at most 50 rounds); the final fallback is a round 2.5-pixel beam.
 
 #include "psf_gaussian_fit.hpp"
+#include "parallel_for.hpp"
 #include "scalar_buffer.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <stdexcept>
-#include <thread>
 #include <vector>
 
 namespace astroviper::psf_gaussian_fit {
@@ -473,7 +474,7 @@ int fit_plane(const double* psf_in, std::size_t nx_in, std::size_t ny_in,
 
 int fit_planes(const double* psf, std::size_t n_plane, std::size_t nx,
                std::size_t ny, double delta_x, double delta_y, double psfcutoff,
-               double* beams, int n_threads) {
+               double* beams, int processing_function_threads) {
     const std::size_t plane_size = nx * ny;
     std::vector<int> fallback(n_plane, 0);
     std::vector<std::string> errors(n_plane);
@@ -489,21 +490,8 @@ int fit_planes(const double* psf, std::size_t n_plane, std::size_t nx,
         }
     };
 
-    const int usable = std::max(
-        1, std::min<int>(n_threads, static_cast<int>(n_plane)));
-    if (usable <= 1) {
-        work(0, n_plane);
-    } else {
-        std::vector<std::thread> pool;
-        const std::size_t chunk = (n_plane + usable - 1) / usable;
-        for (int t = 0; t < usable; ++t) {
-            const std::size_t begin = static_cast<std::size_t>(t) * chunk;
-            const std::size_t end = std::min(n_plane, begin + chunk);
-            if (begin >= end) break;
-            pool.emplace_back(work, begin, end);
-        }
-        for (auto& th : pool) th.join();
-    }
+    astroviper::parallel_for(processing_function_threads,
+                             static_cast<std::int64_t>(n_plane), work);
 
     for (const auto& message : errors)
         if (!message.empty()) throw std::runtime_error(message);

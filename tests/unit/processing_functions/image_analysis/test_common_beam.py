@@ -669,7 +669,7 @@ def test_correcting_covariance_sets_rounding_to_zero():
 def test_beam_covariance_is_the_second_moment_of_the_restore_kernel():
     """The frame of the restore's clean beam: the major axis along (sin pa, -cos pa) in
     (l index, m index)."""
-    from astroviper.processing_functions.imaging.restore import (
+    from astroviper.processing_functions.imaging.imaging_conclude.restore import (
         _elliptical_gaussian_kernel,
     )
 

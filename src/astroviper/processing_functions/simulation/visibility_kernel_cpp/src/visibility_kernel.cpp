@@ -1,9 +1,10 @@
 #include "../include/visibility_kernel.hpp"
+#include "cos_sin_of_turns.hpp"
+#include "parallel_for.hpp"
 #include "scalar_buffer.hpp"
 
 #include <algorithm>
 #include <cmath>
-#include <thread>
 #include <vector>
 
 namespace visibility_kernel {
@@ -211,11 +212,7 @@ void calculate_visibilities(
     std::int64_t n_frequency, std::int64_t n_polarization, std::int64_t n_source,
     std::int64_t n_flux_time, std::int64_t n_flux_frequency, std::int64_t n_source_time,
     std::int64_t n_pointing_time, std::int64_t n_pointing_antenna, std::int64_t n_antenna,
-    std::int64_t n_mueller, int n_threads) {
-    if (n_threads <= 0) n_threads = static_cast<int>(std::thread::hardware_concurrency());
-    if (n_threads < 1) n_threads = 1;
-    n_threads = static_cast<int>(std::min<std::int64_t>(n_threads, std::max<std::int64_t>(n_baseline, 1)));
-
+    std::int64_t n_mueller, int processing_function_threads) {
     const std::int64_t f_flux_time = (n_flux_time == 1) ? n_time : 1;
     const std::int64_t f_flux_freq = (n_flux_frequency == 1) ? n_frequency : 1;
     const std::int64_t f_source_time = (n_source_time == 1) ? n_time : 1;
@@ -234,6 +231,11 @@ void calculate_visibilities(
             model_row[i][static_cast<std::size_t>(c)] = nearest_index(values, n, astroviper::scalar_load(frequency, c));
         }
     }
+
+    std::vector<double> scale(static_cast<std::size_t>(n_frequency));
+    for (std::int64_t c = 0; c < n_frequency; ++c) scale[c] = astroviper::scalar_load(frequency, c) / kSpeedOfLight;
+    double max_scale = 0.0;
+    for (const double channel_scale : scale) max_scale = std::max(max_scale, std::abs(channel_scale));
 
     auto worker = [&](std::int64_t b_begin, std::int64_t b_end) {
         std::vector<std::complex<double>> jones_all(static_cast<std::size_t>(n_antenna * n_frequency * 4));
@@ -265,7 +267,8 @@ void calculate_visibilities(
                 const double inv_n = astroviper::scalar_load(inverse_n, t * n_source + s);
                 for (std::int64_t b = b_begin; b < b_end; ++b) {
                     const double* uvw_b = uvw + (t * n_baseline + b) * 3;
-                    const double phase = 2.0 * kPi * (astroviper::scalar_load(uvw_b, 0) * astroviper::scalar_load(k, 0) + astroviper::scalar_load(uvw_b, 1) * astroviper::scalar_load(k, 1) + astroviper::scalar_load(uvw_b, 2) * astroviper::scalar_load(k, 2));
+                    const double path = astroviper::scalar_load(uvw_b, 0) * astroviper::scalar_load(k, 0) + astroviper::scalar_load(uvw_b, 1) * astroviper::scalar_load(k, 1) + astroviper::scalar_load(uvw_b, 2) * astroviper::scalar_load(k, 2);
+                    const bool large = !(std::abs(path) * max_scale < astroviper::kTwoTo51);
                     const std::int64_t a1 = astroviper::scalar_load(antenna1, b), a2 = astroviper::scalar_load(antenna2, b);
                     for (std::int64_t c = 0; c < n_frequency; ++c) {
                         const std::complex<double>* j1 = &jones_all[(a1 * n_frequency + c) * 4];
@@ -278,8 +281,12 @@ void calculate_visibilities(
                             const int ja = kMapMuellerToJones[e][0], jb = kMapMuellerToJones[e][1];
                             flux_scaled[e / 4] += astroviper::scalar_load(j1, ja) * std::conj(astroviper::scalar_load(j2, jb)) * astroviper::scalar_load(f, e % 4);
                         }
-                        const double arg = phase * astroviper::scalar_load(frequency, c) / kSpeedOfLight;
-                        const std::complex<double> fringe(std::cos(arg) * inv_n, std::sin(arg) * inv_n);
+                        double cos_phase, sin_phase;
+                        if (large)
+                            astroviper::cos_sin_of_turns<true>(path * scale[c], cos_phase, sin_phase);
+                        else
+                            astroviper::cos_sin_of_turns(path * scale[c], cos_phase, sin_phase);
+                        const std::complex<double> fringe(cos_phase * inv_n, sin_phase * inv_n);
                         std::complex<double>* out = visibility + ((t * n_baseline + b) * n_frequency + c) * n_polarization;
                         for (std::int64_t p = 0; p < n_polarization; ++p) {
                             astroviper::scalar_add(out, p, flux_scaled[astroviper::scalar_load(polarization_index, p)] * fringe);
@@ -290,20 +297,7 @@ void calculate_visibilities(
         }
     };
 
-    if (n_threads == 1) {
-        worker(0, n_baseline);
-        return;
-    }
-    std::vector<std::thread> threads;
-    threads.reserve(n_threads);
-    const std::int64_t per = (n_baseline + n_threads - 1) / n_threads;
-    for (int i = 0; i < n_threads; ++i) {
-        const std::int64_t b0 = i * per;
-        const std::int64_t b1 = std::min(n_baseline, b0 + per);
-        if (b0 >= b1) break;
-        threads.emplace_back(worker, b0, b1);
-    }
-    for (auto& th : threads) th.join();
+    astroviper::parallel_for(processing_function_threads, n_baseline, worker);
 }
 
 }  // namespace visibility_kernel

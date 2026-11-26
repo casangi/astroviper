@@ -649,11 +649,11 @@ def test_global_weight_preparation_builds_factors_and_returns_all_tasks(monkeypa
     )
     monkeypatch.setattr("dask.compute", lambda graph: (graph_result,))
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.calculate_imaging_weights.normalize_imaging_weight_params",
+        "astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.calculate_imaging_weights.normalize_imaging_weight_params",
         lambda params: {"weighting": "briggs", "robust": 0.5},
     )
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.imaging_weighting.briggs_weighting.calculate_briggs_params",
+        "astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.briggs_weighting.calculate_briggs_params",
         lambda density, weights, params: np.ones((2, 1, 1)),
     )
     degrid_calls = []
@@ -741,6 +741,7 @@ def _run_tw_hydra_continuum(
     clear_cache=True,
     scheduler="synchronous",
     processing_set_data_group_name="base",
+    fft_backend="pyfftw",
     image_data_variables_keep=(
         "sky_model",
         "sky_residual",
@@ -791,6 +792,7 @@ def _run_tw_hydra_continuum(
             processing_set_data_group_name=processing_set_data_group_name,
             single_precision_image=single_precision_image,
             processing_function_threads=1,
+            fft_backend=fft_backend,
             n_mapping_parallelism={"frequency": n_chunks},
             overwrite=True,
             memory_mode="in_memory",
@@ -1847,13 +1849,13 @@ def test_tw_hydra_native_mtmfs_matches_reduction_and_visibility_cache_modes(
         (cached_result, cached),
     ):
         assert result["n_cycles"] == 2
-        assert result["controller"].cycles_done == 2
-        assert result["controller"].total_iter_done > 0
-        assert result["deconvolution"].data
+        assert result["cycle_control_state"]["cycles_done"] == 2
+        assert result["cycle_control_state"]["total_iter_done"] > 0
+        assert result["deconvolution"]
         assert image.SKY_MODEL.sizes["taylor_term"] == 2
         assert np.nanmax(np.abs(image.SKY_MODEL.isel(taylor_term=0))) > 0.0
         assert np.nanmax(np.abs(image.SKY_MODEL.isel(taylor_term=1))) > 0.0
-        for fields in result["deconvolution"].data.values():
+        for fields in result["deconvolution"].values():
             assert np.isfinite(fields["hessian_condition_number"]).all()
             np.testing.assert_array_equal(fields["scales"], [0.0])
 
@@ -2400,6 +2402,37 @@ def _run_wideband_scopes(tmp_path, store, continuum_mode, weighting, scopes):
     return images
 
 
+@pytest.mark.parametrize("fft_backend", ["numpy", "scipy", "pyfftw"])
+def test_the_restore_takes_the_application_fft_backend(
+    tmp_path, wideband_store, monkeypatch, fft_backend
+):
+    """The continuum application hands its fft_backend to the final restore."""
+    import astroviper.processing_functions.imaging.image_continuum_single_field as processing
+
+    received = []
+    original_restore = processing.restore_continuum_image
+
+    def recorded_restore(*args, **kwargs):
+        received.append(kwargs["fft_backend"])
+        return original_restore(*args, **kwargs)
+
+    monkeypatch.setattr(processing, "restore_continuum_image", recorded_restore)
+    _run_tw_hydra_continuum(
+        wideband_store,
+        tmp_path / "restored.img.zarr",
+        open_processing_set(str(wideband_store)),
+        1,
+        "mfs",
+        {"weighting": "natural"},
+        restore=True,
+        fft_backend=fft_backend,
+        image_param_overrides={
+            "cell_size": np.array([-8.0, 8.0]) * np.pi / (180 * 3600)
+        },
+    )
+    assert received == [fft_backend]
+
+
 @pytest.mark.parametrize(
     ("continuum_mode", "weighting", "widening"),
     [
@@ -2809,7 +2842,7 @@ def test_refreshed_residual_resumes_after_provisional_threshold_without_restorin
         events.append("update")
         # Emulate an approximate model-update residual below threshold, while
         # keeping the actual model and visibility-based residual untouched.
-        for fields in result.data.values():
+        for fields in result.values():
             if isinstance(fields["peakres"], list):
                 fields["peakres"][-1] = 0.0
             else:
@@ -2851,11 +2884,15 @@ def test_refreshed_residual_resumes_after_provisional_threshold_without_restorin
     assert result["stopcode"].imaging == (
         IMAGING_MAX_CYCLES if max_iter == 100 else IMAGING_MAX_ITER
     )
-    assert result["controller"].cycles_done == result["n_cycles"] == expected_updates
+    assert (
+        result["cycle_control_state"]["cycles_done"]
+        == result["n_cycles"]
+        == expected_updates
+    )
     assert len(result["timing_graphs"]) == expected_updates + 2
-    assert result["controller"].total_iter_done > 0
+    assert result["cycle_control_state"]["total_iter_done"] > 0
     assert np.nanmax(np.abs(image.SKY_RESIDUAL.values)) > 1e-8
-    assert result["residual_statistics"].data
+    assert result["residual_statistics"]
 
 
 @pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])

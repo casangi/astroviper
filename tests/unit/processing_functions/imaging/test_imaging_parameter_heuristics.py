@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
     DEFAULT_GRIDDING_KERNEL_PARAMS,
     make_gridding_kernel,
 )
@@ -452,14 +452,15 @@ def test_gridding_kernel_is_made_for_its_padding():
     its correction at the edge of the image kept is above the floor the imager
     refuses."""
     kernel = make_gridding_kernel(GRIDDING_KERNEL_PARAMS, FFT_PADDING)
+    attrs = kernel["ANTI_ALIAS"].attrs
     assert GRIDDING_KERNEL_PARAMS == DEFAULT_GRIDDING_KERNEL_PARAMS
-    assert kernel.params == {
-        "type": "least_misfit",
-        "support": 9,
-        "oversampling": 300,
-        "interpolation": "linear",
-    }
-    assert kernel.shape["fft_padding"] == FFT_PADDING == 1.2
+    assert (
+        attrs["kernel_type"],
+        attrs["support"],
+        attrs["oversampling"],
+        attrs["interpolation"],
+    ) == ("least_misfit", 9, 300, "linear")
+    assert attrs["shape"]["fft_padding"] == FFT_PADDING == 1.2
 
 
 @pytest.mark.parametrize("value", [0, -1, np.nan, np.inf, True, "3", [3]])

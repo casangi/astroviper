@@ -106,9 +106,9 @@ def test_gaussian_and_point_source_fluxes_recovered(tmp_path, monkeypatch):
     # The Asp model updates of this healthy clean must not stop as diverged:
     # Aspen subtractions raise its peak by more than the gain while the RMS
     # falls. The graph runs in this process (no Dask client).
-    from astroviper.processing_functions.imaging import deconvolution
+    from astroviper.processing_functions.imaging.model_update import deconvolve
 
-    asp_clean = deconvolution.asp_clean
+    asp_clean = deconvolve.asp_clean
     diverged = []
 
     def recording_asp_clean(*args, **kwargs):
@@ -116,7 +116,7 @@ def test_gaussian_and_point_source_fluxes_recovered(tmp_path, monkeypatch):
         diverged.append(bool(np.any(result["diverged"])))
         return result
 
-    monkeypatch.setattr(deconvolution, "asp_clean", recording_asp_clean)
+    monkeypatch.setattr(deconvolve, "asp_clean", recording_asp_clean)
     distributed_applications.imaging.image_cube_single_field(
         ps_store=ps_store,
         image_store=image_store,

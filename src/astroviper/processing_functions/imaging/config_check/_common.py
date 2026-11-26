@@ -11,8 +11,8 @@ class ImagingMode:
     ----------
     imaging_kind : {"cube", "continuum"}
         Spectral imaging workflow.
-    field_layout : {"single_field", "multifield"}
-        Field layout. Multifield modes are reserved and not yet implemented.
+    field_layout : {"single_field", "mosaic"}
+        Field layout. Mosaic modes are reserved and not yet implemented.
     """
 
     imaging_kind: str
@@ -21,14 +21,14 @@ class ImagingMode:
     def __post_init__(self):
         if self.imaging_kind not in ("cube", "continuum"):
             raise ValueError("imaging_kind must be 'cube' or 'continuum'.")
-        if self.field_layout not in ("single_field", "multifield"):
-            raise ValueError("field_layout must be 'single_field' or 'multifield'.")
+        if self.field_layout not in ("single_field", "mosaic"):
+            raise ValueError("field_layout must be 'single_field' or 'mosaic'.")
 
     def require_supported(self):
-        """Reject execution of the reserved multifield workflows."""
-        if self.field_layout == "multifield":
+        """Reject execution of the reserved mosaic workflows."""
+        if self.field_layout == "mosaic":
             raise NotImplementedError(
-                f"{self.imaging_kind} multifield imaging is not implemented."
+                f"{self.imaging_kind} mosaic imaging is not implemented."
             )
 
 
@@ -243,13 +243,14 @@ def check_fft_backend(backend):
 
     Parameters
     ----------
-    backend : {'scipy', 'pyfftw'}
+    backend : {'numpy', 'scipy', 'pyfftw'}
         FFT implementation to validate and import.
 
     Returns
     -------
     module
-        Imported SciPy-compatible FFT implementation.
+        The FFT module of the library: ``numpy.fft``, ``scipy.fft`` or
+        ``pyfftw.interfaces.scipy_fft``.
 
     Raises
     ------
@@ -260,10 +261,15 @@ def check_fft_backend(backend):
     """
     from importlib import import_module
 
-    if backend not in ("scipy", "pyfftw"):
+    if backend not in ("numpy", "scipy", "pyfftw"):
         raise ValueError(
-            f"Unknown FFT backend {backend!r}; fft_backend must be 'scipy' or 'pyfftw'."
+            f"Unknown FFT backend {backend!r}; fft_backend must be 'numpy', 'scipy' "
+            "or 'pyfftw'."
         )
     return import_module(
-        "scipy.fft" if backend == "scipy" else "pyfftw.interfaces.scipy_fft"
+        {
+            "numpy": "numpy.fft",
+            "scipy": "scipy.fft",
+            "pyfftw": "pyfftw.interfaces.scipy_fft",
+        }[backend]
     )

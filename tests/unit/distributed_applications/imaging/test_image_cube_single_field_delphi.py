@@ -528,13 +528,13 @@ def test_delphi_end_to_end_with_stand_in_psf_pass(ps_store, tmp_path, psf_calls)
         assert name in img.data_vars
     controls = result["parameters"]["image_cube_single_field"]["cycle_control_params"]
     record = result["deconvolution"]
-    assert {(key.chan, key.pol) for key in record.data} == {
+    assert {(key.chan, key.pol) for key in record} == {
         (0, 0),
         (0, 1),
         (1, 0),
         (1, 1),
     }
-    for key, entry in record.data.items():
+    for key, entry in record.items():
         threshold = controls["threshold"][key.chan][key.pol]
         assert entry["stop_code"].imaging == IMAGING_THRESHOLD, key
         assert len(entry["iter_done"]) - 1 <= controls["max_cycles"], key
@@ -921,3 +921,49 @@ def test_delphi_rejects_controls_before_metadata_io(tmp_path, name, value):
         image_cube_single_field_delphi("missing.ps.zarr", str(output), **{name: value})
     assert not output.exists()
     assert not (tmp_path / "never-created.zarr.parameters.json").exists()
+
+
+@pytest.mark.parametrize("fft_backend", ["numpy", "scipy", "pyfftw"])
+def test_delphi_hands_its_fft_backend_on(ps_store, tmp_path, fft_backend, monkeypatch):
+    """Every transform of Delphi's PSF passes runs in the library of its
+    fft_backend, which its parameters file records for the imager and in the
+    provenance of its inputs."""
+    import dask
+
+    from astroviper.processing_functions import fft
+
+    seen = []
+    for name in ("fft2", "ifft2"):
+        real = getattr(fft, name)
+
+        def spy(*args, _real=real, **kwargs):
+            seen.append(kwargs["fft_backend"])
+            return _real(*args, **kwargs)
+
+        monkeypatch.setattr(fft, name, spy)
+    image_store = str(tmp_path / "cube.img.zarr")
+    with dask.config.set(scheduler="synchronous"):
+        parameters = delphi_module.image_cube_single_field_delphi(
+            ps_store,
+            image_store,
+            processing_set_data_group_name="base",
+            calculate_parameters_only=True,
+            fft_backend=fft_backend,
+        )
+    assert seen and set(seen) == {fft_backend}
+    with open(f"{image_store}.parameters.json") as file:
+        written = json.load(file)
+    for record in (parameters, written):
+        assert record["image_cube_single_field"]["fft_backend"] == fft_backend
+        assert record["provenance"]["delphi_inputs"]["fft_backend"] == fft_backend
+
+
+@pytest.mark.parametrize("fft_backend", ["SciPy", "fftw", "NumPy"])
+def test_delphi_refuses_an_unknown_fft_backend(tmp_path, fft_backend):
+    """The schema refuses a misspelt library before any work."""
+    with pytest.raises(AssertionError, match="fft_backend"):  # the param.json schema
+        delphi_module.image_cube_single_field_delphi(
+            "missing.ps.zarr",
+            str(tmp_path / "cube.img.zarr"),
+            fft_backend=fft_backend,
+        )

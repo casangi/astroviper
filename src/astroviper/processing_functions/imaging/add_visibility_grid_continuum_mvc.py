@@ -3,20 +3,14 @@
 from __future__ import annotations
 
 import copy
-from typing import TYPE_CHECKING
 
 import numpy as np
 import xarray as xr
 
-if TYPE_CHECKING:
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-        GriddingKernel,
-    )
-
 
 def add_visibility_grid_mvc_single_field(
     ms_xds: xr.Dataset,
-    cgk_1D: GriddingKernel | np.ndarray,
+    gcf_xds: xr.Dataset,
     img_xds: xr.Dataset,
     ms_data_group_in_name: str = "base",
     image_data_group_in_name: str = "residual",
@@ -54,12 +48,14 @@ def add_visibility_grid_mvc_single_field(
         coordinates, imaging weights, and a one-dimensional frequency
         coordinate.
 
-    cgk_1D : GriddingKernel or numpy.ndarray
-        The gridding kernel
-        (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`,
-        whose table, support and oversampling go to the C++
-        ``anti_alias_grid`` kernel), or a bare table of CASA's
-        prolate spheroidal kernel of support 7.
+    gcf_xds : xarray.Dataset
+        The ``gcf_xds`` of the gridding kernel, from
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.make_gridding_kernel`,
+        or from
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term.as_gridding_kernel`
+        for a bare table of CASA's prolate spheroidal kernel of support 7;
+        its table, support and oversampling go to the C++
+        ``anti_alias_grid`` kernel.
 
     img_xds : xarray.Dataset
         Image dataset receiving the frequency-resolved MVC UV grids. Its
@@ -129,11 +125,11 @@ def add_visibility_grid_mvc_single_field(
             mode=CONTINUUM_SINGLE_FIELD,
         )
 
-    from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
-        anti_alias_grid,
+    from astroviper.processing_functions.imaging.add_visibility_grid import (
+        _add_grid_single_field,
     )
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-        as_gridding_kernel,
+    from astroviper.processing_functions.imaging.gridders.anti_alias.gridder_anti_alias import (
+        GridderAntiAlias,
     )
     from astroviper.processing_functions.imaging.utils.fft_sizing import (
         padded_grid_size,
@@ -142,19 +138,10 @@ def add_visibility_grid_mvc_single_field(
         get_frequency_boundaries,
         map_visibility_frequencies_to_image,
     )
-    from astroviper.utils.data_group_tools import (
-        create_data_groups_in_and_out,
-        modify_data_groups_xds,
-    )
+    from astroviper.utils.data_group_tools import create_data_groups_in_and_out
 
     if image_data_group_out_modified is None:
-        image_data_group_out_modified = {
-            "visibility": "VISIBILITY",
-            "visibility_normalization": ("VISIBILITY_NORMALIZATION"),
-        }
-
-    if complex_dtype is None:
-        complex_dtype = np.complex128
+        image_data_group_out_modified = dict(GridderAntiAlias.grid_roles)
 
     # ------------------------------------------------------------------
     # Resolve input and output data groups.
@@ -209,9 +196,8 @@ def add_visibility_grid_mvc_single_field(
     # ------------------------------------------------------------------
     # Validate visibility-domain arrays.
     # ------------------------------------------------------------------
-    visibility_data = np.asarray(ms_xds[ms_data_group_in["correlated_data"]].values)
-    uvw = np.asarray(ms_xds[ms_data_group_in["uvw"]].values)
-    weight_imaging = np.asarray(ms_xds[ms_data_group_in["weight_imaging"]].values)
+    visibility_data = ms_xds[ms_data_group_in["correlated_data"]]
+    weight_imaging = ms_xds[ms_data_group_in["weight_imaging"]]
 
     if weight_imaging.ndim != 4:
         raise ValueError(
@@ -228,7 +214,6 @@ def add_visibility_grid_mvc_single_field(
             f"{weight_imaging.shape}."
         )
 
-    n_time = weight_imaging.shape[0]
     n_chan = weight_imaging.shape[2]
     n_pol = weight_imaging.shape[3]
 
@@ -276,7 +261,8 @@ def add_visibility_grid_mvc_single_field(
             f"{image_frequency_coord.shape}."
         )
 
-    frequency_map = map_visibility_frequencies_to_image(
+    # Refuses unmappable channels before the axis checks; the gridding maps them again.
+    map_visibility_frequencies_to_image(
         frequency_coord,
         image_frequency_coord,
         full_image_frequencies=img_xds.frequency.attrs.get("full_image_frequencies"),
@@ -298,7 +284,7 @@ def add_visibility_grid_mvc_single_field(
         raise KeyError("The MVC image dataset must contain a time coordinate.")
 
     # ------------------------------------------------------------------
-    # Construct grid maps.
+    # Image time plane.
     # ------------------------------------------------------------------
     n_image_time = 1
 
@@ -308,17 +294,6 @@ def add_visibility_grid_mvc_single_field(
             "one image time plane; received "
             f"{img_xds.sizes['time']}."
         )
-
-    # All input integrations contribute to one image time plane.
-    time_map = np.zeros(
-        n_time,
-        dtype=np.int64,
-    )
-
-    pol_map = np.arange(
-        n_pol,
-        dtype=np.int64,
-    )
 
     # ------------------------------------------------------------------
     # Determine UV-grid geometry.
@@ -330,8 +305,6 @@ def add_visibility_grid_mvc_single_field(
         ],
         fft_padding,
     )
-
-    delta_lm = img_xds.xr_img.get_lm_cell_size()
 
     expected_grid_shape = (
         n_image_time,
@@ -348,65 +321,9 @@ def add_visibility_grid_mvc_single_field(
     )
 
     # ------------------------------------------------------------------
-    # Create or validate output arrays.
+    # Validate existing output arrays.
     # ------------------------------------------------------------------
-    if visibility_name not in img_xds:
-        # Keep coordinate metadata (especially the unpartitioned frequency
-        # axis) when the first child allocates outputs for later children.
-        visibility_coords = {
-            "time": img_xds.coords["time"],
-            "frequency": img_xds.coords["frequency"],
-            "polarization": img_xds.coords["polarization"],
-        }
-
-        if "u" in img_xds.coords:
-            visibility_coords["u"] = img_xds.coords["u"]
-
-        if "v" in img_xds.coords:
-            visibility_coords["v"] = img_xds.coords["v"]
-
-        img_xds[visibility_name] = xr.DataArray(
-            np.zeros(
-                expected_grid_shape,
-                dtype=complex_dtype,
-            ),
-            dims=(
-                "time",
-                "frequency",
-                "polarization",
-                "u",
-                "v",
-            ),
-            coords=visibility_coords,
-        )
-
-        img_xds[normalization_name] = xr.DataArray(
-            np.zeros(
-                expected_normalization_shape,
-                dtype=np.float64,
-            ),
-            dims=(
-                "time",
-                "frequency",
-                "polarization",
-            ),
-            coords={
-                dim: visibility_coords[dim]
-                for dim in ("time", "frequency", "polarization")
-            },
-        )
-
-        modify_data_groups_xds(
-            img_xds,
-            image_data_group_out_name,
-            image_data_group_out,
-            description=(
-                "Added frequency-resolved MVC visibility grids "
-                "with add_visibility_grid_mvc_single_field."
-            ),
-        )
-
-    else:
+    if visibility_name in img_xds:
         if normalization_name not in img_xds:
             raise KeyError(
                 f"{visibility_name!r} exists, but corresponding "
@@ -455,27 +372,41 @@ def add_visibility_grid_mvc_single_field(
     # ------------------------------------------------------------------
     # Grid directly into the output frequency cube.
     # ------------------------------------------------------------------
-    grid = img_xds[visibility_name].values
-    normalization = img_xds[normalization_name].values
+    # Keep coordinate metadata (especially the unpartitioned frequency
+    # axis) when the first child allocates outputs for later children.
+    visibility_coords = {
+        "time": img_xds.coords["time"],
+        "frequency": img_xds.coords["frequency"],
+        "polarization": img_xds.coords["polarization"],
+    }
 
-    kernel = as_gridding_kernel(cgk_1D)
-    anti_alias_grid(
-        grid,
-        normalization,
-        visibility_data,
-        uvw,
-        frequency_coord,
-        frequency_map,
-        time_map,
-        pol_map,
-        weight_imaging,
-        kernel.table,
-        n_uv,
-        delta_lm,
-        support=kernel.support,
-        oversampling=kernel.oversampling,
-        interpolation=kernel.interpolation_code,
-        processing_function_threads=(processing_function_threads),
+    if "u" in img_xds.coords:
+        visibility_coords["u"] = img_xds.coords["u"]
+
+    if "v" in img_xds.coords:
+        visibility_coords["v"] = img_xds.coords["v"]
+
+    _add_grid_single_field(
+        ms_xds,
+        gcf_xds,
+        img_xds,
+        ms_data_group_in_name=ms_data_group_in_name,
+        image_data_group_in_name=image_data_group_in_name,
+        image_data_group_out_name=image_data_group_out_name,
+        image_data_group_out_modified=image_data_group_out_modified,
+        overwrite=overwrite,
+        chan_mode="cube",
+        fft_padding=fft_padding,
+        processing_function_threads=processing_function_threads,
+        complex_dtype=complex_dtype,
+        gridder="anti_alias",
+        uv_sampling=False,
+        description=(
+            "Added frequency-resolved MVC visibility grids "
+            "with add_visibility_grid_mvc_single_field."
+        ),
+        coords=visibility_coords,
+        n_frequency_planes=n_image_chan,
     )
 
     # ------------------------------------------------------------------

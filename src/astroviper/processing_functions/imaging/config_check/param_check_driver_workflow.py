@@ -3,6 +3,7 @@
 import numpy as np
 
 from astroviper.processing_functions.imaging.config_check._common import (
+    check_fft_backend,
     require_boolean,
     require_finite_real,
     require_integer,
@@ -37,16 +38,17 @@ def check_driver_workflow(config, *, mode, require_complete=False):
     TypeError
         If the primary-beam limit is not a real scalar.
     ValueError
-        If memory mode, backend, output policy or restoring beam is invalid.
+        If memory mode, backend, output policy, FFT library or restoring beam is
+        invalid.
     NotImplementedError
-        If multifield imaging is requested.
+        If mosaic imaging is requested.
     """
     # ========================================================================
     # 1. Supported workflows and restoration
     # ========================================================================
 
     # --- Supported imaging mode ---
-    # Reject multifield requests before creating outputs or constructing a graph.
+    # Reject mosaic requests before creating outputs or constructing a graph.
     mode.require_supported()
     require_mapping("config", config)
 
@@ -77,6 +79,11 @@ def check_driver_workflow(config, *, mode, require_complete=False):
         )
 
         check_restoration_output(config["restoration_output"])
+
+    # --- FFT library of the restore ---
+    # Refuse an unknown or missing library before any product is restored.
+    if "fft_backend" in config:
+        check_fft_backend(config["fft_backend"])
 
     # --- Primary-beam cutoff ---
     # The fractional cutoff must be one finite value in the interval [0, 1].
@@ -197,28 +204,40 @@ def check_driver_workflow(config, *, mode, require_complete=False):
         check_momentum_coefficient(config["momentum_coefficient"])
 
     # --- Direct Fourier-transform workflow ---
-    # DFT makes images directly, so it cannot supply or cache uv-grid products.
+    # DFT makes images directly, so it cannot supply or cache uv-grid products;
+    # the role constants of the gridder say which uv grids it makes.
     kernel = config.get("gridding_kernel_params")
     if kernel is not None:
         require_mapping("gridding_kernel_params", kernel)
-        if kernel.get("type") == "dft":
-            if mode.imaging_kind == "continuum":
-                if config.get("continuum_mode", "mfs") != "mfs":
-                    raise ValueError(
-                        "DFT continuum imaging requires continuum_mode='mfs'."
-                    )
-                if config.get("visibility_memory_mode", "recompute") != "recompute":
-                    raise ValueError(
-                        "DFT continuum imaging requires visibility_memory_mode='recompute'."
-                    )
-            kept = config.get("image_data_variables_keep")
-            kept_grids = {"visibility", "uv_sampling"} & set(
-                () if kept is None else kept
+    from astroviper.processing_functions.imaging.config_check._gridding import (
+        check_gridder,
+        check_gridder_continuum_mode,
+    )
+
+    gridder = config.get("gridder", "anti_alias")
+    gridder_class = check_gridder(gridder)
+    if (
+        mode.imaging_kind == "continuum"
+        and "visibility" not in gridder_class.grid_roles
+    ):
+        check_gridder_continuum_mode(gridder, config.get("continuum_mode", "mfs"))
+        if config.get("visibility_memory_mode", "recompute") != "recompute":
+            raise ValueError(
+                "DFT continuum imaging requires visibility_memory_mode='recompute'."
             )
-            if kept_grids:
-                raise ValueError(
-                    f"DFT does not produce the requested uv grids: {sorted(kept_grids)}."
-                )
+    absent_grids = {
+        role
+        for role in ("visibility", "uv_sampling")
+        if role not in gridder_class.grid_roles
+        and role not in gridder_class.grid_uv_sampling_roles
+    }
+    if absent_grids:
+        kept = config.get("image_data_variables_keep")
+        kept_grids = absent_grids & set(() if kept is None else kept)
+        if kept_grids:
+            raise ValueError(
+                f"DFT does not produce the requested uv grids: {sorted(kept_grids)}."
+            )
 
     # --- Field-name interface ---
     # Delphi uses the name for its phase centre. Other drivers retain the

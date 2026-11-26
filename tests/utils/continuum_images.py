@@ -268,7 +268,7 @@ def make_single_term_faint_source_image(white_noise_outside_mask=False):
     """One-Taylor-term continuum image of a faint broad source, with a clean mask.
 
     The scene of the faint source in the Asp kernel tests
-    (``tests/unit/processing_functions/imaging/test_aspclean.py``): on 128 x 128
+    (``tests/unit/processing_functions/imaging/model_update/deconvolvers/test_aspclean.py``): on 128 x 128
     pixels, a PSF of 80 % filled uv coverage (unit peak at pixel (64, 64)), a
     Gaussian of width 12 pixels at the centre scaled so that its dirty peak is
     2, and noise convolved with the PSF with a standard deviation of 1. The

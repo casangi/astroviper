@@ -14,10 +14,11 @@ from astroviper.processing_functions.imaging.add_visibility_grid_continuum impor
 from astroviper.processing_functions.imaging.add_visibility_grid_continuum_mvc import (
     add_visibility_grid_mvc_single_field,
 )
-from astroviper.processing_functions.imaging.degrid_visibility_grid import (
+from astroviper.processing_functions.imaging.gridders.anti_alias.degrid_visibility_grid import (
     degrid_visibility_grid_single_field,
 )
-from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
+    as_gridding_kernel,
     make_gridding_kernel,
 )
 from astroviper.processing_functions.imaging.image_continuum_single_field import (
@@ -37,7 +38,11 @@ from astroviper.processing_functions.imaging.image_continuum_single_field import
     residual_update_continuum_single_field,
     restore_continuum_image,
 )
-from astroviper.processing_functions.imaging.imaging_setup_continuum_single_field import (
+from astroviper.processing_functions.imaging.imaging_conclude.restore import (
+    NO_FIT_BEAM,
+    _divide_taylor_polynomials,
+)
+from astroviper.processing_functions.imaging.imaging_setup.imaging_setup import (
     _convert_primary_beam_to_reference_frequency,
     _mfs_channel_imaging_weight_sums,
 )
@@ -47,10 +52,6 @@ from astroviper.processing_functions.imaging.make_point_spread_function_continuu
 from astroviper.processing_functions.imaging.residual_cycle_continuum_single_field import (
     make_visibility_model_continuum_single_field,
     residual_cycle_continuum_single_field,
-)
-from astroviper.processing_functions.imaging.restore import (
-    NO_FIT_BEAM,
-    _divide_taylor_polynomials,
 )
 from astroviper.processing_functions.imaging.utils import Key
 from astroviper.utils.continuum_cache import MVC_LOCAL_BEAM_STATIC_VARIABLES
@@ -96,14 +97,16 @@ def test_psf_taylor_gridding_uses_output_views_and_reuses_order_zero_weights(
         normalization[...] = 7.0 + order
 
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp."
+        "astroviper.processing_functions.imaging.gridders.anti_alias.anti_alias_grid_cpp."
         "anti_alias_grid_uv_sampling",
         fake_grid,
     )
 
     add_uv_sampling_grid_continuum_single_field(
         measurement_set,
-        np.ones(400),  # support-7 half kernel table, oversampling 100
+        as_gridding_kernel(
+            np.ones(400)  # support-7 half kernel table, oversampling 100
+        ),
         image,
         n_psf_taylor_terms=3,
         reference_frequency=100.0,
@@ -322,14 +325,14 @@ def test_continuum_prediction_degrids_and_accumulates_each_taylor_plane(monkeypa
         )
 
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.degrid_visibility_grid."
+        "astroviper.processing_functions.imaging.gridders.anti_alias.degrid_visibility_grid."
         "degrid_visibility_grid_single_field",
         fake_degrid,
     )
     make_visibility_model_continuum_single_field(
         {"partition": ms_xds},
         model_xds,
-        np.ones(351),
+        as_gridding_kernel(np.ones(400)),
         n_taylor_terms=2,
         reference_frequency=1.0e9,
         ms_data_group_in_name="corrected",
@@ -347,7 +350,7 @@ def test_continuum_prediction_degrids_and_accumulates_each_taylor_plane(monkeypa
 
 def test_primary_beam_correction_restores_every_taylor_term():
     """PB correction uses the model-first convention for every Taylor term."""
-    from astroviper.processing_functions.imaging.restore import (
+    from astroviper.processing_functions.imaging.imaging_conclude.restore import (
         _clean_beam_kernel_ft,
         primary_beam_corrected_plane,
     )
@@ -517,7 +520,9 @@ def test_spectral_index_error_is_finite_when_taylor_one_is_zero():
 
 def test_mfs_restoration_divides_primary_beam_taylor_polynomial_before_restore():
     """MFS restores intrinsic coefficients obtained from J(x) = A(x) I(x)."""
-    from astroviper.processing_functions.imaging.restore import _restore_image_arrays
+    from astroviper.processing_functions.imaging.imaging_conclude.restore import (
+        _restore_image_arrays,
+    )
 
     image = make_continuum_image()
     image = image.drop_dims("taylor_term").assign_coords(taylor_term=np.arange(3))
@@ -645,8 +650,10 @@ def _apply(planes, transform):
 
 
 def _target_kernel_and_transform():
-    from astroviper.processing_functions.imaging.restore import _clean_beam_kernel_ft
-    from tests.unit.processing_functions.imaging.test_restore import (
+    from astroviper.processing_functions.imaging.imaging_conclude.restore import (
+        _clean_beam_kernel_ft,
+    )
+    from tests.unit.processing_functions.imaging.imaging_conclude.test_restore import (
         _correcting_transform,
     )
 
@@ -840,7 +847,9 @@ def test_mfs_target_that_does_not_contain_the_psf_beam_keeps_the_residual(
     residual; one warning names the planes."""
     import toolviper.utils.logger as logger
 
-    from astroviper.processing_functions.imaging.restore import _restore_image_arrays
+    from astroviper.processing_functions.imaging.imaging_conclude.restore import (
+        _restore_image_arrays,
+    )
 
     messages = []
     monkeypatch.setattr(logger, "warning", messages.append)
@@ -1133,12 +1142,12 @@ def test_mvc_grid_accumulates_child_into_full_image_frequency_axis(
         grid[:, observed_frequency_map, ...] = 1.0
         normalization[:, observed_frequency_map, ...] = 1.0
 
-    module_name = "astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp"
+    module_name = "astroviper.processing_functions.imaging.gridders.anti_alias.anti_alias_grid_cpp"
     extension_module = ModuleType(module_name)
     extension_module.anti_alias_grid = fake_grid
     monkeypatch.setitem(sys.modules, module_name, extension_module)
 
-    add_visibility_grid_mvc_single_field(ms_xds, np.ones(8), image)
+    add_visibility_grid_mvc_single_field(ms_xds, as_gridding_kernel(np.ones(8)), image)
 
     np.testing.assert_array_equal(observed_frequency_map, [1, 3])
     assert image.VISIBILITY.shape[1] == image_frequencies.size
@@ -1262,7 +1271,7 @@ def test_mfs_grid_accumulates_normalization_across_processing_children(monkeypat
         grid += weight_sum[..., None, None]
         normalization += weight_sum
 
-    module_name = "astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp"
+    module_name = "astroviper.processing_functions.imaging.gridders.anti_alias.anti_alias_grid_cpp"
     extension_module = ModuleType(module_name)
     extension_module.anti_alias_grid = fake_grid
     monkeypatch.setitem(sys.modules, module_name, extension_module)
@@ -1270,7 +1279,7 @@ def test_mfs_grid_accumulates_normalization_across_processing_children(monkeypat
     for child_weight in (2.0, 3.0):
         add_visibility_grid_continuum_single_field(
             make_child(child_weight),
-            np.ones(8),
+            as_gridding_kernel(np.ones(8)),
             image,
             n_taylor_terms=1,
             reference_frequency=1.0e9,
@@ -1851,7 +1860,7 @@ def _mvc_image_point_sources(
     Returns the Taylor model, effective beam, and final Taylor-zero residual
     peak.
     """
-    from astroviper.processing_functions.imaging.deconvolvers import mtmfs
+    from astroviper.processing_functions.imaging.model_update.deconvolvers import mtmfs
 
     size, centre, n_taylor_terms = 64, 32, 2
     x = (np.arange(8) - 3.5) / 32.0
@@ -2296,7 +2305,7 @@ def test_prepare_mfs_model_transforms_and_fourier_converts_all_terms(
         return dataset
 
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder."
+        "astroviper.processing_functions.imaging.normalization.normalize_image."
         "fft_norm_continuum_img_xds",
         fake_fft,
     )
@@ -2308,9 +2317,7 @@ def test_prepare_mfs_model_transforms_and_fourier_converts_all_terms(
         image_data_group_out_name="model_uv",
         gridding_kernel_params=gridding_kernel_params,
     )
-    assert fft_options["gridding_kernel"] is make_gridding_kernel(
-        gridding_kernel_params, 1.2
-    )
+    assert fft_options["gcf_xds"] is make_gridding_kernel(gridding_kernel_params, 1.2)
     assert result.VISIBILITY_MODEL.sizes["taylor_term"] == 2
     assert result.VISIBILITY_MODEL.attrs["n_taylor_terms"] == 2
     assert fft_options["image_data_variables_keep"] == []
@@ -2376,7 +2383,7 @@ def test_prepare_mvc_model_evaluates_taylor_terms_and_channel_beams(
         return dataset
 
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder."
+        "astroviper.processing_functions.imaging.normalization.normalize_image."
         "fft_norm_img_xds",
         fake_fft,
     )
@@ -2394,9 +2401,7 @@ def test_prepare_mvc_model_evaluates_taylor_terms_and_channel_beams(
         image_data_group_out_name="model_uv",
         gridding_kernel_params=gridding_kernel_params,
     )
-    assert fft_options["gridding_kernel"] is make_gridding_kernel(
-        gridding_kernel_params, 1.2
-    )
+    assert fft_options["gcf_xds"] is make_gridding_kernel(gridding_kernel_params, 1.2)
     repeated = prepare_model_uv_mvc_single_field(
         model,
         channel_pb,
@@ -2476,13 +2481,13 @@ def test_residual_update_wraps_setup_cycle_and_local_mvc_ifft(
     )
 
     def fake_ifft(dataset, image_data_group_out_modified, **kwargs):
-        received["ifft"].append(kwargs["gridding_kernel"])
+        received["ifft"].append(kwargs["gcf_xds"])
         name = next(iter(image_data_group_out_modified.values()))
         dataset[name] = xr.DataArray([0.0], dims=("frequency",))
         return dataset
 
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder."
+        "astroviper.processing_functions.imaging.normalization.normalize_image."
         "ifft_norm_img_xds",
         fake_ifft,
     )
@@ -2508,7 +2513,9 @@ def test_residual_update_wraps_setup_cycle_and_local_mvc_ifft(
     assert timing.iloc[0].n_taylor_terms == 2
     assert received["setup"] == received["cycle"] == [kernel_params]
     kernel = make_gridding_kernel(kernel_params, 1.2)
-    assert received["ifft"] == ([kernel, kernel] if continuum_mode == "mvc" else [])
+    assert [gcf_xds is kernel for gcf_xds in received["ifft"]] == (
+        [True, True] if continuum_mode == "mvc" else []
+    )
     if continuum_mode == "mvc":
         assert "SKY_RESIDUAL_MVC_CUBE" in result
         assert "POINT_SPREAD_FUNCTION_MVC_CUBE" in result
@@ -2559,12 +2566,12 @@ def test_residual_cycle_times_prediction_stages_once(
         fake_prepare_model,
     )
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.residual_update."
+        "astroviper.processing_functions.imaging.residual_update.residual_update."
         "make_visibility_model_single_field",
         lambda *args, **kwargs: None,
     )
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.residual_update."
+        "astroviper.processing_functions.imaging.residual_update.residual_update."
         "calculate_residual_visibilities",
         lambda *args, **kwargs: None,
     )
@@ -2649,13 +2656,15 @@ def test_shared_degridder_registers_output_and_calls_cpp_kernel(monkeypatch):
         vis[...] = 3.0
 
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp."
+        "astroviper.processing_functions.imaging.gridders.anti_alias.anti_alias_grid_cpp."
         "anti_alias_degrid",
         fake_kernel,
     )
     degrid_visibility_grid_single_field(
         ms,
-        np.ones(400),  # support-7 half kernel table, oversampling 100
+        as_gridding_kernel(
+            np.ones(400)  # support-7 half kernel table, oversampling 100
+        ),
         geometry,
         np.ones((1, 2, 1, 2, 2), dtype=np.complex64),
         [0, 1],
@@ -2694,14 +2703,16 @@ def test_shared_degridder_allocates_model_from_weights_without_observed_data(
     )
 
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp."
+        "astroviper.processing_functions.imaging.gridders.anti_alias.anti_alias_grid_cpp."
         "anti_alias_degrid",
         lambda grid, vis, *args, **kwargs: vis.fill(2.0),
     )
 
     degrid_visibility_grid_single_field(
         ms,
-        np.ones(400),  # support-7 half kernel table, oversampling 100
+        as_gridding_kernel(
+            np.ones(400)  # support-7 half kernel table, oversampling 100
+        ),
         geometry,
         np.ones((1, 2, 1, 2, 2), dtype=np.complex64),
         [0, 1],
@@ -2719,8 +2730,8 @@ def test_continuum_statistics_use_only_taylor_zero_and_preserve_input(with_mask)
         build_continuum_residual_imaging_dict,
     )
     from astroviper.processing_functions.imaging.utils import (
-        CycleController,
         get_per_cycle_limits,
+        make_cycle_control_state,
     )
 
     residual = np.full((2, 3, 2, 3, 4), 1000.0)
@@ -2743,13 +2754,13 @@ def test_continuum_statistics_use_only_taylor_zero_and_preserve_input(with_mask)
     original = image.copy(deep=True)
     params = {"gain": 0.1}
     stats = build_continuum_residual_imaging_dict(image, "residual", params)
-    assert len(stats.data) == 4
-    for key, values in stats.data.items():
+    assert len(stats) == 4
+    for key, values in stats.items():
         assert key.chan == 0
         assert values["peakres"] == [peaks[key.time, key.pol]]
         assert values["masksum"] == [8 if with_mask else 12]
         assert values["max_psf_sidelobe"] == 0.2
-    controller = CycleController(max_iter=10, max_iter_per_cycle=3)
+    controller = make_cycle_control_state(max_iter=10, max_iter_per_cycle=3)
     limits, thresholds = get_per_cycle_limits(controller, stats)
     assert limits.shape == (2, 1, 2)
     np.testing.assert_array_equal(limits, 3)
@@ -2782,7 +2793,7 @@ def test_continuum_statistics_record_taylor_zero_entropy():
     )
 
     disabled = build_continuum_residual_imaging_dict(image, "residual", {"gain": 0.1})
-    for fields in disabled.data.values():
+    for fields in disabled.values():
         assert len(fields["entropy"]) == len(fields["residual_snr"]) == 1
         # the residual statistics are those of Taylor term zero
         assert fields["rms_in_mask"][0] < 100
@@ -2798,8 +2809,8 @@ def test_continuum_statistics_record_taylor_zero_entropy():
             "entropy_flux_bins": 8,
         },
     )
-    quiet = enabled.data[Key(time=0, chan=0, pol=0)]
-    bright = enabled.data[Key(time=0, chan=0, pol=1)]
+    quiet = enabled[Key(time=0, chan=0, pol=0)]
+    bright = enabled[Key(time=0, chan=0, pol=1)]
     assert np.isfinite(quiet["entropy"][0])
     assert quiet["residual_snr"][0] < 6.0
     assert np.isnan(bright["entropy"][0])
@@ -2845,7 +2856,7 @@ def test_refreshed_statistics_respect_clean_support(explicit_mask):
     stats = build_continuum_residual_imaging_dict(
         image, "residual", {"primary_beam_limit": 0.2}
     )
-    fields = next(iter(stats.data.values()))
+    fields = next(iter(stats.values()))
     assert fields["peakres"] == [0.05]
     assert fields["peakres_nomask"] == [10.0]
     assert fields["masksum"] == [2]
@@ -3017,3 +3028,56 @@ def test_auto_mask_passes_on_threshold_reached(reached, stopped):
         threshold_reached=None if reached is None else np.full((1, 1, 2), reached),
     )
     assert updated["planes_stopped"][0, 0, 0] == stopped
+
+
+def _fft_backends_seen(monkeypatch):
+    """(function, fft_backend) of every call of the FFT module's restore and mask
+    forms, in call order."""
+    from astroviper.processing_functions import fft
+
+    seen = []
+    for name in ("rfft2", "irfft2", "ifft", "irfft", "set_workers"):
+        real = getattr(fft, name)
+
+        def spy(*args, _real=real, _name=name, **kwargs):
+            seen.append((_name, kwargs["fft_backend"]))
+            return _real(*args, **kwargs)
+
+        monkeypatch.setattr(fft, name, spy)
+    return seen
+
+
+@pytest.mark.parametrize("fft_backend", ["numpy", "pyfftw"])
+@pytest.mark.parametrize("output", ["apparent", "primary_beam_corrected", "both"])
+@pytest.mark.parametrize("mode", ["mfs", "mvc"])
+def test_the_continuum_restore_runs_every_transform_in_its_fft_backend(
+    mode, output, fft_backend, monkeypatch
+):
+    image = make_continuum_image(continuum_mode=mode)
+    image["PRIMARY_BEAM"].data[...] = np.linspace(0.25, 1.0, 64).reshape(
+        image["PRIMARY_BEAM"].shape
+    )
+    seen = _fft_backends_seen(monkeypatch)
+    restore_continuum_image(
+        image,
+        restoration_output=output,
+        primary_beam_limit=0.2,
+        continuum_mode=mode,
+        fft_backend=fft_backend,
+    )
+    assert seen and {value for _, value in seen} == {fft_backend}
+
+
+@pytest.mark.parametrize("fft_backend", ["numpy", "pyfftw"])
+def test_the_continuum_mask_runs_every_transform_in_its_fft_backend(
+    fft_backend, monkeypatch
+):
+    seen = _fft_backends_seen(monkeypatch)
+    make_auto_mask_continuum(
+        _continuum_image_with_two_sources(),
+        {},
+        primary_beam_limit=0.2,
+        fft_backend=fft_backend,
+    )
+    assert {name for name, _ in seen} == {"set_workers", "rfft2", "irfft2"}
+    assert {value for _, value in seen} == {fft_backend}

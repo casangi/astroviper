@@ -101,7 +101,7 @@ from xradio.measurement_set import load_processing_set, open_processing_set
 
 import astroviper.distributed_applications as distributed_applications
 from astroviper.distributed_applications.imaging import image_cube_single_field
-from astroviper.processing_functions.imaging.restore import (
+from astroviper.processing_functions.imaging.imaging_conclude.restore import (
     _elliptical_gaussian_kernel,
 )
 from astroviper.processing_functions.imaging.utils.cycle_control import (
@@ -987,7 +987,7 @@ def oracle_residual(work_dir, ps_store, truth_store, tag, size, gridding_kernel_
     from astroviper.processing_functions.imaging.image_cube_single_field import (
         imaging_preparation_single_field,
     )
-    from astroviper.processing_functions.imaging.residual_update import (
+    from astroviper.processing_functions.imaging.residual_update.residual_update import (
         residual_update_cube_single_field,
     )
     from astroviper.processing_functions.imaging.utils import (

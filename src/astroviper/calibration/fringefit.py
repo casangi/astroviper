@@ -38,6 +38,8 @@ def getFourierSpacings(xds, npad=1):
 
 
 def _fringe_node_task(input_params: dict):
+    from astroviper.processing_functions import fft
+
     ps = input_params["ps"]
     data_selection = input_params["data_selection"]
     print(f"{data_selection=}")
@@ -70,7 +72,16 @@ def _fringe_node_task(input_params: dict):
     nt = s[0]
     nf = s[2]
     s2 = (npad * nt, npad * nf)  # Pad in time  # Pad in frequency
-    fftvis = np.fft.fftshift(np.fft.fft2(normed, axes=(0, 2), s=s2), axes=(0, 2))
+    fftvis = fft.fftshift(
+        fft.fft2(
+            normed,
+            s=s2,
+            axes=(0, 2),
+            processing_function_threads=1,
+            fft_backend=input_params["fft_backend"],
+        ),
+        axes=(0, 2),
+    )
     npols = normed.shape[-1]
     # Sometimes ref_ant has an autocorrelation; I think I'm allowed to
     # ignore it?  But if we set it up front and it gets overwritten by
@@ -131,12 +142,14 @@ def _fringefit_single(
     node_task_data_mapping: dict,
     sub_selection: dict,
     ref_ant: str,
+    fft_backend: str = "numpy",
 ):
     """Fringefits a single something. I should probably know what for something."""
     input_params = {}
     input_params["data_sub_selection"] = sub_selection
     input_params["ps"] = ps
     input_params["ref_ant"] = ref_ant
+    input_params["fft_backend"] = fft_backend
     graph = map(
         input_data=ps,
         node_task_data_mapping=node_task_data_mapping,
@@ -151,10 +164,18 @@ def _fringefit_single(
     return res
 
 
-def fringefit_ps(ps: ProcessingSetXdt, ref_ant: str, unixtime: float, interval: float):
+def fringefit_ps(
+    ps: ProcessingSetXdt,
+    ref_ant: str,
+    unixtime: float,
+    interval: float,
+    fft_backend: str = "numpy",
+):
     """Fringefits a ProcessingSetXdt for a time slice, handling each spw separately.
 
     Currently assumes that each there will be one xdt for each spw in the ProcessingSetXdt.
+    ``fft_backend`` (``"numpy"``, ``"scipy"`` or ``"pyfftw"``) is the FFT library of the
+    fringe search.
     """
     ps2 = ps.sel(time=slice(unixtime, unixtime + interval))
     # This returns *all* the xdses with that timerange filter. Many of
@@ -173,7 +194,7 @@ def fringefit_ps(ps: ProcessingSetXdt, ref_ant: str, unixtime: float, interval: 
         parallel_coords, ps2, ps_partition=["spectral_window_name"]
     )
     subsel = {}
-    res0 = _fringefit_single(ps2, node_task_data_mapping, subsel, ref_ant)
+    res0 = _fringefit_single(ps2, node_task_data_mapping, subsel, ref_ant, fft_backend)
     # Now we collect these into a single DataTree!
     res_cal_tree = xa.DataTree(
         children={f"part{i}": xa.DataTree(dataset=q) for i, q in enumerate(res0)}

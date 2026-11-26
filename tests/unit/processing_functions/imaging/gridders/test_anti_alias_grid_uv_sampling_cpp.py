@@ -4,7 +4,7 @@ Coverage:
   * Numerical agreement with the pure-Python reference
     (`anti_alias_grid_uv_sampling_reference`)
   * Serial vs multi-threaded equivalence
-  * `processing_function_threads <= 0` auto-detects hardware concurrency
+  * `processing_function_threads` below 1 gives the result of one thread
   * Accumulation semantics (two calls == one combined call)
   * NaN UV / NaN weight / zero weight are skipped
   * Samples whose support falls outside the grid are skipped
@@ -19,7 +19,7 @@ import unittest
 import numpy as np
 from reference_gridders import anti_alias_grid_uv_sampling_reference
 
-from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
+from astroviper.processing_functions.imaging.gridders.anti_alias.anti_alias_grid_cpp import (
     anti_alias_grid_uv_sampling,
 )
 from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
@@ -196,13 +196,15 @@ class TestAntiAliasGridUVSamplingCpp(unittest.TestCase):
                 np.testing.assert_allclose(grid_t, grid_serial, rtol=1e-10, atol=1e-10)
                 np.testing.assert_allclose(norm_t, norm_serial, rtol=1e-10, atol=1e-10)
 
-    def test_processing_function_threads_auto_detect(self):
-        """processing_function_threads <= 0 falls back to hardware_concurrency()."""
+    def test_processing_function_threads_below_one_matches_one_thread(self):
+        """A count below 1 gives the bits of one thread."""
         inputs = _make_random_inputs(seed=7)
         grid_serial, norm_serial = _run_cpp(inputs, processing_function_threads=1)
-        grid_auto, norm_auto = _run_cpp(inputs, processing_function_threads=0)
-        np.testing.assert_allclose(grid_auto, grid_serial, rtol=1e-10, atol=1e-10)
-        np.testing.assert_allclose(norm_auto, norm_serial, rtol=1e-10, atol=1e-10)
+        for nt in (0, -1):
+            with self.subTest(processing_function_threads=nt):
+                grid, norm = _run_cpp(inputs, processing_function_threads=nt)
+                np.testing.assert_array_equal(grid, grid_serial)
+                np.testing.assert_array_equal(norm, norm_serial)
 
     def test_threaded_matches_reference(self):
         """Threaded C++ output matches the pure-Python reference within tolerance."""

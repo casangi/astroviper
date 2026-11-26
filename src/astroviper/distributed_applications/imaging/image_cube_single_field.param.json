@@ -6,7 +6,10 @@
         "image_params": { "required": true, "type": ["dict"] },
         "imaging_weights_params": { "required": true, "type": ["dict"] },
         "cycle_control_params": { "required": true, "type": ["dict"] },
-        "gridder": { "type": ["str"], "allowed": ["anti_alias"] },
+        "gridder": {
+            "type": ["str"],
+            "allowed": ["anti_alias", "direct_fourier_transform"]
+        },
         "deconvolver": {
             "type": ["str"],
             "allowed": ["hogbom", "hogbom_many_threads", "asp"]
@@ -35,7 +38,7 @@
         "write_imaging_weights_to_ps": { "type": "boolean" },
         "clear_cache": { "type": "boolean" },
         "vizualize_graph": { "type": "boolean" },
-        "fft_backend": { "type": ["str"], "allowed": ["pyfftw", "scipy"] },
+        "fft_backend": { "type": ["str"], "allowed": ["numpy", "pyfftw", "scipy"] },
         "restore": { "type": "boolean" },
         "restoration_output": { "type": "string", "allowed": ["apparent", "primary_beam_corrected", "both"] },
         "restoring_beam": { "type": ["list", "ndarray"], "nullable": true },

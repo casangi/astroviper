@@ -63,6 +63,7 @@ def simulate_processing_set(
     sky_model_image: str | None = None,
     sky_model_image_predict: dict | None = None,
     io_engine: str = "chunk",
+    fft_backend: str = "pyfftw",
 ):
     """Simulate the visibilities of one time/frequency chunk and write them to disk.
 
@@ -101,7 +102,7 @@ def simulate_processing_set(
     gaussian_source_shape : np.ndarray, [n_gaussian, 3], radians, optional
         ``[major, minor, position angle]`` FWHM shape of each Gaussian source, in
         the imaging clean-beam convention
-        (:func:`astroviper.processing_functions.imaging.restore.elliptical_gaussian_uv_taper`).
+        (:func:`astroviper.processing_functions.imaging.imaging_conclude.restore.elliptical_gaussian_uv_taper`).
     disk_source_flux : np.ndarray, [n_disk, n_time | 1, n_frequency | 1, 4], Jy, optional
         Integrated flux of each limb-darkened disk source in the four
         instrumental correlations; singleton time/frequency axes broadcast.
@@ -208,10 +209,26 @@ def simulate_processing_set(
         Astropy frame of all right ascension / declination inputs (``"icrs"`` or ``"fk5"``).
     processing_function_threads : int
         Number of threads handed to the per-processing-function (C++ / FFT)
-        kernels.
+        kernels. A distributed application resolves ``0`` (auto) once, before
+        its checks, to the CPUs per Dask worker thread of the host with the
+        fewest, at least 1 (1 where these are not known, as under MPI), and
+        warns when a host's worker threads times the count exceed its CPUs
+        (see
+        :func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).
+        Node tasks and processing functions do not resolve ``0``; those that
+        check the count refuse it. Given a count below 1, a C++ kernel and the
+        PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
+        and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
+        ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
+        numpy.fft takes no count: under ``"numpy"`` the Python FFTs run one
+        thread.
     implementation : {"numpy", "cpp"}
         Visibility kernel implementation: ``"cpp"`` (multithreaded C++, default) or
         ``"numpy"`` (vectorised NumPy reference).
+    fft_backend : {"numpy", "scipy", "pyfftw"}, default "pyfftw"
+        FFT library: ``"numpy"`` (``numpy.fft``), ``"scipy"`` (``scipy.fft``) or
+        ``"pyfftw"`` (FFTW through pyFFTW). The three round differently; the C++
+        kernels' FFTs do not use it.
     task_coords : dict
         Per-chunk coordinate mapping; ``task_coords[<parallel dim>]`` supplies
         this chunk's parallel coordinate values (``"data"``) and its
@@ -321,6 +338,7 @@ def simulate_processing_set(
         sky_components=components_chunk,
         sky_model_image=model_image,
         sky_model_image_predict=sky_model_image_predict,
+        fft_backend=fft_backend,
     )
     if not graph_mode:
         return xds

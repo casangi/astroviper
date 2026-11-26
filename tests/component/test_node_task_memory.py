@@ -237,21 +237,25 @@ PHASES = [
     # call, so the module attributes wrapped here are what it calls
     ("astroviper.utils.node_task_io", "load_processing_set", 2.5),
     (
-        "astroviper.processing_functions.imaging.residual_update",
+        "astroviper.processing_functions.imaging.residual_update.residual_update",
         "imaging_setup_single_field",
         10.5,
     ),
     (
-        "astroviper.processing_functions.imaging.residual_update",
+        "astroviper.processing_functions.imaging.residual_update.residual_update",
         "residual_update_cube_single_field",
         8.3,
     ),
     (
-        "astroviper.processing_functions.imaging.model_update",
+        "astroviper.processing_functions.imaging.model_update.model_update",
         "model_update_cube_single_field",
         3.0,
     ),
-    ("astroviper.processing_functions.imaging.restore", "restore_image", 7.5),
+    (
+        "astroviper.processing_functions.imaging.imaging_conclude.restore",
+        "restore_image",
+        7.5,
+    ),
     (
         "astroviper.processing_functions.image_analysis.plane_statistics",
         "calculate_plane_statistics",
@@ -644,13 +648,9 @@ def deferred_result(task_id):
     imaging dict, no statistics), which the reduce is built to take."""
     import pandas as pd
 
-    from astroviper.processing_functions.imaging.utils.imaging_dict import (
-        ImagingDict,
-    )
-
     return {
         "timing_node_tasks": pd.DataFrame({"task_id": [task_id]}),
-        "deconvolution": ImagingDict(),
+        "deconvolution": {},
         "image_statistics": {},
     }
 
@@ -1128,7 +1128,7 @@ def test_node_task_memory(tmp_path, monkeypatch, io_engine, restoring_beam):
                 label = f"run {index + 2}"
                 with collector.watching(label):
                     result = monitor.run(label, node_task, **kwargs)
-                imaged[label] = bool(result["deconvolution"].data)
+                imaged[label] = bool(result["deconvolution"])
                 del result
                 monitor.left_behind(monitor.runs[-1])
                 monitor.after_collection(monitor.runs[-1])

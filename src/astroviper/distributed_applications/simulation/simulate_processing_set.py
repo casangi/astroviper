@@ -117,6 +117,7 @@ def simulate_processing_set(
     check_schema: bool = True,
     monitor_resources_seconds: float | None = None,
     report: str | None = None,
+    fft_backend: str = "pyfftw",
 ) -> dict:
     """Simulate the visibilities of a sky of analytic components and write them as an MSv4 processing set.
 
@@ -198,7 +199,7 @@ def simulate_processing_set(
     gaussian_source_shape : np.ndarray, [n_gaussian, 3], radians, optional
         ``[major, minor, position angle]`` FWHM shape of each Gaussian source, in
         the imaging clean-beam convention
-        (:func:`astroviper.processing_functions.imaging.restore.elliptical_gaussian_uv_taper`).
+        (:func:`astroviper.processing_functions.imaging.imaging_conclude.restore.elliptical_gaussian_uv_taper`).
     disk_source_flux : np.ndarray, [n_disk, n_time | 1, n_frequency | 1, 4], Jy, optional
         Integrated flux of each limb-darkened disk source in the four
         instrumental correlations; singleton time/frequency axes broadcast.
@@ -301,7 +302,19 @@ def simulate_processing_set(
         choose from the per-chunk memory estimate and ``thread_info``.
     processing_function_threads : int
         Number of threads handed to the per-processing-function (C++ / FFT)
-        kernels.
+        kernels. A distributed application resolves ``0`` (auto) once, before
+        its checks, to the CPUs per Dask worker thread of the host with the
+        fewest, at least 1 (1 where these are not known, as under MPI), and
+        warns when a host's worker threads times the count exceed its CPUs
+        (see
+        :func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).
+        Node tasks and processing functions do not resolve ``0``; those that
+        check the count refuse it. Given a count below 1, a C++ kernel and the
+        PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
+        and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
+        ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
+        numpy.fft takes no count: under ``"numpy"`` the Python FFTs run one
+        thread.
     implementation : {"numpy", "cpp"}
         Visibility kernel implementation: ``"cpp"`` (multithreaded C++, default) or
         ``"numpy"`` (vectorised NumPy reference).
@@ -345,6 +358,10 @@ def simulate_processing_set(
         ``<name>_report_files`` next to the output store. It is made after
         the output is written: a failure while making it is logged and leaves
         the results intact. ``None`` (default): no report.
+    fft_backend : {"numpy", "scipy", "pyfftw"}, default "pyfftw"
+        FFT library: ``"numpy"`` (``numpy.fft``), ``"scipy"`` (``scipy.fft``) or
+        ``"pyfftw"`` (FFTW through pyFFTW). The three round differently; the C++
+        kernels' FFTs do not use it.
 
     Returns
     -------
@@ -377,6 +394,12 @@ def simulate_processing_set(
     astroviper.node_tasks.simulation.simulate_processing_set
     astroviper.processing_functions.simulation.simulate_processing_set
     """
+    from astroviper.utils.data_partitioning import resolve_processing_function_threads
+
+    processing_function_threads = resolve_processing_function_threads(
+        processing_function_threads, compute_backend
+    )
+
     import time as _time
 
     import dask
@@ -694,6 +717,7 @@ def simulate_processing_set(
         "direction_frame": direction_frame,
         "processing_function_threads": processing_function_threads,
         "implementation": implementation,
+        "fft_backend": fft_backend,
     }
     # dish diameters are resolved here once so the node tasks never fail late
     dish_diameters_of_beam_models(beam_models)
@@ -814,6 +838,7 @@ def simulate_processing_set(
             compute_backend=compute_backend,
             mpi_cluster_setup=mpi_cluster_setup,
             thread_info=thread_info,
+            fft_backend=fft_backend,
         )
     return result
 

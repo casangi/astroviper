@@ -7,7 +7,7 @@ from astroviper.processing_functions.image_analysis.psf_gaussian_fit_cpp import 
     casa_psf_fit_available,
     fit_psf_beam,
 )
-from astroviper.processing_functions.imaging.restore import (
+from astroviper.processing_functions.imaging.imaging_conclude.restore import (
     _elliptical_gaussian_kernel,
 )
 
@@ -49,6 +49,27 @@ def test_float32_matches_float64_and_threads():
         processing_function_threads=2,
     )
     np.testing.assert_allclose(single, double, rtol=1e-4)
+
+
+def test_threads_give_the_beams_of_one_thread():
+    """2, 3 and 7 threads on 3 planes (fewer, as many as and more threads
+    than planes) fit the beams of one thread, bit for bit."""
+    cell = 2.0 * ARCSEC
+    planes = np.stack(
+        [
+            _elliptical_gaussian_kernel(96, 96, 8.0, 5.0, 0.3, np.float64),
+            _elliptical_gaussian_kernel(96, 96, 10.0, 6.0, -0.8, np.float64),
+            _elliptical_gaussian_kernel(96, 96, 7.0, 6.5, 1.1, np.float64),
+        ]
+    )[None, :, None]
+    one = fit_psf_beam(planes, np.array([-cell, cell]))
+    for threads in (2, 3, 7):
+        np.testing.assert_array_equal(
+            fit_psf_beam(
+                planes, np.array([-cell, cell]), processing_function_threads=threads
+            ),
+            one,
+        )
 
 
 def test_peak_checks():

@@ -17,6 +17,7 @@
         "n_mapping_parallelism": { "type": ["dict"], "nullable": true },
         "compute_backend": { "type": ["str"], "allowed": ["dask", "mpi"] },
         "mpi_cluster_setup": { "type": ["dict"], "nullable": true },
-        "processing_function_threads": { "type": ["int"] }
+        "processing_function_threads": { "type": ["int"] },
+        "fft_backend": { "type": ["str"], "allowed": ["numpy", "pyfftw", "scipy"] }
     }
 }

@@ -32,6 +32,9 @@ from tests.unit.processing_functions.imaging.degrid_test_datasets import (
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "gridders"))
 from reference_gridders import anti_alias_degrid_reference
 
+from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
+    as_gridding_kernel,
+)
 from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
     create_prolate_spheroidal_kernel_1D,
 )
@@ -45,7 +48,9 @@ class TestGetVisibilityGridSingleField(unittest.TestCase):
         """A uniform UV model degrids to a constant: sum(k*c)/sum(k) == c."""
         sky_value = 2.0 + 0.0j
         ms_xds, img_xds, _ = _build_datasets(sky_value=sky_value)
-        cgk = create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT)
+        cgk = as_gridding_kernel(
+            create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT)
+        )
 
         get_visibility_grid_single_field(ms_xds, cgk, img_xds)
 
@@ -59,7 +64,9 @@ class TestGetVisibilityGridSingleField(unittest.TestCase):
     def test_zero_grid_yields_zero_visibilities(self):
         """An all-zero UV model produces all-zero visibilities."""
         ms_xds, img_xds, _ = _build_datasets(sky_value=0.0 + 0.0j)
-        cgk = create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT)
+        cgk = as_gridding_kernel(
+            create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT)
+        )
 
         get_visibility_grid_single_field(ms_xds, cgk, img_xds)
 
@@ -83,7 +90,9 @@ class TestGetVisibilityGridSingleField(unittest.TestCase):
         self.assertFalse(strided_grid.flags.c_contiguous)
         strided_img["SKY_MODEL"].data = strided_grid
 
-        cgk = create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT)
+        cgk = as_gridding_kernel(
+            create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT)
+        )
         get_visibility_grid_single_field(contiguous_ms, cgk, contiguous_img)
         get_visibility_grid_single_field(strided_ms, cgk, strided_img)
 
@@ -98,7 +107,9 @@ class TestGetVisibilityGridSingleField(unittest.TestCase):
     def test_allocates_output_variable(self):
         """First call creates the output data variable with the right shape/dtype."""
         ms_xds, img_xds, _ = _build_datasets()
-        cgk = create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT)
+        cgk = as_gridding_kernel(
+            create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT)
+        )
 
         self.assertNotIn("VISIBILITY_MODEL", ms_xds)
         get_visibility_grid_single_field(ms_xds, cgk, img_xds)
@@ -117,7 +128,9 @@ class TestGetVisibilityGridSingleField(unittest.TestCase):
     def test_registers_output_data_group(self):
         """The `model` data group is added with the correct role mappings."""
         ms_xds, img_xds, _ = _build_datasets()
-        cgk = create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT)
+        cgk = as_gridding_kernel(
+            create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT)
+        )
 
         get_visibility_grid_single_field(ms_xds, cgk, img_xds)
 
@@ -135,7 +148,9 @@ class TestGetVisibilityGridSingleField(unittest.TestCase):
         """With overwrite=False, re-running on a dataset that already has the
         output variable raises (guard against accidental clobber)."""
         ms_xds, img_xds, _ = _build_datasets()
-        cgk = create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT)
+        cgk = as_gridding_kernel(
+            create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT)
+        )
 
         get_visibility_grid_single_field(ms_xds, cgk, img_xds)
         with self.assertRaises(AssertionError):
@@ -150,7 +165,9 @@ class TestGetVisibilityGridSingleField(unittest.TestCase):
         ms_xds, img_xds, _ = _build_datasets(sky_value=3.0 + 0.0j)
         # Set the first baseline's UVW to NaN for all time steps.
         ms_xds["UVW"].values[:, 0, :] = np.nan
-        cgk = create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT)
+        cgk = as_gridding_kernel(
+            create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT)
+        )
 
         get_visibility_grid_single_field(ms_xds, cgk, img_xds)
 
@@ -168,7 +185,9 @@ class TestGetVisibilityGridSingleField(unittest.TestCase):
         ms_xds, img_xds, _ = _build_datasets(sky_value=1.0 + 0.0j, n_baseline=1)
         # 1e12 m baseline maps far outside the padded 96x96 grid.
         ms_xds["UVW"].values[:] = 1.0e12
-        cgk = create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT)
+        cgk = as_gridding_kernel(
+            create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT)
+        )
 
         get_visibility_grid_single_field(ms_xds, cgk, img_xds)
 
@@ -185,7 +204,9 @@ class TestGetVisibilityGridSingleField(unittest.TestCase):
         # Only image channel 0 has a non-zero model; others are zero.
         sky = img_xds["SKY_MODEL"].values
         sky[:, 0] = 5.0 + 0.0j
-        cgk = create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT)
+        cgk = as_gridding_kernel(
+            create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT)
+        )
 
         get_visibility_grid_single_field(ms_xds, cgk, img_xds, chan_mode="continuum")
 
@@ -202,7 +223,9 @@ class TestGetVisibilityGridSingleField(unittest.TestCase):
         chan_values = np.array([1.0, 2.0, 3.0], dtype=np.complex128)
         for c in range(n_chan):
             sky[:, c] = chan_values[c]
-        cgk = create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT)
+        cgk = as_gridding_kernel(
+            create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT)
+        )
 
         get_visibility_grid_single_field(ms_xds, cgk, img_xds, chan_mode="cube")
 
@@ -232,7 +255,7 @@ class TestGetVisibilityGridSingleField(unittest.TestCase):
         )
 
         # --- Wrapper call ---
-        get_visibility_grid_single_field(ms_xds, cgk, img_xds)
+        get_visibility_grid_single_field(ms_xds, as_gridding_kernel(cgk), img_xds)
         wrapper_out = ms_xds["VISIBILITY_MODEL"].values.copy()
 
         # --- Direct reference call with the same inputs ---

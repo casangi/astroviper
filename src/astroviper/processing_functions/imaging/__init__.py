@@ -1,6 +1,3 @@
-from astroviper.processing_functions.imaging.correct_sky_by_primary_beam import (
-    correct_sky_by_primary_beam,
-)
 from astroviper.processing_functions.imaging.feather import feather_core
 from astroviper.processing_functions.imaging.find_continuum import (
     finalize_find_continuum_reductions,
@@ -16,7 +13,12 @@ from astroviper.processing_functions.imaging.image_continuum_single_field import
 from astroviper.processing_functions.imaging.image_cube_single_field import (
     image_cube_single_field,
 )
-from astroviper.processing_functions.imaging.restore import restore_image
+from astroviper.processing_functions.imaging.imaging_conclude.primary_beam_correction import (
+    correct_sky_by_primary_beam,
+)
+from astroviper.processing_functions.imaging.imaging_conclude.restore import (
+    restore_image,
+)
 
 __all__ = [
     "image_cube_single_field",

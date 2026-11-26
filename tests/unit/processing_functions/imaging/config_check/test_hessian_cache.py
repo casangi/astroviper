@@ -11,7 +11,7 @@ from astroviper.processing_functions.imaging.config_check import CONTINUUM_SINGL
 from astroviper.processing_functions.imaging.config_check.param_check_model_update import (
     check_model_products,
 )
-from astroviper.processing_functions.imaging.deconvolvers import mtmfs
+from astroviper.processing_functions.imaging.model_update.deconvolvers import mtmfs
 from tests.utils.continuum_images import make_runaway_taylor_image
 
 
@@ -66,6 +66,7 @@ def test_reuse_survives_worker_transfer_and_does_not_alias_metadata(monkeypatch)
         "cell_size",
         "coordinates",
         "reference",
+        "fft_backend",
     ],
 )
 def test_changed_static_inputs_recompute_hessians(monkeypatch, change):
@@ -87,6 +88,8 @@ def test_changed_static_inputs_recompute_hessians(monkeypatch, change):
         config["image_params"] = {"cell_size": [-1e-5, 1e-5]}
     elif change == "coordinates":
         image = image.assign_coords(time=[1.0])
+    elif change == "fft_backend":
+        config["fft_backend"] = "pyfftw"
     else:
         config["image_params"] = {"reference_frequency": 1e9}
         image.attrs["reference_frequency"] = 1e9

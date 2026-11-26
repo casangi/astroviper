@@ -704,3 +704,47 @@ def test_apply_mueller():
     # broadcasting over leading axes
     many = apply_mueller(np.tile(j1, (3, 2, 1)), j2, flux, [0, 15])
     assert many.shape == (3, 2, 4)
+
+
+def _zernike_ifft2_backends(monkeypatch):
+    from astroviper.processing_functions import fft
+
+    seen = []
+    real = fft.ifft2
+
+    def spy(*args, **kwargs):
+        seen.append((kwargs["fft_backend"], kwargs["processing_function_threads"]))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(fft, "ifft2", spy)
+    return seen
+
+
+@pytest.mark.parametrize("fft_backend", ["numpy", "scipy", "pyfftw"])
+def test_zernike_jones_beam_in_each_fft_backend(fft_backend, monkeypatch):
+    """The aperture's inverse transforms run in the library of fft_backend, on one
+    thread; the Jones images stay within 8 eps of the peak of numpy's."""
+    zpc = read_aperture_polynomial_coefficients("EVLA_avg_zcoeffs_SBand_lookup")
+    params = {"image_size": [64, 64], "mueller_selection": [0, 15]}
+    expected = make_zernike_jones_beam(zpc, [0.0, 0.3], [3e9], params)
+    seen = _zernike_ifft2_backends(monkeypatch)
+    got = make_zernike_jones_beam(
+        zpc, [0.0, 0.3], [3e9], params, fft_backend=fft_backend
+    )
+    assert seen and set(seen) == {(fft_backend, 1)}
+    assert got.JONES.dtype == expected.JONES.dtype
+    bound = 8 * np.finfo(np.float64).eps * np.abs(expected.JONES.values).max()
+    assert np.abs(got.JONES.values - expected.JONES.values).max() <= bound
+
+
+@pytest.mark.parametrize("fft_backend", ["numpy", "scipy", "pyfftw"])
+def test_evaluate_beam_models_hands_its_fft_backend_to_the_zernike_beams(
+    fft_backend, monkeypatch
+):
+    f = load_legacy("evla_mixed_beams")
+    seen = _zernike_ifft2_backends(monkeypatch)
+    evaluate_beam_models(
+        f["beam_models"], f["time"], f["frequency"], f["phase_center_ra_dec"], f["site_position"],
+        f["beam_params"], direction_frame="fk5", fft_backend=fft_backend,
+    )  # fmt: skip
+    assert seen and set(seen) == {(fft_backend, 1)}

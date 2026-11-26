@@ -18,10 +18,13 @@ from xradio.measurement_set import open_processing_set
 
 import astroviper.distributed_applications as distributed_applications
 from astroviper.processing_functions.imaging._param_docs import IMAGING_PARAM_DOCS
-from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+from astroviper.processing_functions.imaging.gridding_convolution_functions import (
+    anti_alias_term,
+)
+from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
     CASA_GRIDDING_KERNEL_PARAMS,
     DEFAULT_GRIDDING_KERNEL_PARAMS,
-    GriddingKernel,
+    anti_alias_kernel_arguments,
     make_gridding_kernel,
 )
 from astroviper.utils.beam_models import airy_disk_model
@@ -328,7 +331,9 @@ def test_mfs_with_a_designed_kernel_equals_the_cube_on_one_channel(
 
 def _spy_kernels(monkeypatch):
     """Record the kernel of every gridder, degridder and image correction call."""
-    from astroviper.processing_functions.imaging.gridders import anti_alias_grid_cpp
+    from astroviper.processing_functions.imaging.gridders.anti_alias import (
+        anti_alias_grid_cpp,
+    )
 
     calls = {"grid": [], "uv_sampling": [], "degrid": [], "correction": []}
     table_position = {"grid": 9, "uv_sampling": 8, "degrid": 7}
@@ -352,14 +357,25 @@ def _spy_kernels(monkeypatch):
 
         monkeypatch.setattr(anti_alias_grid_cpp, name, spy)
 
-    correction_1D = GriddingKernel.correction_1D
+    correction_1D = anti_alias_term.correction_1D
 
-    def correction_spy(self, n_pixels):
-        calls["correction"].append(self.params)
-        return correction_1D(self, n_pixels)
+    def correction_spy(gcf_xds, n_pixels):
+        calls["correction"].append(_params(gcf_xds))
+        return correction_1D(gcf_xds, n_pixels)
 
-    monkeypatch.setattr(GriddingKernel, "correction_1D", correction_spy)
+    monkeypatch.setattr(anti_alias_term, "correction_1D", correction_spy)
     return calls
+
+
+def _params(gcf_xds):
+    """The gridding_kernel_params of a kernel's gcf_xds."""
+    attrs = gcf_xds["ANTI_ALIAS"].attrs
+    return {
+        "type": attrs["kernel_type"],
+        "support": attrs["support"],
+        "oversampling": attrs["oversampling"],
+        "interpolation": attrs["interpolation"],
+    }
 
 
 @pytest.mark.parametrize(
@@ -411,16 +427,13 @@ def test_every_continuum_stage_uses_the_requested_kernel(
         "degrid": True,
         "correction": True,
     }
+    expected_table, *expected_options = anti_alias_kernel_arguments(expected)
     for kind in ("grid", "uv_sampling", "degrid"):
         for table, support, oversampling, interpolation in calls[kind]:
-            np.testing.assert_array_equal(table, expected.table)
-            assert (support, oversampling, interpolation) == (
-                expected.support,
-                expected.oversampling,
-                expected.interpolation_code,
-            ), kind
-    assert all(params == expected.params for params in calls["correction"])
+            np.testing.assert_array_equal(table, expected_table)
+            assert [support, oversampling, interpolation] == expected_options, kind
+    assert all(params == _params(expected) for params in calls["correction"])
     if gridding_kernel_params is None:
-        assert expected.params == DEFAULT_GRIDDING_KERNEL_PARAMS
+        assert _params(expected) == DEFAULT_GRIDDING_KERNEL_PARAMS
     elif gridding_kernel_params == {"type": "prolate_spheroidal_casa"}:
-        assert expected.params == CASA_GRIDDING_KERNEL_PARAMS
+        assert _params(expected) == CASA_GRIDDING_KERNEL_PARAMS

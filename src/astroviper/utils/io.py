@@ -690,7 +690,7 @@ def fill_zarr_restored_beams_without_fit(image_store):
     (a flagged channel, a failed fit, a skipped task) take the first beam of
     largest area of the planes with one, or a circle of 1e-6 arcsec at 0
     degrees when no plane has one
-    (:func:`~astroviper.processing_functions.imaging.restore.fill_planes_without_fit`).
+    (:func:`~astroviper.processing_functions.imaging.imaging_conclude.restore.fill_planes_without_fit`).
 
     Parameters
     ----------
@@ -699,7 +699,7 @@ def fill_zarr_restored_beams_without_fit(image_store):
     """
     import zarr
 
-    from astroviper.processing_functions.imaging.restore import (
+    from astroviper.processing_functions.imaging.imaging_conclude.restore import (
         NO_FIT_BEAM,
         fill_planes_without_fit,
     )

@@ -1,5 +1,6 @@
 """Full PSF convolution blocks retain interactions between delta components."""
 
+import importlib
 import json
 
 import numpy as np
@@ -73,6 +74,31 @@ def test_fourier_blocks_match_explicit_spatial_delta_component_matrix():
     # Its largest mode amplification agrees with the spectral norm here.
     expected_max = 1 / np.sqrt(1 - 0.5**2)
     assert result["max_order_zero_noise_amplification"] == pytest.approx(expected_max)
+
+
+@pytest.mark.parametrize("fft_backend", [None, "numpy", "scipy", "pyfftw"])
+def test_model_product_checker_hands_its_fft_backend_to_the_spatial_check(
+    monkeypatch, diagnostic_warnings, fft_backend
+):
+    """The model product checker hands the configuration's fft_backend, "numpy"
+    without one, to the spatial check, whose rfft2 calls run on one thread."""
+    fft = importlib.import_module("astroviper.processing_functions.fft")
+    calls = []
+    real = fft.rfft2
+
+    def spy(*args, **kwargs):
+        calls.append((kwargs["fft_backend"], kwargs["processing_function_threads"]))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(fft, "rfft2", spy)
+    image = make_runaway_taylor_image()
+    image.POINT_SPREAD_FUNCTION.values[0, :, 0] = coupled_psfs(size=32)
+    config = {"deconvolver": "mtmfs"}
+    if fft_backend is not None:
+        config["fft_backend"] = fft_backend
+    with diagnostic_warnings(match="Spatial Taylor-Hessian diagnostic"):
+        check_model_products(image, config, mode=CONTINUUM_SINGLE_FIELD)
+    assert calls and set(calls) == {(fft_backend or "numpy", 1)}
 
 
 def test_model_product_checker_retains_spatial_diagnostics_and_local_guards(
@@ -220,7 +246,7 @@ def test_invalid_hermitian_allowance_is_rejected(tolerance):
 def test_gridded_even_psf_passes_self_adjointness(
     diagnostic_warnings, single_precision
 ):
-    from astroviper.processing_functions.imaging.residual_update import (
+    from astroviper.processing_functions.imaging.residual_update.residual_update import (
         imaging_setup_single_field,
     )
     from tests.unit.processing_functions.imaging.test_exact_psf_subtraction import (
@@ -532,3 +558,36 @@ def test_gaussian_requires_valid_integer_extents_and_angular_cells(size, cells):
             cell_size=cells,
             precision="float64",
         )
+
+
+@pytest.mark.parametrize("fft_backend", ["numpy", "scipy", "pyfftw"])
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_each_fft_backend_transforms_the_psf_to_rounding(
+    dtype, fft_backend, monkeypatch
+):
+    """The check transforms each PSF order in the library of its fft_backend, on
+    one thread, in the precision of the PSF and within 8 eps of the peak of
+    numpy.fft's own transform."""
+    from astroviper.processing_functions import fft
+
+    rng = np.random.default_rng(7)
+    psfs = (coupled_psfs(size=64) + 1e-3 * rng.standard_normal((3, 64, 64))).astype(
+        dtype
+    )
+    calls = []
+    real = fft.rfft2
+
+    def spy(x, **kwargs):
+        result = real(x, **kwargs)
+        calls.append((x.copy(), result.copy(), kwargs))
+        return result
+
+    monkeypatch.setattr(fft, "rfft2", spy)
+    check_psf_spatial_hessian(psfs, precision="float64", fft_backend=fft_backend)
+    assert len(calls) == 3
+    for x, result, kwargs in calls:
+        assert kwargs == {"processing_function_threads": 1, "fft_backend": fft_backend}
+        expected = np.fft.rfft2(x)
+        assert result.dtype == expected.dtype
+        bound = 8 * np.finfo(dtype).eps * np.abs(expected).max()
+        assert np.abs(result - expected).max() <= bound

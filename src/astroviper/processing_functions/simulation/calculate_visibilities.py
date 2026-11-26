@@ -53,6 +53,24 @@ def _broadcast_index(n: int, size: int) -> int:
     return n if size == 1 else 1
 
 
+def _rotation_vectors(phase_center, source_ra_dec, n_time):
+    """``k_s(t)`` and ``n_s(t)`` of the module docstring, for every time and source."""
+    n_source = source_ra_dec.shape[1]
+    f_pc_time = _broadcast_index(n_time, phase_center.shape[0])
+    f_src_time = _broadcast_index(n_time, source_ra_dec.shape[0])
+    k = np.empty((n_time, n_source, 3), dtype=np.float64)
+    n = np.empty((n_time, n_source), dtype=np.float64)
+    for i_time in range(n_time):
+        pc = phase_center[i_time // f_pc_time]
+        for i_source in range(n_source):
+            rotation, lmn_rot = calculate_uvw_rotation(
+                pc, source_ra_dec[i_time // f_src_time, i_source]
+            )
+            k[i_time, i_source] = rotation @ lmn_rot
+            n[i_time, i_source] = 1.0 - lmn_rot[2]
+    return k, n
+
+
 def source_frame_uvw(uvw, frequency, phase_center_ra_dec, source_ra_dec):
     """Baseline coordinates in wavelengths, rotated into the frame of a source.
 
@@ -155,7 +173,7 @@ def calculate_visibilities(
     gaussian_source_shape : np.ndarray, [n_gaussian, 3], radians, optional
         ``[major, minor, position angle]`` FWHM shape of each Gaussian source,
         in the convention of the imaging clean beam
-        (:func:`astroviper.processing_functions.imaging.restore.elliptical_gaussian_uv_taper`).
+        (:func:`astroviper.processing_functions.imaging.imaging_conclude.restore.elliptical_gaussian_uv_taper`).
     disk_source_flux : np.ndarray, [n_disk, n_time | 1, n_frequency | 1, 4], Jy, optional
         Integrated flux of each limb-darkened disk source in the four
         instrumental correlations; singleton time/frequency axes broadcast.
@@ -198,7 +216,7 @@ def calculate_visibilities(
     multiplied by the analytic visibility of its unit-flux sky profile
     (:func:`~astroviper.processing_functions.simulation.sky_components.component_uv_response`;
     for Gaussians that is the imaging restore module's
-    :func:`~astroviper.processing_functions.imaging.restore.elliptical_gaussian_uv_taper`
+    :func:`~astroviper.processing_functions.imaging.imaging_conclude.restore.elliptical_gaussian_uv_taper`
     at ``w = 0``), so it shares the beam response, phase and kernel
     implementations of the point sources and its integrated flux equals its
     ``flux``.  All responses are evaluated at the source-frame
@@ -403,6 +421,7 @@ def _calculate_visibilities_numpy(
     chan_index = np.arange(n_chan) // f_flux_chan
     visibility = np.zeros((n_time, n_baseline, n_chan, n_pol), dtype=np.complex128)
     jones_all = np.empty((n_antenna, n_chan, 4), dtype=np.complex128)
+    k, n = _rotation_vectors(phase_center, source_ra_dec, n_time)
 
     for i_time in range(n_time):
         pa = parallactic_angle[i_time]
@@ -411,12 +430,11 @@ def _calculate_visibilities_numpy(
             pointing_t = np.broadcast_to(pointing[i_time // f_pt_time], (n_antenna, 2))
         for i_source in range(n_source):
             ra_dec = source_ra_dec[i_time // f_src_time, i_source]
-            uvw_rotation, lmn_rot = calculate_uvw_rotation(pc, ra_dec)
-            k_vector = uvw_rotation @ lmn_rot
-            phase = 2 * np.pi * (uvw[i_time] @ k_vector)  # [n_baseline]
-            fringe = np.exp(
-                1j * phase[:, None] * frequency[None, :] / SPEED_OF_LIGHT
-            ) / (1.0 - lmn_rot[2])
+            phase = 2 * np.pi * (uvw[i_time] @ k[i_time, i_source])  # [n_baseline]
+            fringe = (
+                np.exp(1j * phase[:, None] * frequency[None, :] / SPEED_OF_LIGHT)
+                / n[i_time, i_source]
+            )
 
             # Jones of every antenna at this source (grouped per beam model)
             if do_pointing:

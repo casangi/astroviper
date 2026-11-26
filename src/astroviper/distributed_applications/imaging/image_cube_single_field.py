@@ -174,7 +174,7 @@ def image_cube_single_field(
     parameters_file: str | None = None,
     *,
     input_checked: bool = False,
-):  # -> Tuple[xr.Dataset, ImagingDict]:
+):  # -> Tuple[xr.Dataset, dict]:
     """
     Create a spectral cube.
 
@@ -439,7 +439,7 @@ def image_cube_single_field(
           leaves on resolved emission in far fewer iterations, and take no
           residual below ``threshold_per_cycle``. Further keys
           (``asp_residual_component_*``) are described in
-          :func:`~astroviper.processing_functions.imaging.deconvolution.asp_clean`.
+          :func:`~astroviper.processing_functions.imaging.model_update.deconvolve.asp_clean`.
           Asp only. Default ``True``. No CASA equivalent.
         - ``asp_scale_significance`` : If ``True``, Asp measures the noise of
           the residual smoothed with each of its initial scales and, once the
@@ -473,11 +473,25 @@ def image_cube_single_field(
         for a plane the entropy or divergence stop has ended), where
         ``max_iter_remaining`` is what is left of ``max_iter``.
     gridder : str
-        The gridder to use. Default ``"anti_alias"``: convolutional gridding
-        with the anti-aliasing kernel of ``gridding_kernel_params`` (by default
-        the ``least_misfit`` kernel of support 9, oversampling 300 and linear
-        lookup), or with ``gridding_kernel_params={"type": "dft"}`` the exact
-        direct Fourier transform with the w term instead.
+        Registry name of the gridder (a key of
+        :data:`~astroviper.processing_functions.imaging.gridders.gridder_registry.GRIDDERS`):
+        ``"anti_alias"`` (the default), convolutional gridding with the
+        anti-aliasing kernel of ``gridding_kernel_params`` (by default the
+        ``least_misfit`` kernel of support 9, oversampling 300 and linear
+        lookup), or ``"direct_fourier_transform"``, which replaces the gridding
+        and the FFTs by the exact direct Fourier transform over the unpadded
+        image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. It uses no
+        kernel and no ``fft_padding``. Its cost is proportional to the samples
+        times the image pixels (30 to 40 s per residual update of 451,500
+        samples, four correlations and 160 x 160 pixels on one core), so give
+        it several ``processing_function_threads``; its results do not depend
+        on their number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        anti-alias gridder's that sum times the kernel's stencil sums.
     deconvolver : str
         Deconvolution algorithm for the model update. One of ``"hogbom"`` (C++, threaded across planes), ``"hogbom_many_threads"``
         (C++, threaded across *and* within planes -- faster when there are
@@ -536,7 +550,19 @@ def image_cube_single_field(
         writes one chunk per node task and variable.
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
-        kernels.
+        kernels. A distributed application resolves ``0`` (auto) once, before
+        its checks, to the CPUs per Dask worker thread of the host with the
+        fewest, at least 1 (1 where these are not known, as under MPI), and
+        warns when a host's worker threads times the count exceed its CPUs
+        (see
+        :func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).
+        Node tasks and processing functions do not resolve ``0``; those that
+        check the count refuse it. Given a count below 1, a C++ kernel and the
+        PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
+        and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
+        ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
+        numpy.fft takes no count: under ``"numpy"`` the Python FFTs run one
+        thread.
     overwrite : bool
         Whether to overwrite existing image. Default is False.
     memory_mode : str
@@ -557,8 +583,9 @@ def image_cube_single_field(
     vizualize_graph : bool
         Whether to vizualize the graph. Default is False.
     fft_backend : str
-        FFT backend used by the gridder normalization (``"pyfftw"`` or
-        ``"scipy"``).
+        FFT library: ``"numpy"`` (``numpy.fft``), ``"scipy"`` (``scipy.fft``) or
+        ``"pyfftw"`` (FFTW through pyFFTW). The three round differently; the C++
+        kernels' FFTs do not use it.
     restore : bool
         If ``True`` produce a restored image after deconvolution: the model
         convolved with the clean beam (the Gaussian fit to the PSF) plus the
@@ -634,20 +661,8 @@ def image_cube_single_field(
         the image kept (a support too large for the ``fft_padding``, e.g. 17
         at 1.05) is refused. The kernel of the
         former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
-        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
-        the gridding and the FFTs by the exact direct Fourier transform over the
-        unpadded image, w term included: with the phase
-        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
-        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
-        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
-        the measurement equation of ``simulate_processing_set``. Its cost is
-        proportional to the samples times the image pixels (30 to 40 s per
-        residual update of 451,500 samples, four correlations and 160 x 160
-        pixels on one core), so give it several
-        ``processing_function_threads``; its results do not depend on their
-        number. Its ``VISIBILITY_NORMALIZATION`` and
-        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
-        gridders' that sum times the kernel's stencil sums.
+        not ``"prolate_spheroidal"``. The gridder ``"direct_fourier_transform"``
+        uses no kernel: ``gridding_kernel_params`` must then be ``None``.
     primary_beam_params : dict, optional
         The primary beam of the imager, the power pattern that gives the clean
         mask and the primary beam correction: ``telescope`` (``"alma"``,
@@ -894,8 +909,8 @@ def image_cube_single_field(
         * ``"timing_node_tasks"`` is a :class:`pandas.DataFrame` with one row per
           frequency chunk and a ``T_*`` column per processing function (the
           per-node-task timings concatenated across chunks).
-        * ``"deconvolution"`` is the merged per-plane
-          :class:`~astroviper.processing_functions.imaging.utils.imaging_dict.ImagingDict`
+        * ``"deconvolution"`` is the merged per-plane ``imaging_dict``
+          (:mod:`~astroviper.processing_functions.imaging.utils.imaging_dict`)
           of convergence statistics (global channel numbering).
         * ``"image_statistics"`` is ``{image_variable_key: xarray.Dataset}``
           (``"sky_residual"``, ``"sky_restored"``, ``"sky_model"``, ... --
@@ -975,6 +990,11 @@ def image_cube_single_field(
     first (:func:`xradio.measurement_set.convert_msv2_to_processing_set`) or
     using fewer, wider tasks is faster.
     """
+    from astroviper.utils.data_partitioning import resolve_processing_function_threads
+
+    processing_function_threads = resolve_processing_function_threads(
+        processing_function_threads, compute_backend
+    )
 
     if not input_checked:
         from astroviper.processing_functions.imaging.config_check import (
@@ -1901,9 +1921,9 @@ def combine_return_data_frames(input_data, input_params):
     """Reduce per-chunk ``{"timing_node_tasks", "deconvolution"}`` results into one dict.
 
     Each node task returns a single dict with a ``"timing_node_tasks"`` one-row
-    :class:`pandas.DataFrame`, a ``"deconvolution"``
-    :class:`~astroviper.processing_functions.imaging.utils.imaging_dict.ImagingDict`
-    (already remapped to global channel numbers) and an ``"image_statistics"``
+    :class:`pandas.DataFrame`, a ``"deconvolution"`` ``imaging_dict``
+    (:mod:`~astroviper.processing_functions.imaging.utils.imaging_dict`,
+    already remapped to global channel numbers) and an ``"image_statistics"``
     ``{image_variable_key: xarray.Dataset}`` of per-plane statistics for its
     channel chunk. This reducer concatenates the timing frames (one row per
     chunk), merges the per-chunk deconvolution dicts with
@@ -1929,7 +1949,7 @@ def combine_return_data_frames(input_data, input_params):
     Returns
     -------
     dict
-        ``{"timing_node_tasks": pandas.DataFrame, "deconvolution": ImagingDict,
+        ``{"timing_node_tasks": pandas.DataFrame, "deconvolution": dict,
         "image_statistics": dict, "timing_reduce_nodes": list}``, and
         ``"find_continuum_first_round"`` when an input has it.
     """

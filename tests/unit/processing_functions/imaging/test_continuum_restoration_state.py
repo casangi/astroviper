@@ -11,7 +11,7 @@ from astroviper.processing_functions.imaging.image_continuum_single_field import
     fit_mfs_primary_beam_taylor,
     make_mvc_taylor_normal_equation_contributions,
 )
-from astroviper.processing_functions.imaging.imaging_setup_continuum_single_field import (
+from astroviper.processing_functions.imaging.imaging_setup.imaging_setup import (
     _convert_primary_beam_to_reference_frequency,
 )
 from tests.unit.processing_functions.imaging.test_continuum_contracts import _mvc_inputs

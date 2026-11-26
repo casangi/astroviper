@@ -8,7 +8,7 @@ import pytest
 from astroviper.processing_functions.imaging.config_check._gridding import (
     check_gridding_kernel_parameters,
 )
-from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
     CASA_GRIDDING_KERNEL_PARAMS,
     DEFAULT_GRIDDING_KERNEL_PARAMS,
     resolve_gridding_kernel_params,
@@ -33,7 +33,6 @@ from astroviper.processing_functions.imaging.gridding_convolution_functions.grid
             {"type": "exponential_semicircle"},
             {**DEFAULT_GRIDDING_KERNEL_PARAMS, "type": "exponential_semicircle"},
         ),
-        ({"type": "dft"}, {"type": "dft"}),
     ],
 )
 def test_recipe_defaults_and_overrides_preserve_caller_input(recipe, expected):
@@ -61,6 +60,7 @@ def test_recipe_defaults_and_overrides_preserve_caller_input(recipe, expected):
         {"type": "dft", "unknown": True},
         {"support": False},
         {"oversampling": False},
+        {"type": "dft"},
     ],
 )
 def test_explicit_invalid_values_are_rejected_by_both_boundaries(recipe):

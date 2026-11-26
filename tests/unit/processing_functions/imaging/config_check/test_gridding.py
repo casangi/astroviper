@@ -35,7 +35,7 @@ def test_kernel_recipe_rejected_before_grid(params, padding):
 
 
 def test_kernel_design_reuses_production_cache():
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
         _make_gridding_kernel,
         make_gridding_kernel,
     )

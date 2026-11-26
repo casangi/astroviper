@@ -24,13 +24,13 @@ from astroviper.distributed_applications.imaging.image_cube_single_field import 
 from astroviper.processing_functions.imaging.utils import (
     IMAGING_TIMING_PHASES,
     IMAGING_TIMING_TOTAL_KEY,
-    ImagingDict,
+    add_to_imaging_dict,
 )
 from astroviper.utils.timing import format_timing_summary, node_task_timing_table
 
 
 def _make_chunk_result(task_id, t_load, t_deconvolve, t_total, chan):
-    """One node-task-shaped result: a one-row timing frame + a ImagingDict.
+    """One node-task-shaped result: a one-row timing frame + an imaging_dict.
 
     The frame carries the string ``hostname`` column the real node task adds for
     straggler grouping, so the reduce/summary paths are exercised against the
@@ -49,8 +49,10 @@ def _make_chunk_result(task_id, t_load, t_deconvolve, t_total, chan):
             }
         ]
     )
-    deconvolve = ImagingDict()
-    deconvolve.add({"peakres": 1.0, "iter_done": 5}, time=0, pol=0, chan=chan)
+    deconvolve = {}
+    add_to_imaging_dict(
+        deconvolve, {"peakres": 1.0, "iter_done": 5}, time=0, pol=0, chan=chan
+    )
     return {"timing_node_tasks": timing_df, "deconvolution": deconvolve}
 
 
@@ -75,7 +77,7 @@ def test_combine_return_data_frames_uses_timing_node_tasks_key():
     assert sorted(combined_timing["task_id"].tolist()) == [0, 1]
 
     # The merged deconvolution dict covers both chunks' channels.
-    merged_chans = {key.chan for key in combined["deconvolution"].data}
+    merged_chans = {key.chan for key in combined["deconvolution"]}
     assert merged_chans == {0, 1}
 
 

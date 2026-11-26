@@ -107,13 +107,13 @@ def test_iteration_history_and_auto_max_cycles_reach_the_result(
         point_source_ps, tmp_path / "cube.img.zarr", CYCLE_CONTROL_PARAMS
     )
     record = result["deconvolution"]
-    assert {(key.chan, key.pol) for key in record.data} == {
+    assert {(key.chan, key.pol) for key in record} == {
         (0, 0),
         (0, 1),
         (1, 0),
         (1, 1),
     }
-    for key, entry in record.data.items():
+    for key, entry in record.items():
         for field in ITERATION_HISTORY_FIELDS:
             assert [len(cycle) for cycle in entry[field]] == entry["iter_done"]
         if key.pol == 0:  # Stokes I: cleaned to the threshold within its limit

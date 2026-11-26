@@ -14,7 +14,7 @@ from astroviper.processing_functions.imaging.config_check.param_check_model_upda
 from astroviper.processing_functions.imaging.image_continuum_single_field import (
     model_update_mtmfs_single_field,
 )
-from astroviper.processing_functions.imaging.model_update import (
+from astroviper.processing_functions.imaging.model_update.model_update import (
     model_update_cube_single_field,
 )
 from astroviper.utils.clean_mask import install_clean_mask

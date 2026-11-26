@@ -9,7 +9,7 @@ import xarray as xr
 from astroviper.processing_functions.imaging.image_continuum_single_field import (
     _continuum_frequency_coord,
 )
-from astroviper.processing_functions.imaging.imaging_setup_continuum_single_field import (
+from astroviper.processing_functions.imaging.imaging_setup.imaging_setup import (
     _attach_continuum_metadata,
     _validate_continuum_parameters,
 )

@@ -143,7 +143,7 @@ def test_task_resource_usage_capacity_line_and_titles():
     assert axes["io"].get_title() == (
         "Node-Task I/O (2 hosts; syscall-level, counts network filesystems)"
     )
-    # pft <= 0 means hardware concurrency: no per-task line (C4)
+    # no per-task line for a count below 1 or None (C4)
     for threads in (0, None):
         axes = plot_task_resource_usage(
             df,

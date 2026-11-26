@@ -1,0 +1,172 @@
+from astroviper.utils.param_docs import shares_param_docs
+
+
+@shares_param_docs
+def model_update_cube_single_field(
+    img_xds,
+    deconvolver,
+    deconvolve_params,
+    model_exists,
+    processing_function_threads=1,
+    image_data_group_in_name="residual",
+    image_data_group_out_name="model",
+    *,
+    input_checked: bool = False,
+):
+    """Run one model update: build a mask and deconvolve.
+
+    Ensures a primary-beam mask exists on the input data group, then runs the
+    configured deconvolver (Hogbom or Asp CLEAN) which updates the sky model in
+    place and returns per-plane convergence statistics.
+
+    Parameters
+    ----------
+    img_xds : xarray.Dataset
+        Image dataset holding the residual image (input data group) and the sky
+        model (output data group).  Modified in place.
+    deconvolver : str
+        Deconvolution algorithm for the model update. One of ``"hogbom"`` (C++, threaded across planes), ``"hogbom_many_threads"``
+        (C++, threaded across *and* within planes -- faster when there are
+        few planes, e.g. single-channel imaging) or ``"asp"``.
+    deconvolve_params : dict
+        Per-cycle deconvolution / iteration control parameters passed straight
+        to the deconvolver: ``gain``, the absolute ``threshold`` (floor) and
+        the per-plane ``max_iter_per_cycle_updated`` and ``threshold_per_cycle``
+        arrays computed by cycle control.  ``max_iter_divergence`` (default
+        1, ``-1`` disables its two limits) is the divergence test of the
+        deconvolvers: a plane stops its model update when the RMS of its
+        residual inside the mask has been above ``(1 + gain / 10)`` times the
+        lowest RMS reached for that many iterations in a row or, for Hogbom,
+        at once when the peak exceeds ``(1 + gain)`` times the peak at the
+        start of the model update (Asp has no peak limit and allows
+        ``(1 + gain)`` times the lowest RMS). An infinite peak always stops
+        it.  ``record_iteration_history`` (default ``False``) records every
+        component, with the peak residual before it, the residual RMS and the
+        model flux after it (see
+        :func:`~astroviper.processing_functions.imaging.model_update.deconvolve.hogbom_clean`).
+        ``exact_psf_subtraction`` (default ``False``; Hogbom only) subtracts
+        with ``subtraction_psf_cube``, the PSF of twice the image size (see
+        :func:`~astroviper.processing_functions.imaging.model_update.deconvolve.deconvolve`).
+        The
+        separate ``primary_beam_limit`` builds the primary-beam mask (a
+        chunk-independent quantity, so the mask does not depend on how the cube
+        was split across tasks); it is distinct from the deconvolver
+        ``threshold``.
+    model_exists : bool
+        ``False`` on the first model update (no model yet), ``True`` afterwards.
+        Currently informational.
+    processing_function_threads : int, optional
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels. A distributed application resolves ``0`` (auto) once, before
+        its checks, to the CPUs per Dask worker thread of the host with the
+        fewest, at least 1 (1 where these are not known, as under MPI), and
+        warns when a host's worker threads times the count exceed its CPUs
+        (see
+        :func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).
+        Node tasks and processing functions do not resolve ``0``; those that
+        check the count refuse it. Given a count below 1, a C++ kernel and the
+        PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
+        and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
+        ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
+        numpy.fft takes no count: under ``"numpy"`` the Python FFTs run one
+        thread.
+    image_data_group_in_name : str, optional
+        Key in the image's ``data_groups`` whose ``"sky"`` (and, optionally,
+        ``"mask"``) roles name the input data variables.  Datasets without
+        data groups fall back to the conventional ``"SKY"`` variable.
+    image_data_group_out_name : str, optional
+        Data group that the updated sky model is registered under.  Default
+        ``"model"``.
+
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
+    Returns
+    -------
+    imaging_dict : dict
+        Per-plane deconvolution statistics for this cycle. Every plane
+        carries the reason the deconvolver ended its model update as the
+        model update stop code (iteration control: ``MODEL_UPDATE_*`` of
+        :mod:`~astroviper.processing_functions.imaging.utils.cycle_control`).
+        With ``record_iteration_history`` every plane also carries its
+        iteration history (``ITERATION_HISTORY_FIELDS``).
+    return_df : pandas.DataFrame
+        One-row timing frame with the ``T_make_mask`` and ``T_deconvolve``
+        columns.
+    """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CUBE_SINGLE_FIELD,
+            check_model_update,
+        )
+
+        check_model_update(locals(), mode=CUBE_SINGLE_FIELD)
+
+    import time
+
+    import pandas as pd
+
+    from astroviper.processing_functions.image_analysis.make_mask import make_mask
+    from astroviper.processing_functions.imaging.config_check._common import (
+        CUBE_SINGLE_FIELD,
+    )
+    from astroviper.processing_functions.imaging.config_check.param_check_model_update import (
+        check_model_products,
+    )
+    from astroviper.processing_functions.imaging.model_update.deconvolve import (
+        _validate_deconvolve_params,
+        deconvolve,
+    )
+
+    product_diagnostics = check_model_products(
+        img_xds,
+        {"deconvolver": deconvolver, "deconvolve_params": deconvolve_params},
+        mode=CUBE_SINGLE_FIELD,
+        image_data_group_in_name=image_data_group_in_name,
+        image_data_group_out_name=image_data_group_out_name,
+    )
+    img_xds.attrs.setdefault("input_validation", {})["model_products"] = (
+        product_diagnostics
+    )
+
+    # Apply deconvolve-parameter defaults (e.g. ``primary_beam_limit``) up front
+    # so both the mask step below and the deconvolver see a complete dict.
+    deconvolve_params = _validate_deconvolve_params(
+        deconvolve_params, input_checked=True
+    )
+
+    # Add a primary-beam mask to the input data group if one is not present yet.
+    T_make_mask = 0.0
+    mask_name = img_xds.attrs["data_groups"][image_data_group_in_name].get("mask", None)
+    if mask_name is None:
+        start = time.time()
+        make_mask(
+            img_xds,
+            primary_beam_limit=deconvolve_params["primary_beam_limit"],
+            image_data_group_in_name=image_data_group_in_name,
+            image_data_group_out_name=image_data_group_in_name,
+            combine_mask=False,
+            overwrite=False,
+        )
+        T_make_mask = time.time() - start
+
+    start = time.time()
+    imaging_dict = deconvolve(
+        img_xds=img_xds,
+        algorithm=deconvolver,
+        deconvolve_params=deconvolve_params,
+        image_data_group_in_name=image_data_group_in_name,
+        image_data_group_out_name=image_data_group_out_name,
+        processing_function_threads=processing_function_threads,
+        input_checked=True,
+    )
+    T_deconvolve = time.time() - start
+
+    return_df = pd.DataFrame(
+        {"T_make_mask": [T_make_mask], "T_deconvolve": [T_deconvolve]}
+    )
+
+    return imaging_dict, return_df

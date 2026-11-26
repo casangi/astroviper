@@ -14,7 +14,10 @@
         },
         "imaging_weights_params": { "required": true, "type": ["dict"] },
         "cycle_control_params": { "required": true, "type": ["dict"] },
-        "gridder": { "type": ["str"], "allowed": ["anti_alias"] },
+        "gridder": {
+            "type": ["str"],
+            "allowed": ["anti_alias", "direct_fourier_transform"]
+        },
         "deconvolver": {
             "type": ["str"],
             "allowed": ["hogbom", "asp", "mtmfs"]
@@ -66,7 +69,7 @@
         "clear_cache": { "type": "boolean" },
         "vizualize_graph": { "type": "boolean" },
         "disk_chunk_sizes": { "type": ["dict", "str"], "nullable": true },
-        "fft_backend": { "type": ["str"], "allowed": ["pyfftw", "scipy"] },
+        "fft_backend": { "type": ["str"], "allowed": ["numpy", "pyfftw", "scipy"] },
         "restore": { "type": "boolean" },
         "restoration_output": {
             "type": ["str"],

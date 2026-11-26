@@ -8,8 +8,13 @@ import pytest
 
 
 def _case(kind):
-    from astroviper.processing_functions.imaging.deconvolvers import aspclean, hogbom
-    from astroviper.processing_functions.imaging.deconvolvers.mtmfs import _mtmfs_ext
+    from astroviper.processing_functions.imaging.model_update.deconvolvers import (
+        aspclean,
+        hogbom,
+    )
+    from astroviper.processing_functions.imaging.model_update.deconvolvers.mtmfs import (
+        _mtmfs_ext,
+    )
     from tests.unit.processing_functions.test_serialized_buffers import (
         _case as serialized_case,
     )
@@ -81,13 +86,13 @@ def _case(kind):
             beams=np.zeros((1, 3)),
         )
     if kind.startswith("weight_"):
-        from tests.unit.processing_functions.imaging.imaging_weighting.test_grid_imaging_weights_cpp import (
+        from tests.unit.processing_functions.imaging.imaging_setup.imaging_weighting.test_grid_imaging_weights_cpp import (
             _binding_validation_case,
         )
 
         return _binding_validation_case(kind == "weight_degrid", np.float64)
     if kind.startswith("aa_"):
-        from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
+        from astroviper.processing_functions.imaging.gridders.anti_alias.anti_alias_grid_cpp import (
             anti_alias_degrid,
             anti_alias_grid,
             anti_alias_grid_uv_sampling,
@@ -102,7 +107,7 @@ def _case(kind):
             "aa_degrid": anti_alias_degrid,
         }[kind], kwargs
     if kind.startswith("dft_"):
-        from astroviper.processing_functions.imaging.gridders.direct_fourier_transform_cpp import (
+        from astroviper.processing_functions.imaging.gridders.direct_fourier_transform.direct_fourier_transform_cpp import (
             dft_image,
             dft_image_uv_sampling,
             dft_predict,

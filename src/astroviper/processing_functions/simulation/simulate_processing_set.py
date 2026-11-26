@@ -38,6 +38,7 @@ def _sky_image_visibilities(
     pointing_ra_dec,
     w_term,
     processing_function_threads,
+    fft_backend,
 ):
     """Visibilities of ``sky_image`` through the one beam of every antenna."""
     from astroviper.processing_functions.simulation.antenna_beams import (
@@ -77,6 +78,7 @@ def _sky_image_visibilities(
         gridding_kernel_params=predict.get("gridding_kernel_params"),
         fft_padding=predict.get("fft_padding", 1.2),
         processing_function_threads=processing_function_threads,
+        fft_backend=fft_backend,
     )
 
 
@@ -118,6 +120,7 @@ def simulate_processing_set(
     sky_components: list | None = None,
     sky_model_image: xr.Dataset | None = None,
     sky_model_image_predict: dict | None = None,
+    fft_backend: str = "pyfftw",
 ) -> tuple[xr.Dataset, dict]:
     """Simulate the visibilities of a sky of analytic components for a block of times and channels.
 
@@ -156,7 +159,7 @@ def simulate_processing_set(
     gaussian_source_shape : np.ndarray, [n_gaussian, 3], radians, optional
         ``[major, minor, position angle]`` FWHM shape of each Gaussian source, in
         the imaging clean-beam convention
-        (:func:`astroviper.processing_functions.imaging.restore.elliptical_gaussian_uv_taper`).
+        (:func:`astroviper.processing_functions.imaging.imaging_conclude.restore.elliptical_gaussian_uv_taper`).
     disk_source_flux : np.ndarray, [n_disk, n_time | 1, n_frequency | 1, 4], Jy, optional
         Integrated flux of each limb-darkened disk source in the four
         instrumental correlations; singleton time/frequency axes broadcast.
@@ -239,7 +242,19 @@ def simulate_processing_set(
         Astropy frame of all right ascension / declination inputs (``"icrs"`` or ``"fk5"``).
     processing_function_threads : int
         Number of threads handed to the per-processing-function (C++ / FFT)
-        kernels.
+        kernels. A distributed application resolves ``0`` (auto) once, before
+        its checks, to the CPUs per Dask worker thread of the host with the
+        fewest, at least 1 (1 where these are not known, as under MPI), and
+        warns when a host's worker threads times the count exceed its CPUs
+        (see
+        :func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).
+        Node tasks and processing functions do not resolve ``0``; those that
+        check the count refuse it. Given a count below 1, a C++ kernel and the
+        PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
+        and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
+        ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
+        numpy.fft takes no count: under ``"numpy"`` the Python FFTs run one
+        thread.
     implementation : {"numpy", "cpp"}
         Visibility kernel implementation: ``"cpp"`` (multithreaded C++, default) or
         ``"numpy"`` (vectorised NumPy reference).
@@ -268,6 +283,10 @@ def simulate_processing_set(
         ``{"predict": "gridded", "gridding_kernel_params": ...,
         "fft_padding": 1.2}``, FFT and degridding with an anti-aliasing kernel,
         which has no w term and so needs ``uvw_params["w_term"]`` False.
+    fft_backend : {"numpy", "scipy", "pyfftw"}, default "pyfftw"
+        FFT library: ``"numpy"`` (``numpy.fft``), ``"scipy"`` (``scipy.fft``) or
+        ``"pyfftw"`` (FFTW through pyFFTW). The three round differently; the C++
+        kernels' FFTs do not use it.
 
     Returns
     -------
@@ -319,6 +338,7 @@ def simulate_processing_set(
         site_position,
         params,
         direction_frame,
+        fft_backend=fft_backend,
     )
     packed_models = pack_beam_models(evaluated_models)
     timing["T_beams"] = _time.time() - start
@@ -367,6 +387,7 @@ def simulate_processing_set(
             pointing_ra_dec,
             uvw_params["w_term"],
             processing_function_threads,
+            fft_backend,
         )
         timing["T_sky_image"] = _time.time() - start
 

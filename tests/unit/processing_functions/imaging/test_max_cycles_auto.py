@@ -17,6 +17,7 @@ made after every residual update on the residual it has just made.
 
 import copy
 import importlib
+import sys
 
 import numpy as np
 import pytest
@@ -37,10 +38,15 @@ from astroviper.processing_functions.imaging.utils.cycle_control import (
     MODEL_UPDATE_DIVERGENCE,
     MODEL_UPDATE_MAX_ITER_PER_CYCLE,
     MODEL_UPDATE_THRESHOLD_PER_CYCLE,
-    CycleController,
     StopCode,
+    check_convergence,
     format_imaging_dict,
+    make_cycle_control_state,
+    record_model_update,
     resolve_auto_max_cycles,
+    resolve_max_cycles,
+    update_counts,
+    update_parameters,
     validate_max_cycles,
 )
 from astroviper.processing_functions.imaging.utils.cycle_control_heuristics import (
@@ -50,8 +56,8 @@ from astroviper.processing_functions.imaging.utils.cycle_control_heuristics impo
 )
 from astroviper.processing_functions.imaging.utils.imaging_dict import (
     ITERATION_HISTORY_FIELDS,
-    ImagingDict,
     Key,
+    add_to_imaging_dict,
     imaging_dict_to_dataframe,
 )
 
@@ -59,9 +65,10 @@ from astroviper.processing_functions.imaging.utils.imaging_dict import (
 def _dirty_record(planes):
     """Statistics of a dirty image: ``{(time, chan, pol): (peak, sidelobe,
     masksum)}``, as :func:`build_residual_imaging_dict` records them."""
-    record = ImagingDict()
+    record = {}
     for (tt, nn, pp), (peak, sidelobe, masksum) in planes.items():
-        record.add(
+        add_to_imaging_dict(
+            record,
             {
                 "peakres": peak,
                 "peakres_nomask": peak,
@@ -78,7 +85,7 @@ def _dirty_record(planes):
 
 
 def _controller(threshold=0.0, **kw):
-    return CycleController(
+    return make_cycle_control_state(
         max_iter=1000,
         max_cycles="auto",
         threshold=threshold,
@@ -100,13 +107,13 @@ class TestValidation:
     )
     def test_accepted(self, value):
         assert validate_max_cycles(value) == value
-        assert CycleController(max_cycles=value).max_cycles == value
+        assert make_cycle_control_state(max_cycles=value)["max_cycles"] == value
 
     @pytest.mark.parametrize("value", [5.0, np.float64(5), np.float32(5), np.int64(5)])
     def test_a_number_becomes_an_int(self, value):
         for resolved in (
             validate_max_cycles(value),
-            CycleController(max_cycles=value).max_cycles,
+            make_cycle_control_state(max_cycles=value)["max_cycles"],
         ):
             assert resolved == 5
             assert type(resolved) is int
@@ -133,31 +140,34 @@ class TestValidation:
         with pytest.raises(ValueError, match='integer >= -1 or "auto"'):
             validate_max_cycles(value)
         with pytest.raises(ValueError, match="max_cycles"):
-            CycleController(max_cycles=value)
+            make_cycle_control_state(max_cycles=value)
 
     def test_auto_needs_a_psf_fraction_below_one(self):
         with pytest.raises(ValueError, match="max_psf_fraction below 1"):
             validate_max_cycles("auto", 1.0)
         with pytest.raises(ValueError, match="max_psf_fraction below 1"):
-            CycleController(max_cycles="auto", max_psf_fraction=1.0)
+            make_cycle_control_state(max_cycles="auto", max_psf_fraction=1.0)
         assert validate_max_cycles("auto", 0.8) == "auto"
         # a number keeps accepting it
         assert validate_max_cycles(3, 1.0) == 3
-        assert CycleController(max_cycles=3, max_psf_fraction=1.0).max_cycles == 3
+        assert (
+            make_cycle_control_state(max_cycles=3, max_psf_fraction=1.0)["max_cycles"]
+            == 3
+        )
 
     def test_update_parameters(self):
-        controller = CycleController(max_cycles=4)
-        assert controller.update_parameters(max_cycles=6.0) == (0, "")
-        assert controller.max_cycles == 6
-        assert type(controller.max_cycles) is int
-        code, message = controller.update_parameters(max_cycles="auto")
+        controller = make_cycle_control_state(max_cycles=4)
+        assert update_parameters(controller, max_cycles=6.0) == (0, "")
+        assert controller["max_cycles"] == 6
+        assert type(controller["max_cycles"]) is int
+        code, message = update_parameters(controller, max_cycles="auto")
         assert code == -1
         assert "given when the controller is created" in message
         for value in (2.7, True, -2, "5"):
-            code, message = controller.update_parameters(max_cycles=value)
+            code, message = update_parameters(controller, max_cycles=value)
             assert code == -1
             assert message.startswith("max_cycles must be an integer >= -1")
-        assert controller.max_cycles == 6
+        assert controller["max_cycles"] == 6
 
 
 # ---------------------------------------------------------------------------
@@ -171,9 +181,9 @@ class TestResolveMaxCycles:
         record = _dirty_record({(0, 0, 0): (1.0, 0.2, 100)})
         expected = predicted_imaging_cycles(1.0, 0.01, 0.2) + EXTRA_CYCLES
         assert expected == 3 + EXTRA_CYCLES
-        assert controller.resolve_max_cycles(record) == expected
-        assert controller.max_cycles == expected
-        assert controller.max_cycles_auto == {(0, 0, 0): expected}
+        assert resolve_max_cycles(controller, record) == expected
+        assert controller["max_cycles"] == expected
+        assert controller["max_cycles_auto"] == {(0, 0, 0): expected}
 
     def test_noise_reference(self):
         controller = _controller(threshold=0.0)
@@ -181,25 +191,25 @@ class TestResolveMaxCycles:
         noise = np.full((1, 1, 1), 1e-3)
         expected = NOISY_CYCLE_SAFETY * predicted_imaging_cycles(1.0, 1e-3, 0.2)
         assert expected == NOISY_CYCLE_SAFETY * 5
-        assert controller.resolve_max_cycles(record, sensitivity=noise) == expected
+        assert resolve_max_cycles(controller, record, sensitivity=noise) == expected
 
     def test_psf_fraction_is_clamped(self):
         # sidelobe 0.9 -> f = max_psf_fraction = 0.8; sidelobe 0.01 -> 0.05
         for sidelobe, fraction in ((0.9, 0.8), (0.01, 0.05)):
             controller = _controller(threshold=0.01)
-            controller.resolve_max_cycles(
-                _dirty_record({(0, 0, 0): (1.0, sidelobe, 100)})
+            resolve_max_cycles(
+                controller, _dirty_record({(0, 0, 0): (1.0, sidelobe, 100)})
             )
-            assert controller.max_cycles == (
+            assert controller["max_cycles"] == (
                 predicted_imaging_cycles(1.0, 0.01, fraction) + EXTRA_CYCLES
             )
 
     def test_zero_psf_fraction_is_one_cycle(self):
-        controller = CycleController(
+        controller = make_cycle_control_state(
             max_cycles="auto", threshold=0.01, min_psf_fraction=0.0
         )
-        controller.resolve_max_cycles(_dirty_record({(0, 0, 0): (1.0, 0.0, 100)}))
-        assert controller.max_cycles == 1 + EXTRA_CYCLES
+        resolve_max_cycles(controller, _dirty_record({(0, 0, 0): (1.0, 0.0, 100)}))
+        assert controller["max_cycles"] == 1 + EXTRA_CYCLES
 
     def test_largest_limit_of_the_planes(self):
         """Per plane threshold: Stokes I against its threshold, Stokes Q
@@ -212,9 +222,9 @@ class TestResolveMaxCycles:
         limit_i = predicted_imaging_cycles(1.0, 0.01, 0.2) + EXTRA_CYCLES
         limit_q = NOISY_CYCLE_SAFETY * predicted_imaging_cycles(0.05, 1e-5, 0.2)
         assert limit_q > limit_i
-        controller.resolve_max_cycles(record, sensitivity=noise)
-        assert controller.max_cycles == limit_q
-        assert controller.max_cycles_auto == {(0, 0, 0): limit_i, (0, 0, 1): limit_q}
+        resolve_max_cycles(controller, record, sensitivity=noise)
+        assert controller["max_cycles"] == limit_q
+        assert controller["max_cycles_auto"] == {(0, 0, 0): limit_i, (0, 0, 1): limit_q}
 
     def test_planes_without_a_prediction_are_left_out(self):
         controller = _controller(threshold=0.0)
@@ -228,79 +238,98 @@ class TestResolveMaxCycles:
         )
         noise = np.array([[[1e-3, 1e-3, 1e-3, np.inf]]])
         pixels = np.array([[[100, 0, 100, 100]]])
-        controller.resolve_max_cycles(record, sensitivity=noise, mask_pixels=pixels)
+        resolve_max_cycles(controller, record, sensitivity=noise, mask_pixels=pixels)
         expected = NOISY_CYCLE_SAFETY * predicted_imaging_cycles(1.0, 1e-3, 0.2)
-        assert controller.max_cycles == expected
-        assert controller.max_cycles_auto == {
+        assert controller["max_cycles"] == expected
+        assert controller["max_cycles_auto"] == {
             (0, 0, 0): expected,
             (0, 0, 1): None,
             (0, 0, 2): None,
             (0, 0, 3): None,
         }
 
+    def test_a_psf_fraction_that_is_not_a_number_is_left_out(self):
+        # max(NaN, min_psf_fraction) is NaN: the brighter plane is left out
+        controller = _controller(threshold=0.01)
+        record = _dirty_record(
+            {(0, 0, 0): (1.0, 0.2, 100), (0, 0, 1): (100.0, np.nan, 100)}
+        )
+        resolve_max_cycles(controller, record)
+        expected = predicted_imaging_cycles(1.0, 0.01, 0.2) + EXTRA_CYCLES
+        assert controller["max_cycles"] == expected
+        assert controller["max_cycles_auto"] == {(0, 0, 0): expected, (0, 0, 1): None}
+
     def test_masksum_of_the_record_without_mask_pixels(self):
         controller = _controller(threshold=0.01)
-        controller.resolve_max_cycles(
-            _dirty_record({(0, 0, 0): (1.0, 0.2, 0), (0, 0, 1): (0.5, 0.2, 10)})
+        resolve_max_cycles(
+            controller,
+            _dirty_record({(0, 0, 0): (1.0, 0.2, 0), (0, 0, 1): (0.5, 0.2, 10)}),
         )
-        assert controller.max_cycles_auto[(0, 0, 0)] is None
-        assert controller.max_cycles == (
+        assert controller["max_cycles_auto"][(0, 0, 0)] is None
+        assert controller["max_cycles"] == (
             predicted_imaging_cycles(0.5, 0.01, 0.2) + EXTRA_CYCLES
         )
 
     def test_no_plane_with_a_prediction_gives_one_cycle(self):
         controller = _controller(threshold=0.0)
-        controller.resolve_max_cycles(_dirty_record({(0, 0, 0): (1.0, 0.2, 100)}))
-        assert controller.max_cycles == 1
-        assert controller.max_cycles_auto == {(0, 0, 0): None}
+        resolve_max_cycles(controller, _dirty_record({(0, 0, 0): (1.0, 0.2, 100)}))
+        assert controller["max_cycles"] == 1
+        assert controller["max_cycles_auto"] == {(0, 0, 0): None}
 
     def test_a_number_is_left_alone(self):
-        controller = CycleController(max_cycles=4, threshold=0.01)
+        controller = make_cycle_control_state(max_cycles=4, threshold=0.01)
         assert (
-            controller.resolve_max_cycles(_dirty_record({(0, 0, 0): (1, 0.2, 9)})) == 4
+            resolve_max_cycles(controller, _dirty_record({(0, 0, 0): (1, 0.2, 9)})) == 4
         )
-        assert controller.max_cycles_auto is None
+        assert controller["max_cycles_auto"] is None
 
     def test_counts_down_like_a_number(self):
         controller = _controller(threshold=0.01)
         record = _dirty_record({(0, 0, 0): (1.0, 0.2, 100)})
-        limit = controller.resolve_max_cycles(record)
-        model_update = ImagingDict()
-        model_update.add(
-            {"peakres": 0.5, "masksum": 100, "iter_done": 10}, time=0, pol=0, chan=0
+        limit = resolve_max_cycles(controller, record)
+        model_update = {}
+        add_to_imaging_dict(
+            model_update,
+            {"peakres": 0.5, "masksum": 100, "iter_done": 10},
+            time=0,
+            pol=0,
+            chan=0,
         )
         n_model_updates = 0
         while True:
-            stopcode, _ = controller.check_convergence(record)
+            stopcode, _ = check_convergence(controller, record)
             if stopcode.imaging != IMAGING_CONTINUE:
                 break
             n_model_updates += 1
-            controller.update_counts(model_update)
-            controller.record_model_update(model_update)
+            update_counts(controller, model_update)
+            record_model_update(controller, model_update)
         assert stopcode.imaging == IMAGING_MAX_CYCLES
         assert n_model_updates == limit
 
     def test_checks_stamp_the_limit_of_the_plane(self):
         controller = _controller(threshold=0.01)
         record = _dirty_record({(0, 0, 0): (1.0, 0.2, 100), (0, 0, 1): (0.0, 0.2, 9)})
-        controller.resolve_max_cycles(record)
-        controller.check_convergence(record)
-        assert record.data[Key(time=0, pol=0, chan=0)]["max_cycles_auto"] == (
-            controller.max_cycles
+        resolve_max_cycles(controller, record)
+        check_convergence(controller, record)
+        assert (
+            record[Key(time=0, pol=0, chan=0)]["max_cycles_auto"]
+            == controller["max_cycles"]
         )
-        assert record.data[Key(time=0, pol=1, chan=0)]["max_cycles_auto"] is None
+        assert record[Key(time=0, pol=1, chan=0)]["max_cycles_auto"] is None
 
     def test_a_number_stamps_nothing(self):
         record = _dirty_record({(0, 0, 0): (1.0, 0.2, 100)})
-        CycleController(max_cycles=3, threshold=0.01).check_convergence(record)
-        assert "max_cycles_auto" not in record.data[Key(time=0, pol=0, chan=0)]
+        check_convergence(
+            make_cycle_control_state(max_cycles=3, threshold=0.01), record
+        )
+        assert "max_cycles_auto" not in record[Key(time=0, pol=0, chan=0)]
 
     def test_unresolved_auto_is_refused(self):
         record = _dirty_record({(0, 0, 0): (1.0, 0.2, 100)})
         with pytest.raises(ValueError, match="not resolved"):
-            _controller().check_convergence(record)
+            check_convergence(_controller(), record)
         with pytest.raises(ValueError, match="not resolved"):
-            _controller().update_counts(record)
+            update_counts(_controller(), record)
 
 
 # ---------------------------------------------------------------------------
@@ -354,7 +383,7 @@ NOISE = 1e-3
 def _weighted_processing_set(xds, noise=NOISE):
     """:func:`_processing_set` (absolute weights) with the natural imaging
     weights the imaging setup adds to its data group."""
-    from astroviper.processing_functions.imaging.calculate_imaging_weights import (
+    from astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.calculate_imaging_weights import (
         calculate_imaging_weights,
     )
 
@@ -408,13 +437,16 @@ class TestResolveAutoMaxCycles:
         data_groups = copy.deepcopy(xds.attrs["data_groups"])
         ms_xds = ps_xdt["ms_0"].to_dataset().copy(deep=True)
         levels = []
-        resolve = CycleController.resolve_max_cycles
+        cycle_control = importlib.import_module(
+            "astroviper.processing_functions.imaging.utils.cycle_control"
+        )
+        resolve = cycle_control.resolve_max_cycles
 
         def spy(controller, imaging_dict, sensitivity=None, mask_pixels=None):
             levels.append(sensitivity)
             return resolve(controller, imaging_dict, sensitivity, mask_pixels)
 
-        monkeypatch.setattr(CycleController, "resolve_max_cycles", spy)
+        monkeypatch.setattr(cycle_control, "resolve_max_cycles", spy)
         controller, limit = self._resolve(xds, ps_xdt)
         (level,) = levels
         statistics = calculate_weight_statistics_single_field(ps_xdt, xds, "base")
@@ -424,9 +456,9 @@ class TestResolveAutoMaxCycles:
         expected = NOISY_CYCLE_SAFETY * predicted_imaging_cycles(
             25.0, _sensitivity(), 0.2
         )
-        assert limit == controller.max_cycles == expected
+        assert limit == controller["max_cycles"] == expected
         # plane 1 has no pixel at or above the cutoff: left out
-        assert controller.max_cycles_auto == {(0, 0, 0): expected, (0, 0, 1): None}
+        assert controller["max_cycles_auto"] == {(0, 0, 0): expected, (0, 0, 1): None}
         # neither the dataset nor the processing set is modified
         assert "MASK" not in xds
         assert xds.attrs["data_groups"] == data_groups
@@ -441,7 +473,7 @@ class TestResolveAutoMaxCycles:
         peaks = np.abs(xds["SKY_RESIDUAL"].values[0, 0, :, 3:8, 4:16]).max(
             axis=(-2, -1)
         )
-        assert controller.max_cycles_auto == {
+        assert controller["max_cycles_auto"] == {
             (0, 0, pol): NOISY_CYCLE_SAFETY
             * predicted_imaging_cycles(peaks[pol], _sensitivity(), 0.2)
             for pol in range(2)
@@ -453,19 +485,19 @@ class TestResolveAutoMaxCycles:
         wholly below the primary beam cutoff (no processing set needed)."""
         xds, _ = _dirty_dataset()
         controller, _ = self._resolve(xds, None, threshold=0.5)
-        assert controller.max_cycles == (
+        assert controller["max_cycles"] == (
             predicted_imaging_cycles(25.0, 0.5, 0.2) + EXTRA_CYCLES
         )
         controller, _ = self._resolve(xds, None, threshold=[0.5, 0.0])
-        assert controller.max_cycles_auto == {
+        assert controller["max_cycles_auto"] == {
             (0, 0, 0): predicted_imaging_cycles(25.0, 0.5, 0.2) + EXTRA_CYCLES,
             (0, 0, 1): None,
         }
 
     def test_a_number_is_left_alone(self):
         xds, _ = _dirty_dataset()
-        controller = CycleController(max_cycles=2)
-        assert resolve_auto_max_cycles(controller, ImagingDict(), None, xds, {}) == 2
+        controller = make_cycle_control_state(max_cycles=2)
+        assert resolve_auto_max_cycles(controller, {}, None, xds, {}) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -546,6 +578,7 @@ def _image(
     restore=False,
     gridding_kernel_params=None,
     auto_mask_params=None,
+    fft_backend="scipy",
     **visibilities,
 ):
     from xradio.image import make_empty_sky_image
@@ -584,7 +617,7 @@ def _image(
         processing_set_data_group_name="base",
         deconvolver=deconvolver,
         single_precision_image=False,
-        fft_backend="scipy",
+        fft_backend=fft_backend,
         image_data_variables_keep=["sky_residual", "sky_model"],
         restore=restore,
         gridding_kernel_params=gridding_kernel_params,
@@ -593,6 +626,57 @@ def _image(
 
 
 STOKES_I, STOKES_Q = Key(time=0, pol=0, chan=0), Key(time=0, pol=1, chan=0)
+
+
+class TestFftBackend:
+    """The processing function hands its fft_backend to the FFT module."""
+
+    FUNCTIONS = ("fft2", "ifft2", "rfft2", "irfft2", "ifft", "irfft", "set_workers")
+
+    @classmethod
+    def backends(cls, monkeypatch, fft_backend, **arguments):
+        """(calling module, function, fft_backend) of every call of FUNCTIONS,
+        the FFT module's functions that take fft_backend."""
+        module = importlib.import_module("astroviper.processing_functions.fft")
+        seen = set()
+
+        def spy_of(name, real):
+            def spy(*args, **kwargs):
+                caller = sys._getframe(1).f_globals["__name__"].rsplit(".", 1)[-1]
+                seen.add((caller, name, kwargs["fft_backend"]))
+                return real(*args, **kwargs)
+
+            return spy
+
+        for name in cls.FUNCTIONS:
+            monkeypatch.setattr(module, name, spy_of(name, getattr(module, name)))
+        _image({"max_cycles": 2}, fft_backend=fft_backend, **arguments)
+        return seen
+
+    @pytest.mark.parametrize("fft_backend", ["numpy", "scipy", "pyfftw"])
+    def test_the_restore(self, monkeypatch, fft_backend):
+        """Every call of FUNCTIONS in a run that restores carries the
+        processing function's fft_backend; their callers are the gridder
+        normalization and the restore."""
+        seen = self.backends(monkeypatch, fft_backend, restore=True)
+        assert {backend for _, _, backend in seen} == {fft_backend}
+        assert {caller for caller, _, _ in seen} == {"normalize_image", "restore"}
+        restore = {name for caller, name, _ in seen if caller == "restore"}
+        assert restore == {"rfft2", "ifft", "irfft"}
+
+    @pytest.mark.parametrize("fft_backend", ["numpy", "scipy", "pyfftw"])
+    def test_the_automatic_mask(self, monkeypatch, fft_backend):
+        """Every call of FUNCTIONS in a run with the automatic mask carries
+        the processing function's fft_backend; their callers are the
+        gridder normalization and the mask."""
+        seen = self.backends(monkeypatch, fft_backend, auto_mask_params={})
+        assert {backend for _, _, backend in seen} == {fft_backend}
+        assert {caller for caller, _, _ in seen} == {
+            "normalize_image",
+            "make_auto_mask",
+        }
+        mask = {name for caller, name, _ in seen if caller == "make_auto_mask"}
+        assert mask == {"set_workers", "rfft2", "irfft2"}
 
 
 class TestAutoMaskFlag:
@@ -648,7 +732,7 @@ class TestAutoMaskFlag:
 class TestImagingCycleLoop:
     def test_stops_on_the_threshold_within_the_limit(self):
         _, timing, record = _image({"max_cycles": "auto", "threshold": 0.01})
-        stokes_i = record.data[STOKES_I]
+        stokes_i = record[STOKES_I]
         limit = stokes_i["max_cycles_auto"]
         p0 = abs(stokes_i["start_peakres"][0])
         fraction = stokes_i["max_psf_sidelobe"]  # inside the clamp here
@@ -658,7 +742,7 @@ class TestImagingCycleLoop:
         assert len(stokes_i["iter_done"]) == timing["n_cycles"].iloc[0] + 1
         assert timing["n_cycles"].iloc[0] <= limit
         # the empty Stokes Q plane has nothing to predict
-        assert record.data[STOKES_Q]["max_cycles_auto"] is None
+        assert record[STOKES_Q]["max_cycles_auto"] is None
 
     def test_the_limit_binds(self):
         """A model update of two iterations cannot keep up with the
@@ -666,7 +750,7 @@ class TestImagingCycleLoop:
         _, timing, record = _image(
             {"max_cycles": "auto", "threshold": 0.001, "max_iter_per_cycle": 2}
         )
-        stokes_i = record.data[STOKES_I]
+        stokes_i = record[STOKES_I]
         assert stokes_i["stop_code"].imaging == IMAGING_MAX_CYCLES
         assert len(stokes_i["iter_done"]) == timing["n_cycles"].iloc[0] + 1
         assert timing["n_cycles"].iloc[0] == stokes_i["max_cycles_auto"]
@@ -676,7 +760,7 @@ class TestImagingCycleLoop:
         the stop code of the deconvolver next to the imaging stop code."""
         _, timing, record = _image({"max_cycles": 3, "max_iter_per_cycle": 2})
         assert timing["n_cycles"].iloc[0] == 3
-        assert record.data[STOKES_I]["stop_code"] == StopCode(
+        assert record[STOKES_I]["stop_code"] == StopCode(
             IMAGING_MAX_CYCLES, MODEL_UPDATE_MAX_ITER_PER_CYCLE
         )
 
@@ -695,7 +779,7 @@ class TestImagingCycleLoop:
         _, timing, record = _image({"max_cycles": "auto"}, noise=noise)
         limits = []
         for key in (STOKES_I, STOKES_Q):
-            entry = record.data[key]
+            entry = record[key]
             limits.append(entry["max_cycles_auto"])
             assert limits[-1] == NOISY_CYCLE_SAFETY * predicted_imaging_cycles(
                 abs(entry["start_peakres"][0]),
@@ -717,7 +801,7 @@ class TestImagingCycleLoop:
             n_antenna=n_antenna,
             n_time=n_time,
         )
-        stokes_i = record.data[STOKES_I]
+        stokes_i = record[STOKES_I]
         sensitivity = _sensitivity(noise, n_antenna, n_time)
         assert stokes_i["max_cycles_auto"] == (
             NOISY_CYCLE_SAFETY
@@ -733,7 +817,7 @@ class TestImagingCycleLoop:
 
     def test_a_number_adds_no_field(self):
         _, _, record = _image({"max_cycles": 2, "threshold": 0.01})
-        for entry in record.data.values():
+        for entry in record.values():
             assert "max_cycles_auto" not in entry
             for field in ITERATION_HISTORY_FIELDS:
                 assert field not in entry
@@ -744,13 +828,13 @@ class TestImagingCycleLoop:
         img_on, _, record_on = _image({**params, "record_iteration_history": True})
         for name in ("SKY_RESIDUAL", "SKY_MODEL"):
             np.testing.assert_array_equal(img_on[name].values, img_off[name].values)
-        for key, entry in record_on.data.items():
-            assert entry["iter_done"] == record_off.data[key]["iter_done"]
+        for key, entry in record_on.items():
+            assert entry["iter_done"] == record_off[key]["iter_done"]
             for field in ITERATION_HISTORY_FIELDS:
                 assert [len(cycle) for cycle in entry[field]] == entry["iter_done"]
         # the peaks a model update cleaned start at the peak it started from;
         # the closing stop test ran no iteration
-        stokes_i = record_on.data[STOKES_I]
+        stokes_i = record_on[STOKES_I]
         *histories, closing = stokes_i["iteration_peak_residual"]
         assert closing.shape == (0,)
         for start_peak, peaks in zip(stokes_i["start_peakres"], histories, strict=True):
@@ -758,7 +842,7 @@ class TestImagingCycleLoop:
 
     def test_cycle_without_model_update_has_an_empty_history(self):
         _, _, record = _image({"max_cycles": 0, "record_iteration_history": True})
-        for entry in record.data.values():
+        for entry in record.values():
             assert entry["iter_done"] == [0]
             for field in ITERATION_HISTORY_FIELDS:
                 (history,) = entry[field]
@@ -768,7 +852,7 @@ class TestImagingCycleLoop:
         params = {"max_cycles": 3, "threshold": 0.01, "record_iteration_history": True}
         img, _, record = _image(params, deconvolver="asp")
         cleaned = 0
-        for key, entry in record.data.items():
+        for key, entry in record.items():
             n_updates = len(entry["start_peakres"])
             assert n_updates > 0
             n_components = [
@@ -796,7 +880,7 @@ class TestImagingCycleLoop:
         threshold of its cycle; a model update also those of the residual it
         started from, which are those of the stop test before it."""
         _, _, record = _image({"max_cycles": 3, "threshold": 0.01})
-        for entry in record.data.values():
+        for entry in record.values():
             n_entries = len(entry["iter_done"])
             n_updates = len(entry["start_peakres"])
             for field in (*RESIDUAL_STATISTICS, "t_residual_update", "entropy"):
@@ -817,7 +901,7 @@ class TestImagingCycleLoop:
                 entry["model_flux"][:n_updates],
                 rtol=1e-9,
             )
-        stokes_i = record.data[STOKES_I]
+        stokes_i = record[STOKES_I]
         # the dirty image against the residual left
         assert stokes_i["start_rms_in_mask"][0] > stokes_i["rms_in_mask"][-1] > 0
 
@@ -837,10 +921,12 @@ def _spy_on_the_loop(monkeypatch, on_record=None, on_model_update=None):
     import importlib
 
     imaging = "astroviper.processing_functions.imaging"
-    residual_update = importlib.import_module(f"{imaging}.residual_update")
-    model_update = importlib.import_module(f"{imaging}.model_update")
+    residual_update = importlib.import_module(
+        f"{imaging}.residual_update.residual_update"
+    )
+    model_update = importlib.import_module(f"{imaging}.model_update.model_update")
     utils = importlib.import_module(f"{imaging}.utils")
-    restore = importlib.import_module(f"{imaging}.restore")
+    restore = importlib.import_module(f"{imaging}.imaging_conclude.restore")
     original_ru = residual_update.residual_update_cube_single_field
     original_record = utils.build_residual_imaging_dict
     original_mu = model_update.model_update_cube_single_field
@@ -888,17 +974,17 @@ def _masked_peak(img_xds, pol=0):
 
 
 def _diverged(imaging_dict):
-    for entry in imaging_dict.data.values():
+    for entry in imaging_dict.values():
         entry["stop_code"] = StopCode(IMAGING_CONTINUE, MODEL_UPDATE_DIVERGENCE)
 
 
 def _entropy_falls(record, n):
-    for entry in record.data.values():
+    for entry in record.values():
         entry["entropy"] = [5.0 if n == 0 else 4.0]
 
 
 def _blank_mask(record, n):
-    for entry in record.data.values():
+    for entry in record.values():
         entry["masksum"] = [0]
 
 
@@ -908,7 +994,7 @@ class TestTheStopTestIsOnTheFreshResidual:
 
     def test_the_model_updates_own_peak_does_not_stop_the_imaging(self, monkeypatch):
         def converged(imaging_dict):
-            for entry in imaging_dict.data.values():
+            for entry in imaging_dict.values():
                 entry["peakres"] = [0.0]
                 entry["stop_code"] = StopCode(
                     IMAGING_CONTINUE, MODEL_UPDATE_THRESHOLD_PER_CYCLE
@@ -918,7 +1004,7 @@ class TestTheStopTestIsOnTheFreshResidual:
         img, timing, record = _image(
             {"threshold": 0.01, "max_iter_per_cycle": 5, "max_cycles": 3}
         )
-        stokes_i = record.data[STOKES_I]
+        stokes_i = record[STOKES_I]
         assert stokes_i["stop_code"] == StopCode(
             IMAGING_MAX_CYCLES, MODEL_UPDATE_THRESHOLD_PER_CYCLE
         )
@@ -980,7 +1066,7 @@ class TestTheStopTestIsOnTheFreshResidual:
         n_mu = seen["events"].count("MU")
         assert seen["events"].count("RU") == len(seen["records"]) == n_mu + 1
         assert timing["n_cycles"].iloc[0] == n_mu
-        stokes_i = record.data[STOKES_I]
+        stokes_i = record[STOKES_I]
         assert len(stokes_i["iter_done"]) == n_mu + 1
         assert stokes_i["iter_done"][-1] == 0
         assert (imaging_dict_to_dataframe(record).n_cycles == n_mu).all()
@@ -1016,17 +1102,17 @@ class TestTheStopTestIsOnTheFreshResidual:
 
         def just_above(record, n):
             if n == 1:
-                record.data[STOKES_I]["peakres"] = [peak]
+                record[STOKES_I]["peakres"] = [peak]
 
         def target(imaging_dict):
-            targets.append(imaging_dict.data[STOKES_I]["threshold_per_cycle"][0])
+            targets.append(imaging_dict[STOKES_I]["threshold_per_cycle"][0])
 
         seen = _spy_on_the_loop(
             monkeypatch, on_record=just_above, on_model_update=target
         )
         _, timing, record = _image({"threshold": 0.01, **tolerance})
         n_cycles = timing["n_cycles"].iloc[0]
-        assert record.data[STOKES_I]["stop_code"].imaging == IMAGING_THRESHOLD
+        assert record[STOKES_I]["stop_code"].imaging == IMAGING_THRESHOLD
         assert len(seen["records"]) == n_cycles + 1
         if stops:
             assert n_cycles == 1
@@ -1046,14 +1132,14 @@ class TestTheStopTestIsOnTheFreshResidual:
 
         def i_within_q_above(record, n):
             if n == 1:
-                record.data[STOKES_I]["peakres"] = [0.012]
-                record.data[STOKES_Q]["peakres"] = [1.0]
+                record[STOKES_I]["peakres"] = [0.012]
+                record[STOKES_Q]["peakres"] = [1.0]
 
         _spy_on_the_loop(
             monkeypatch, on_record=i_within_q_above, on_model_update=updates.append
         )
         _image({"threshold": 0.01, "threshold_tolerance": tau, "max_iter_per_cycle": 5})
-        stokes_i = updates[1].data[STOKES_I]
+        stokes_i = updates[1][STOKES_I]
         assert abs(stokes_i["start_peakres"][0]) > stokes_i["threshold_per_cycle"][0]
         assert stokes_i["iter_done"] == [iterations]
 
@@ -1069,8 +1155,8 @@ class TestTheStopTestIsOnTheFreshResidual:
         np.testing.assert_array_equal(img["SKY_MODEL"].values, seen["models"][-1])
         # every model update starts from the peak its stop test saw, and the
         # record closes with the peak of the residual written
-        stokes_i = record.data[STOKES_I]
-        tested = [rd.data[STOKES_I]["peakres"][0] for rd in seen["records"]]
+        stokes_i = record[STOKES_I]
+        tested = [rd[STOKES_I]["peakres"][0] for rd in seen["records"]]
         assert [abs(peak) for peak in stokes_i["start_peakres"]] == tested[:-1]
         assert stokes_i["peakres"][-1] == tested[-1] == _masked_peak(img)
 
@@ -1084,7 +1170,7 @@ class TestThePerCycleThresholdOfTheFreshResidual:
         used = []
 
         def spy(imaging_dict):
-            entry = imaging_dict.data[STOKES_I]
+            entry = imaging_dict[STOKES_I]
             used.append((entry["threshold_per_cycle"][0], entry["peakres"][0]))
             if on_model_update is not None:
                 on_model_update(imaging_dict)
@@ -1098,9 +1184,9 @@ class TestThePerCycleThresholdOfTheFreshResidual:
             {"max_cycles": 3, "max_iter_per_cycle": 5, "threshold": 1e-6},
             gridding_kernel_params={"type": "prolate_spheroidal_casa"},
         )
-        stokes_i = record.data[STOKES_I]
+        stokes_i = record[STOKES_I]
         fraction = stokes_i["max_psf_sidelobe"]  # inside the clamp here
-        tested = [rd.data[STOKES_I]["peakres"][0] for rd in seen["records"]]
+        tested = [rd[STOKES_I]["peakres"][0] for rd in seen["records"]]
         expected = [fraction * peak for peak in tested[:-1]]
         return used, tested, expected, stokes_i
 
@@ -1116,7 +1202,7 @@ class TestThePerCycleThresholdOfTheFreshResidual:
 
     def test_a_diverged_model_update_leaves_a_finite_threshold(self, monkeypatch):
         def diverged_to_infinity(imaging_dict):
-            for entry in imaging_dict.data.values():
+            for entry in imaging_dict.values():
                 entry["peakres"] = [np.inf]
                 entry["stop_code"] = StopCode(IMAGING_CONTINUE, MODEL_UPDATE_DIVERGENCE)
 
@@ -1141,13 +1227,13 @@ class TestTheRecordOfTheStopTest:
         xds, inside = _dirty_dataset()
         data_groups = copy.deepcopy(xds.attrs["data_groups"])
         record = build_residual_imaging_dict(xds, "residual", self.PARAMS)
-        stokes_i = record.data[STOKES_I]
+        stokes_i = record[STOKES_I]
         assert stokes_i["peakres"] == [25.0]
         assert stokes_i["peakres_nomask"] == [100.0]
         assert stokes_i["masksum"] == [int(inside.sum())]
         # plane 1 lies wholly below the cutoff
-        assert record.data[STOKES_Q]["peakres"] == [0.0]
-        assert record.data[STOKES_Q]["masksum"] == [0]
+        assert record[STOKES_Q]["peakres"] == [0.0]
+        assert record[STOKES_Q]["masksum"] == [0]
         assert "MASK" not in xds
         assert xds.attrs["data_groups"] == data_groups
 
@@ -1182,7 +1268,5 @@ class TestTheRecordOfTheStopTest:
         record = build_residual_imaging_dict(xds, "residual", self.PARAMS)
         residual = xds["SKY_RESIDUAL"].values[0, 0]
         for pol, key in enumerate((STOKES_I, STOKES_Q)):
-            assert record.data[key]["peakres"] == [
-                np.abs(residual[pol, 3:8, 4:16]).max()
-            ]
-            assert record.data[key]["masksum"] == [5 * 12]
+            assert record[key]["peakres"] == [np.abs(residual[pol, 3:8, 4:16]).max()]
+            assert record[key]["masksum"] == [5 * 12]

@@ -754,6 +754,7 @@ def _resolve_continuum_append_configuration(input_params, *, input_checked=False
             "residual",
         ),
         "gridding_kernel_params": input_params.get("gridding_kernel_params"),
+        "gridder": input_params.get("gridder", "anti_alias"),
     }
 
 
@@ -1129,6 +1130,7 @@ def residual_update_continuum_single_field(
     *,
     input_checked: bool = False,
     calculate_auto_sensitivity: bool = False,
+    gridder="anti_alias",
 ):
     """Compute one frequency chunk's continuum products in memory.
 
@@ -1151,9 +1153,9 @@ def residual_update_continuum_single_field(
     - ``UV_SAMPLING``;
     - ``UV_SAMPLING_NORMALIZATION``;
 
-    or, with the direct Fourier transform (``gridding_kernel_params={"type":
-    "dft"}``), the unnormalised Taylor images ``SKY_RESIDUAL`` and
-    ``POINT_SPREAD_FUNCTION`` in place of the two grids.
+    or, with the direct Fourier transform
+    (``gridder="direct_fourier_transform"``), the unnormalised Taylor images
+    ``SKY_RESIDUAL`` and ``POINT_SPREAD_FUNCTION`` in place of the two grids.
 
     MVC instead returns ``MVC_RESIDUAL_TAYLOR_NUMERATOR``,
     ``MVC_RESIDUAL_WEIGHT_SUM`` and, in the first imaging cycle for
@@ -1279,11 +1281,24 @@ def residual_update_continuum_single_field(
 
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
-        kernels.
+        kernels. A distributed application resolves ``0`` (auto) once, before
+        its checks, to the CPUs per Dask worker thread of the host with the
+        fewest, at least 1 (1 where these are not known, as under MPI), and
+        warns when a host's worker threads times the count exceed its CPUs
+        (see
+        :func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).
+        Node tasks and processing functions do not resolve ``0``; those that
+        check the count refuse it. Given a count below 1, a C++ kernel and the
+        PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
+        and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
+        ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
+        numpy.fft takes no count: under ``"numpy"`` the Python FFTs run one
+        thread.
 
     fft_backend : str, optional
-        FFT backend used by the gridder normalization (``"pyfftw"`` or
-        ``"scipy"``).
+        FFT library: ``"numpy"`` (``numpy.fft``), ``"scipy"`` (``scipy.fft``) or
+        ``"pyfftw"`` (FFTW through pyFFTW). The three round differently; the C++
+        kernels' FFTs do not use it.
 
     image_data_variables_keep : list of str, optional
         Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
@@ -1410,20 +1425,8 @@ def residual_update_continuum_single_field(
         the image kept (a support too large for the ``fft_padding``, e.g. 17
         at 1.05) is refused. The kernel of the
         former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
-        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
-        the gridding and the FFTs by the exact direct Fourier transform over the
-        unpadded image, w term included: with the phase
-        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
-        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
-        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
-        the measurement equation of ``simulate_processing_set``. Its cost is
-        proportional to the samples times the image pixels (30 to 40 s per
-        residual update of 451,500 samples, four correlations and 160 x 160
-        pixels on one core), so give it several
-        ``processing_function_threads``; its results do not depend on their
-        number. Its ``VISIBILITY_NORMALIZATION`` and
-        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
-        gridders' that sum times the kernel's stencil sums.
+        not ``"prolate_spheroidal"``. The gridder ``"direct_fourier_transform"``
+        uses no kernel: ``gridding_kernel_params`` must then be ``None``.
 
     input_checked : bool, optional
         Skip configuration checks already performed by the calling layer.
@@ -1435,6 +1438,26 @@ def residual_update_continuum_single_field(
         On the first cycle, return additive weight statistics for automatic
         cycle limits with zero threshold. Uses loaded weights, not visibility
         or UVW data; no driver preflight scan is performed.
+    gridder : str, optional
+        Registry name of the gridder (a key of
+        :data:`~astroviper.processing_functions.imaging.gridders.gridder_registry.GRIDDERS`):
+        ``"anti_alias"`` (the default), convolutional gridding with the
+        anti-aliasing kernel of ``gridding_kernel_params`` (by default the
+        ``least_misfit`` kernel of support 9, oversampling 300 and linear
+        lookup), or ``"direct_fourier_transform"``, which replaces the gridding
+        and the FFTs by the exact direct Fourier transform over the unpadded
+        image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. It uses no
+        kernel and no ``fft_padding``. Its cost is proportional to the samples
+        times the image pixels (30 to 40 s per residual update of 451,500
+        samples, four correlations and 160 x 160 pixels on one core), so give
+        it several ``processing_function_threads``; its results do not depend
+        on their number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        anti-alias gridder's that sum times the kernel's stencil sums.
 
     Returns
     -------
@@ -1716,6 +1739,7 @@ def residual_update_continuum_single_field(
         mvc_model_update_approximation=mvc_model_update_approximation,
         gridding_kernel_params=gridding_kernel_params,
         input_checked=True,
+        gridder=gridder,
     )
 
     auto_weight_sums = None
@@ -1986,7 +2010,19 @@ def grid_imaging_weight_density_continuum_node(
         Use single-precision density-grid storage when true.
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
-        kernels.
+        kernels. A distributed application resolves ``0`` (auto) once, before
+        its checks, to the CPUs per Dask worker thread of the host with the
+        fewest, at least 1 (1 where these are not known, as under MPI), and
+        warns when a host's worker threads times the count exceed its CPUs
+        (see
+        :func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).
+        Node tasks and processing functions do not resolve ``0``; those that
+        check the count refuse it. Given a count below 1, a C++ kernel and the
+        PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
+        and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
+        ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
+        numpy.fft takes no count: under ``"numpy"`` the Python FFTs run one
+        thread.
     io_engine : {"chunk", "xradio"}, optional
         I/O engine of the node tasks. ``"chunk"`` reads and writes Zarr chunk
         blobs (and FITS data blocks) directly by byte offset
@@ -2045,7 +2081,7 @@ def grid_imaging_weight_density_continuum_node(
     import toolviper.utils.logger as logger
     from xradio.image import make_empty_sky_image
 
-    from astroviper.processing_functions.imaging.calculate_imaging_weights import (
+    from astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.calculate_imaging_weights import (
         grid_imaging_weight_density_continuum,
     )
     from astroviper.processing_functions.imaging.utils.imaging_polarization import (
@@ -2306,7 +2342,19 @@ def degrid_imaging_weights_continuum_node(
         is used only if none of its loaded correlations is flagged.
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
-        kernels.
+        kernels. A distributed application resolves ``0`` (auto) once, before
+        its checks, to the CPUs per Dask worker thread of the host with the
+        fewest, at least 1 (1 where these are not known, as under MPI), and
+        warns when a host's worker threads times the count exceed its CPUs
+        (see
+        :func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).
+        Node tasks and processing functions do not resolve ``0``; those that
+        check the count refuse it. Given a count below 1, a C++ kernel and the
+        PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
+        and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
+        ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
+        numpy.fft takes no count: under ``"numpy"`` the Python FFTs run one
+        thread.
     weight_memory_mode : {"in_memory", "in_place"}, optional
         Storage policy for calculated continuum imaging weights.
         ``"in_memory"``
@@ -2369,7 +2417,7 @@ def degrid_imaging_weights_continuum_node(
     import xarray as xr
     from xradio.image import make_empty_sky_image
 
-    from astroviper.processing_functions.imaging.calculate_imaging_weights import (
+    from astroviper.processing_functions.imaging.imaging_setup.imaging_weighting.calculate_imaging_weights import (
         degrid_imaging_weights_continuum,
     )
     from astroviper.processing_functions.imaging.utils.imaging_polarization import (
@@ -2594,7 +2642,7 @@ def _prepare_continuum_image(
     For ``continuum_mode='mfs'``, the reduced visibility grids already represent
     Taylor residual terms. They are inverse Fourier-transformed directly into
     ``SKY_RESIDUAL(taylor_term)``. With the direct Fourier transform
-    (``gridding_kernel_params={"type": "dft"}``) the reduced residual and PSF
+    (``gridder="direct_fourier_transform"``) the reduced residual and PSF
     are already Taylor images and are only divided by their normalization.
 
     For ``continuum_mode='mvc'``, map tasks have already normalized and inverse
@@ -2651,14 +2699,10 @@ def _prepare_continuum_image(
     from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
         transform_polarization_basis,
     )
-    from astroviper.processing_functions.imaging.direct_fourier_transform import (
-        normalize_dft_image,
+    from astroviper.processing_functions.imaging.gridders.gridder_registry import (
+        GRIDDERS,
     )
-    from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
-        ifft_norm_img_xds,
-    )
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-        is_direct_fourier_transform,
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.anti_alias_term import (
         make_gridding_kernel,
     )
     from astroviper.processing_functions.imaging.image_continuum_single_field import (
@@ -2688,17 +2732,17 @@ def _prepare_continuum_image(
     # With the direct Fourier transform the MFS map tasks returned the sums of
     # the Taylor images themselves, which are only normalised here.
     residual_output_name = "SKY_RESIDUAL"
-    direct_fourier_transform = is_direct_fourier_transform(
-        config["gridding_kernel_params"]
-    )
+    gridder = config["gridder"]
 
-    if continuum_mode == "mfs" and direct_fourier_transform:
-        normalize_dft_image(img_xds, image_data_group_name, uv_sampling=False)
-    elif continuum_mode == "mfs":
-        gridding_kernel = make_gridding_kernel(
-            config["gridding_kernel_params"], image_params["fft_padding"]
+    if continuum_mode == "mfs":
+        gridding_kernel = (
+            make_gridding_kernel(
+                config["gridding_kernel_params"], image_params["fft_padding"]
+            )
+            if "anti_alias" in GRIDDERS[gridder].gcf_terms
+            else None
         )
-        img_xds = ifft_norm_img_xds(
+        img_xds = GRIDDERS[gridder].uv_to_image(
             img_xds,
             image_params=image_params,
             image_data_group_in_name=image_data_group_name,
@@ -2706,11 +2750,12 @@ def _prepare_continuum_image(
             image_data_group_out_modified={
                 "sky": residual_output_name,
             },
+            overwrite=True,
             image_data_variables_keep=config["image_data_variables_keep"],
             processing_function_threads=config["processing_function_threads"],
             fft_backend=config["fft_backend"],
             complex_dtype=config["complex_dtype"],
-            gridding_kernel=gridding_kernel,
+            gcf_xds=gridding_kernel,
         )
 
     if continuum_mode == "mfs" and residual_output_name not in img_xds:
@@ -2882,10 +2927,8 @@ def _prepare_continuum_image(
     # ------------------------------------------------------------------
 
     if initialize_static_products:
-        if continuum_mode == "mfs" and direct_fourier_transform:
-            normalize_dft_image(img_xds, image_data_group_name, uv_sampling=True)
-        elif continuum_mode == "mfs":
-            img_xds = ifft_norm_img_xds(
+        if continuum_mode == "mfs":
+            img_xds = GRIDDERS[gridder].uv_to_image(
                 img_xds,
                 image_params=image_params,
                 image_data_group_in_name=image_data_group_name,
@@ -2893,11 +2936,12 @@ def _prepare_continuum_image(
                 image_data_group_out_modified={
                     "point_spread_function": "POINT_SPREAD_FUNCTION",
                 },
+                overwrite=True,
                 image_data_variables_keep=config["image_data_variables_keep"],
                 processing_function_threads=config["processing_function_threads"],
                 fft_backend=config["fft_backend"],
                 complex_dtype=config["complex_dtype"],
-                gridding_kernel=gridding_kernel,
+                gcf_xds=gridding_kernel,
             )
 
         # register name of data group
@@ -3210,6 +3254,7 @@ def _prepare_post_update_continuum_model_state(
             fft_backend=input_params.get("fft_backend", "pyfftw"),
             gridding_kernel_params=input_params.get("gridding_kernel_params"),
             input_checked=input_checked or input_params.get("input_checked", False),
+            gridder=input_params.get("gridder", "anti_alias"),
         )
     elif continuum_mode == "mvc":
         model_uv_xds = None
@@ -3217,32 +3262,35 @@ def _prepare_post_update_continuum_model_state(
     return model_xds, model_uv_xds
 
 
-def _stop_codes_after_model_update(controller, deconvolution):
+def _stop_codes_after_model_update(cycle_control_state, deconvolution):
     """Imaging stop codes of the residual each plane's model update ended with.
 
-    The cycle controller decides on the residual of the next residual update
+    Cycle control decides on the residual of the next residual update
     and only books a model update (``record_model_update``), so after the
-    model update its ``stop_code_imaging`` still holds the codes of the check
+    model update ``stop_code_imaging`` still holds the codes of the check
     before it. The plain-step planes are chosen before the next residual
-    exists, so the controller's stop test is made, on a copy, on the
+    exists, so the stop test is made, on a copy of the state, on the
     deconvolver's own residual: the latest ``peakres`` and ``masksum`` in
     ``deconvolution``, with the budgets and the no progress and divergence
     runs the model update has booked. The entropy is not followed, as that
-    test belongs to the residual of a residual update. Neither ``controller``
-    nor ``deconvolution`` changes. Returns a ``(time, polarization)`` array.
+    test belongs to the residual of a residual update. Neither
+    ``cycle_control_state`` nor ``deconvolution`` changes. Returns a
+    ``(time, polarization)`` array.
     """
     import copy
 
-    probe = copy.deepcopy(controller)
-    probe.entropy_stop = False
-    probe.check_convergence(copy.deepcopy(deconvolution))
-    return probe.stop_code_imaging[:, 0, :]
+    from astroviper.processing_functions.imaging.utils import check_convergence
+
+    probe = copy.deepcopy(cycle_control_state)
+    probe["entropy_stop"] = False
+    check_convergence(probe, copy.deepcopy(deconvolution))
+    return probe["stop_code_imaging"][:, 0, :]
 
 
 def _accelerate_continuum_model_increment(
     model_update_xds,
     residual_before_model_update,
-    controller,
+    cycle_control_state,
     deconvolution,
     input_params,
 ):
@@ -3251,7 +3299,7 @@ def _accelerate_continuum_model_increment(
     The model update added its components to the previous model
     (``input_params["model_xds"]``, none in the first imaging cycle) in place;
     its increment is its model minus that model, positionally.
-    The plain increment is taken where the controller's stop test, made on
+    The plain increment is taken where the cycle control stop test, made on
     the residual the model update ended with
     (:func:`_stop_codes_after_model_update`), would stop a plane: by the
     conjugate gradient on planes whose residual is below the global
@@ -3263,7 +3311,7 @@ def _accelerate_continuum_model_increment(
     import numpy as np
     import xarray as xr
 
-    from astroviper.processing_functions.imaging.cycle_acceleration import (
+    from astroviper.processing_functions.imaging.model_update.cycle_acceleration import (
         conjugate_gradient_model_step,
         nesterov_momentum_model_step,
     )
@@ -3273,10 +3321,10 @@ def _accelerate_continuum_model_increment(
     )
 
     stop_codes = xr.DataArray(
-        _stop_codes_after_model_update(controller, deconvolution),
+        _stop_codes_after_model_update(cycle_control_state, deconvolution),
         dims=("time", "polarization"),
     )
-    entropy_followed = np.isfinite(controller.max_entropy[:, 0, :])
+    entropy_followed = np.isfinite(cycle_control_state["max_entropy"][:, 0, :])
     state_xds = input_params.get("cycle_acceleration_state_xds")
     model_increment = model_update_xds["SKY_MODEL"]
     previous_model_xds = input_params.get("model_xds")
@@ -3345,7 +3393,7 @@ def _book_accelerated_model_flux(deconvolve_dict, model_step, previous_model_xds
         model = model + taylor_term_zero(previous_model_xds["SKY_MODEL"])
     model_flux_by_sign = cube_flux_by_sign(model)
 
-    for key, fields in deconvolve_dict.data.items():
+    for key, fields in deconvolve_dict.items():
         model_flux = fields.get("model_flux")
         start_model_flux = fields.get("start_model_flux")
         if model_flux is None or start_model_flux is None:
@@ -3646,7 +3694,7 @@ def continuum_cycle_append_node(
             threshold_per_cycle = np.full(
                 previous_state["planes_stopped"].shape, np.inf
             )
-            for key, fields in input_params["deconvolution"].data.items():
+            for key, fields in input_params["deconvolution"].items():
                 threshold_per_cycle[key.time, key.chan, key.pol] = fields[
                     "threshold_per_cycle"
                 ][-1]
@@ -3665,6 +3713,7 @@ def continuum_cycle_append_node(
             ),
             image_data_group_in_name=image_data_group_name,
             image_data_group_out_name=image_data_group_name,
+            fft_backend=input_params.get("fft_backend", "pyfftw"),
             input_checked=True,
         )
         T_auto_mask = time.time() - start
@@ -3673,15 +3722,15 @@ def continuum_cycle_append_node(
     model_update_input_params.pop("static_xds", None)
 
     # A residual-update reduce has no deconvolution work of its own, but keeps
-    # the result schema stable by returning an empty ImagingDict. Do not let
+    # the result schema stable by returning an empty imaging_dict. Do not let
     # that placeholder hide the history supplied by the previous model update.
     reduced_deconvolution = input_data.get("deconvolution")
     previous_deconvolution = input_params.get("deconvolution")
     if (
         reduced_deconvolution is not None
-        and not reduced_deconvolution.data
+        and not reduced_deconvolution
         and previous_deconvolution is not None
-        and previous_deconvolution.data
+        and previous_deconvolution
     ):
         input_data["deconvolution"] = previous_deconvolution
 
@@ -3719,7 +3768,7 @@ def continuum_cycle_append_node(
                 _accelerate_continuum_model_increment(
                     model_update_xds,
                     residual_before_model_update,
-                    return_dict["controller"],
+                    return_dict["cycle_control_state"],
                     return_dict["deconvolution"],
                     input_params,
                 )
@@ -3933,6 +3982,7 @@ def continuum_finalize_node(
             restoring_beam=input_params.get("restoring_beam"),
             continuum_mode=continuum_mode,
             input_checked=True,
+            fft_backend=input_params.get("fft_backend", "pyfftw"),
         )
 
         input_data["timing_restore"] = restore_timing_df.reset_index(drop=True)
@@ -3969,8 +4019,8 @@ def model_update_continuum_single_field(
 
     This node is intended for the GraphViper append stage following the global
     reduce operation. It receives the globally accumulated continuum image
-    products, determines the model-update parameters using the iteration
-    controller, executes one continuum model-update step, and returns the updated
+    products, determines the model-update parameters with the cycle control
+    functions, executes one continuum model-update step, and returns the updated
     image dataset in memory.
 
     No image or processing-set data are read from or written to disk.
@@ -3983,7 +4033,7 @@ def model_update_continuum_single_field(
             ▼
     model_update_continuum_single_field
             │
-            ├── updates the cycle controller
+            ├── updates the cycle control state
             ├── determines the model-update parameters
             ├── calls model_update_mtmfs_single_field
             ├── updates the continuum sky model
@@ -4023,9 +4073,9 @@ def model_update_continuum_single_field(
         ``is_first_cycle``
             Whether this is the first imaging cycle. Defaults to ``True``.
 
-        ``controller``
-            Existing :class:`CycleController`. If omitted, a new controller is
-            constructed from ``cycle_control_params``.
+        ``cycle_control_state``
+            Existing cycle control state. If omitted, a new one is made from
+            ``cycle_control_params``.
 
         ``image_data_group_in_name``
             Residual image data-group name. Defaults to ``"residual"``.
@@ -4059,8 +4109,8 @@ def model_update_continuum_single_field(
         ``"timing_node_tasks"``
             Timing dataframe including the model-update stage.
 
-        ``"controller"``
-            Updated cycle controller.
+        ``"cycle_control_state"``
+            Updated cycle control state.
 
         ``"residual_converged"``
             True only when refreshed residual statistics confirm a stop,
@@ -4086,12 +4136,18 @@ def model_update_continuum_single_field(
         model_update_mtmfs_single_field,
     )
     from astroviper.processing_functions.imaging.utils import (
-        ImagingDict,
+        check_convergence,
+        check_refreshed_residual_divergence,
         copy_residual_statistics,
+        ensure_planes,
         get_per_cycle_limits,
-        make_continuum_cycle_controller,
+        make_cycle_control_state_from_params,
         merge_imaging_dicts,
+        plane_threshold,
         record_cycle_time,
+        record_model_update,
+        resolve_max_cycles,
+        update_counts,
     )
 
     node_start = time.time()
@@ -4159,11 +4215,11 @@ def model_update_continuum_single_field(
         )
 
     # -------------------------------------------------------------
-    # Obtain the cycle controller.
+    # Obtain the cycle control state.
     # -------------------------------------------------------------
-    controller = input_params.get("controller")
-    if controller is None:
-        controller = make_continuum_cycle_controller(cycle_control_params)
+    cycle_control_state = input_params.get("cycle_control_state")
+    if cycle_control_state is None:
+        cycle_control_state = make_cycle_control_state_from_params(cycle_control_params)
 
     # A fresh map/reduce graph does not contain the preceding append node's
     # convergence history. Accept that persistent state through input_params so
@@ -4174,7 +4230,7 @@ def model_update_continuum_single_field(
     )
 
     if combined_deconvolve_dict is None:
-        combined_deconvolve_dict = ImagingDict()
+        combined_deconvolve_dict = {}
 
     timing = {
         "T_cycle_control": 0.0,
@@ -4186,7 +4242,9 @@ def model_update_continuum_single_field(
     # check consumes neither iterations nor a model-update cycle; a threshold
     # stop reported by the preceding model update may be revoked here.
     start = time.time()
-    controller.ensure_planes(img_xds.sizes["time"], 1, img_xds.sizes["polarization"])
+    ensure_planes(
+        cycle_control_state, img_xds.sizes["time"], 1, img_xds.sizes["polarization"]
+    )
     residual_imaging_dict = build_continuum_residual_imaging_dict(
         img_xds, image_data_group_in_name, cycle_control_params
     )
@@ -4204,7 +4262,9 @@ def model_update_continuum_single_field(
     # another model update. Asp is excluded because a healthy scale change can
     # transiently raise its peak; its own scale-aware safeguards remain active.
     if input_params.get("continuum_mode", "mfs") == "mvc" and deconvolver != "asp":
-        diverged = controller.check_refreshed_residual_divergence(residual_imaging_dict)
+        diverged = check_refreshed_residual_divergence(
+            cycle_control_state, residual_imaging_dict
+        )
         if diverged:
             details = ", ".join(
                 f"(time={idx[0]}, polarization={idx[2]}): {previous:.6g} -> "
@@ -4218,7 +4278,7 @@ def model_update_continuum_single_field(
                 "converged solution; the resulting image is not scientifically "
                 "usable."
             )
-    if controller.max_cycles == "auto":
+    if cycle_control_state["max_cycles"] == "auto":
         import numpy as np
 
         from astroviper.processing_functions.imaging.weight_statistics import (
@@ -4227,7 +4287,7 @@ def model_update_continuum_single_field(
 
         sensitivity = None
         if any(
-            controller._plane_threshold(pol) <= 0
+            plane_threshold(cycle_control_state, pol) <= 0
             for pol in range(img_xds.sizes["polarization"])
         ):
             if "auto_weight_sums" not in input_data:
@@ -4240,9 +4300,11 @@ def model_update_continuum_single_field(
                 ),
                 (img_xds.sizes["time"], 1, img_xds.sizes["polarization"]),
             )
-        controller.resolve_max_cycles(residual_imaging_dict, sensitivity=sensitivity)
+        resolve_max_cycles(
+            cycle_control_state, residual_imaging_dict, sensitivity=sensitivity
+        )
 
-    stopcode, stopdesc = controller.check_convergence(residual_imaging_dict)
+    stopcode, stopdesc = check_convergence(cycle_control_state, residual_imaging_dict)
     if stopcode.imaging != 0:
         # No processing-function update follows convergence. Validate the
         # actual final products here, with the same content-verified cache.
@@ -4284,7 +4346,7 @@ def model_update_continuum_single_field(
                     {key: [value] for key, value in timing.items()}
                 ),
                 "deconvolution": combined_deconvolve_dict,
-                "controller": controller,
+                "cycle_control_state": cycle_control_state,
                 "stopcode": stopcode,
                 "stopdesc": stopdesc,
                 "residual_statistics": residual_imaging_dict,
@@ -4297,7 +4359,7 @@ def model_update_continuum_single_field(
     # Reuse the shared controls with fresh statistics on every cycle, rather
     # than using the preceding approximate model-update residual history.
     max_iter_per_cycle_updated, threshold_per_cycle = get_per_cycle_limits(
-        controller, residual_imaging_dict
+        cycle_control_state, residual_imaging_dict
     )
 
     timing["T_cycle_control"] = time.time() - start
@@ -4356,8 +4418,8 @@ def model_update_continuum_single_field(
     # The model update decides nothing: its iterations, its stop code and the
     # no progress and divergence runs are booked for the stop test on the next
     # refreshed residual. stopcode and stopdesc stay those of the check above.
-    controller.update_counts(deconvolve_dict)
-    controller.record_model_update(deconvolve_dict)
+    update_counts(cycle_control_state, deconvolve_dict)
+    record_model_update(cycle_control_state, deconvolve_dict)
 
     combined_deconvolve_dict = merge_imaging_dicts(
         [
@@ -4395,7 +4457,7 @@ def model_update_continuum_single_field(
             "deconvolution": combined_deconvolve_dict,
             "residual_converged": False,
             "residual_statistics": residual_imaging_dict,
-            "controller": controller,
+            "cycle_control_state": cycle_control_state,
             "stopcode": stopcode,
             "stopdesc": stopdesc,
             "is_first_cycle": False,

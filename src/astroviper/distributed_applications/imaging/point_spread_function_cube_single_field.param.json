@@ -23,6 +23,11 @@
         "compute_backend": { "type": ["str"], "allowed": ["dask", "mpi"] },
         "io_engine": { "type": ["str"], "allowed": ["chunk", "xradio"] },
         "output_image_format": { "type": ["str"], "allowed": ["zarr", "fits"] },
-        "mpi_cluster_setup": { "type": ["dict"], "nullable": true }
+        "fft_backend": { "type": ["str"], "allowed": ["numpy", "pyfftw", "scipy"] },
+        "mpi_cluster_setup": { "type": ["dict"], "nullable": true },
+        "gridder": {
+            "type": ["str"],
+            "allowed": ["anti_alias", "direct_fourier_transform"]
+        }
     }
 }

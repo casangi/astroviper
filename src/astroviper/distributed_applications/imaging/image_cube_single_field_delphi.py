@@ -76,6 +76,7 @@ def image_cube_single_field_delphi(
     compute_backend: str = "dask",
     mpi_cluster_setup: dict[str, Any] | None = None,
     processing_function_threads: int = 1,
+    fft_backend: str = "pyfftw",
     *,
     input_checked=False,
 ) -> dict:
@@ -190,7 +191,23 @@ def image_cube_single_field_delphi(
         :func:`~astroviper.distributed_applications.imaging.image_cube_single_field.image_cube_single_field`).
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
-        kernels.
+        kernels. A distributed application resolves ``0`` (auto) once, before
+        its checks, to the CPUs per Dask worker thread of the host with the
+        fewest, at least 1 (1 where these are not known, as under MPI), and
+        warns when a host's worker threads times the count exceed its CPUs
+        (see
+        :func:`~astroviper.utils.data_partitioning.resolve_processing_function_threads`).
+        Node tasks and processing functions do not resolve ``0``; those that
+        check the count refuse it. Given a count below 1, a C++ kernel and the
+        PSF fit run one thread, and the Python FFTs pass the count to scipy.fft
+        and pyfftw, whose scipy interfaces refuse ``0`` and read a negative
+        ``n`` (down to ``-os.cpu_count()``) as ``os.cpu_count() + 1 + n``.
+        numpy.fft takes no count: under ``"numpy"`` the Python FFTs run one
+        thread.
+    fft_backend : {"numpy", "scipy", "pyfftw"}, default "pyfftw"
+        FFT library: ``"numpy"`` (``numpy.fft``), ``"scipy"`` (``scipy.fft``) or
+        ``"pyfftw"`` (FFTW through pyFFTW). The three round differently; the C++
+        kernels' FFTs do not use it.
 
     input_checked : bool, optional
         Skip configuration checks already performed by the calling layer.
@@ -208,7 +225,8 @@ def image_cube_single_field_delphi(
         (``frequency_refit``, ``minor_axis_estimate``, ``cell_size_refit``,
         ``image_size_refit`` and the Stokes I ``beam_fit_params_refit``) and
         the derived geometry}, "provenance": {"astroviper": version,
-        "delphi_inputs": {the arguments of this call}}}``. Otherwise the result
+        "delphi_inputs": {the arguments of this call, with
+        processing_function_threads as resolved}}}``. Otherwise the result
         of :func:`~astroviper.distributed_applications.imaging.image_cube_single_field.image_cube_single_field`
         with the parameters added under ``"parameters"``.
 
@@ -221,6 +239,12 @@ def image_cube_single_field_delphi(
         robust when ``robust`` is ``None``), correlations the imager cannot
         image, or refits of the PSF that give no plausible minor axis.
     """
+    from astroviper.utils.data_partitioning import resolve_processing_function_threads
+
+    processing_function_threads = resolve_processing_function_threads(
+        processing_function_threads, compute_backend
+    )
+
     if not input_checked:
         from astroviper.processing_functions.imaging.config_check import (
             CUBE_SINGLE_FIELD,
@@ -314,6 +338,7 @@ def image_cube_single_field_delphi(
         "primary_beam_params": primary_beam_params,
         "psf_fitting_method": PSF_FITTING_METHOD,
         "processing_function_threads": processing_function_threads,
+        "fft_backend": fft_backend,
         "compute_backend": compute_backend,
     }
     # graphviper arms teardown_force_exit_seconds at the end of a compute and
@@ -418,6 +443,7 @@ def image_cube_single_field_delphi(
         image_data_variables_keep=IMAGE_DATA_VARIABLES_KEEP,
         processing_set_data_group_name=processing_set_data_group_name,
         processing_function_threads=processing_function_threads,
+        fft_backend=fft_backend,
         n_mapping_parallelism=n_mapping_parallelism,
         overwrite=overwrite,
         restore=True,

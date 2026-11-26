@@ -53,7 +53,7 @@ import numpy as np
 
 from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_exponential_semicircle import (
     ALIASING_ERROR_FLOOR,
-    aliasing_error,
+    _max_aliasing_error,
 )
 
 
@@ -240,15 +240,6 @@ def generalized_prolate_spheroidal_transform(x, support, c, alpha, n_quadrature=
     return support * (np.cos(phase) @ weighted)
 
 
-def _max_aliasing_error(params, support, x):
-    c, alpha = params
-
-    def transform(pos):
-        return generalized_prolate_spheroidal_transform(pos, support, c, alpha)
-
-    return float(np.max(aliasing_error(transform, x)))
-
-
 def nominal_bandwidth(support, x0):
     """The bandwidth that puts the first alias at the edge of the band.
 
@@ -318,7 +309,9 @@ def _optimize_generalized_prolate_spheroidal(support, x0, n_x):
         ratio, alpha = params
         if not (0.5 <= ratio <= 1.5 and 0.0 <= alpha <= 3.0):
             return np.log(10.0)
-        error = _max_aliasing_error((ratio * c0, alpha), support, x)
+        error = _max_aliasing_error(
+            generalized_prolate_spheroidal_transform, (ratio * c0, alpha), support, x
+        )
         return np.log(max(error, ALIASING_ERROR_FLOOR))
 
     coarse_x = np.linspace(0.0, x0, 65)
@@ -341,7 +334,12 @@ def _optimize_generalized_prolate_spheroidal(support, x0, n_x):
         (float(ratio) * c0, float(alpha)) for ratio, alpha in (start, result.x)
     ]
     errors = [
-        max(_max_aliasing_error(params, support, x), ALIASING_ERROR_FLOOR)
+        max(
+            _max_aliasing_error(
+                generalized_prolate_spheroidal_transform, params, support, x
+            ),
+            ALIASING_ERROR_FLOOR,
+        )
         for params in candidates
     ]
     best = int(np.argmin(errors))
@@ -424,7 +422,12 @@ def generalized_prolate_spheroidal_parameters(support, x0):
         c, alpha, _ = optimize_generalized_prolate_spheroidal(support, float(x0))
         c, alpha = round(c, 4), round(alpha, 4)
     x = np.linspace(0.0, x0, 129)
-    error = max(_max_aliasing_error((c, alpha), support, x), ALIASING_ERROR_FLOOR)
+    error = max(
+        _max_aliasing_error(
+            generalized_prolate_spheroidal_transform, (c, alpha), support, x
+        ),
+        ALIASING_ERROR_FLOOR,
+    )
     return c, alpha, float(error)
 
 
